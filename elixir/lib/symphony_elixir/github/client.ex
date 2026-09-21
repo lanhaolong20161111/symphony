@@ -338,8 +338,8 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp valid_api_url?(_value), do: false
-  defp valid_repo?(repo) when is_binary(repo), do: String.match?(repo, ~r/^[^\s\/]+\/[^\s\/]+$/)
-  defp valid_repo?(_repo), do: false
+  # Single clause: the fallback was provably unreachable (the caller checks presence first).
+  defp valid_repo?(repo), do: is_binary(repo) and String.match?(repo, ~r/^[^\s\/]+\/[^\s\/]+$/)
 
   defp repository_issues_path(settings), do: "/repos/#{encoded_repo(settings.repo)}/issues"
 

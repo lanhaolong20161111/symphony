@@ -167,10 +167,11 @@ defmodule SymphonyElixir.Workspace do
   @spec remove_issue_workspaces(term(), worker_host()) :: :ok
   def remove_issue_workspaces(%{id: _issue_id, identifier: _identifier} = issue, worker_host)
       when is_binary(worker_host) do
-    case workspace_path_for_issue(workspace_key(issue), worker_host) do
-      {:ok, workspace} -> remove(workspace, worker_host)
-      {:error, _reason} -> :ok
-    end
+    # The path resolution cannot fail for a binary worker_host (only the nil clause can), so the
+    # checker rejects an {:error, _} -- and even a `_` -- branch here. A hard match keeps that
+    # proof in the code: if it ever stops holding this fails loudly instead of silently.
+    {:ok, workspace} = workspace_path_for_issue(workspace_key(issue), worker_host)
+    remove(workspace, worker_host)
 
     :ok
   end
@@ -180,7 +181,7 @@ defmodule SymphonyElixir.Workspace do
       [] ->
         case workspace_path_for_issue(workspace_key(issue), nil) do
           {:ok, workspace} -> remove(workspace, nil)
-          {:error, _reason} -> :ok
+          _ -> :ok
         end
 
       worker_hosts ->
@@ -191,10 +192,11 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
-    case workspace_path_for_issue(workspace_key(identifier), worker_host) do
-      {:ok, workspace} -> remove(workspace, worker_host)
-      {:error, _reason} -> :ok
-    end
+    # The path resolution cannot fail for a binary worker_host (only the nil clause can), so the
+    # checker rejects an {:error, _} -- and even a `_` -- branch here. A hard match keeps that
+    # proof in the code: if it ever stops holding this fails loudly instead of silently.
+    {:ok, workspace} = workspace_path_for_issue(workspace_key(identifier), worker_host)
+    remove(workspace, worker_host)
 
     :ok
   end
@@ -204,7 +206,7 @@ defmodule SymphonyElixir.Workspace do
       [] ->
         case workspace_path_for_issue(workspace_key(identifier), nil) do
           {:ok, workspace} -> remove(workspace, nil)
-          {:error, _reason} -> :ok
+          _ -> :ok
         end
 
       worker_hosts ->
@@ -246,6 +248,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  # Explicit spec, not inference: without it the checker only sees the second clause returning
+  # {:ok, _}, concludes the callers' {:error, _} branches can never match, and warns about dead
+  # code that is in fact the path-canonicalisation failure path. (Elixir 1.20 type warning.)
+  @spec workspace_path_for_issue(String.t(), String.t() | nil) ::
+          {:ok, Path.t()} | {:error, term()}
   defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
     Config.local_workspace_root()
     |> Path.join(safe_id)

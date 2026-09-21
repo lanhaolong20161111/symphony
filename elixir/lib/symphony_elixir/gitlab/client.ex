@@ -365,11 +365,11 @@ defmodule SymphonyElixir.GitLab.Client do
 
   defp valid_api_url?(_value), do: false
 
-  defp valid_project_path?(value) when is_binary(value) do
-    not String.contains?(value, [" ", "\t", "\n", "\r", <<0>>])
+  # One clause on purpose: the trailing `defp valid_project_path?(_value), do: false` fallback was
+  # provably unreachable (every caller passes a binary), and Elixir 1.20's type checker says so.
+  defp valid_project_path?(value) do
+    is_binary(value) and not String.contains?(value, [" ", "\t", "\n", "\r", <<0>>])
   end
-
-  defp valid_project_path?(_value), do: false
 
   defp project_issues_path(settings), do: "/projects/#{encoded(settings.project_path)}/issues"
 

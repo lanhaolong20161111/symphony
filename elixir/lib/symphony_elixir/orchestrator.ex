@@ -730,8 +730,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_task(_pid, _task_supervisor), do: :ok
-
   defp stop_running_task(pid, ref, task_supervisor) do
     if is_pid(pid) do
       terminate_task(pid, task_supervisor)
