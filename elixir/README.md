@@ -294,6 +294,17 @@ acp:
   13 CommandCode routes were advertised here. A value that is not advertised is rejected.
 - The same route works for any provider the agent already knows (Doubao/Ark, Zhipu, ...), including
   an OpenAI-compatible endpoint you add to its settings yourself.
+- The default `codex` backend can use the same gateway, as a Codex `model_providers` entry. Note that
+  Codex 0.154.0 rejects `wire_api = "chat"` outright (`wire_api = "chat" is no longer supported`),
+  but CommandCode serves the Responses API too, so `wire_api = "responses"` works. Verified with:
+
+  ```console
+  codex exec -c 'model_providers.commandcode.base_url="https://api.commandcode.ai/provider/v1"' \
+             -c 'model_providers.commandcode.wire_api="responses"' \
+             -c 'model_providers.commandcode.env_key="CMD_API_KEY"' \
+             -c 'model_provider="commandcode"' -m deepseek/deepseek-v4-flash "Reply with exactly: hello"
+  # -> hello  (exit 0, "provider: commandcode")
+  ```
 
 Scope of this backend: **local only**. `worker_host` must be nil; a remote host returns
 `{:error, {:unsupported_worker_host, host}}` because the Codex SSH path is intentionally untouched.
