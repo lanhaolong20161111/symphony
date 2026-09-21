@@ -12,6 +12,10 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 
 ## Running Symphony
 
+There is a step-by-step [quickstart](docs/quickstart.md) -- including how to run with **no
+account at all** (a file-backed tracker), how to turn the observability endpoint on, and what to
+check when nothing happens.
+
 ### Requirements
 
 Symphony works best in codebases that have adopted
