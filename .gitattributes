@@ -1,0 +1,11 @@
+# The index and CI are LF. A Windows checkout without this arrives as CRLF, and the formatter
+# plus credo's consistency checks then read untouched files as unformatted.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.ez binary
+*.beam binary
