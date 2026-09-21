@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH, Shell}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, Shell, SSH}
 
   @initialize_id 1
   @thread_start_id 2

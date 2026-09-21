@@ -5,8 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.ACP.AppServer, as: AcpAppServer
-  alias SymphonyElixir.CommandCode.AppServer, as: CommandCodeAppServer
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.CommandCode.AppServer, as: CommandCodeAppServer
   alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 

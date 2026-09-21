@@ -112,8 +112,11 @@ defmodule SymphonyElixir.CommandCode.AppServer do
         }
 
   @typedoc "Injected by tests in place of the real subprocess (`:stream` opt)."
-  @type stream_fun :: ([String.t()], Path.t(), pos_integer(), turn_state(), (turn_state(), String.t() -> turn_state()) ->
-                         {:ok, turn_state(), integer()} | {:error, term()})
+  @type stream_handle :: (turn_state(), String.t() -> turn_state())
+  @type stream_result :: {:ok, turn_state(), integer()} | {:error, term()}
+
+  @type stream_fun ::
+          ([String.t()], Path.t(), pos_integer(), turn_state(), stream_handle() -> stream_result())
 
   @doc """
   Run a single turn with a fresh session (start → turn → stop).
@@ -198,32 +201,33 @@ defmodule SymphonyElixir.CommandCode.AppServer do
 
     emit_message(on_message, :session_started, %{session_id: turn_session_id, turn: turn}, metadata)
 
-    with {:ok, command} <- build_command(prompt, resume_id, cc) do
-      initial = %{
-        turn: turn,
-        turn_session_id: turn_session_id,
-        resume_id: resume_id,
-        session_id: nil,
-        started?: false,
-        usage: nil,
-        stop_reason: nil,
-        subtype: nil,
-        result: nil,
-        diagnostics: []
-      }
+    case build_command(prompt, resume_id, cc) do
+      {:ok, command} ->
+        initial = %{
+          turn: turn,
+          turn_session_id: turn_session_id,
+          resume_id: resume_id,
+          session_id: nil,
+          started?: false,
+          usage: nil,
+          stop_reason: nil,
+          subtype: nil,
+          result: nil,
+          diagnostics: []
+        }
 
-      stream = Keyword.get(opts, :stream, &stream_port/5)
-      handle = fn state, line -> handle_line(state, line, on_message, metadata) end
+        stream = Keyword.get(opts, :stream, &stream_port/5)
+        handle = fn state, line -> handle_line(state, line, on_message, metadata) end
 
-      case stream.(command, session.workspace, turn_timeout_ms(), initial, handle) do
-        {:ok, state, exit_code} ->
-          finish_turn(session, state, exit_code, on_message, metadata, issue)
+        case stream.(command, session.workspace, turn_timeout_ms(), initial, handle) do
+          {:ok, state, exit_code} ->
+            finish_turn(session, state, exit_code, on_message, metadata, issue)
 
-        {:error, reason} ->
-          emit_turn_error(on_message, metadata, turn_session_id, reason, issue)
-          {:error, reason}
-      end
-    else
+          {:error, reason} ->
+            emit_turn_error(on_message, metadata, turn_session_id, reason, issue)
+            {:error, reason}
+        end
+
       {:error, reason} ->
         emit_turn_error(on_message, metadata, turn_session_id, reason, issue)
         {:error, reason}
@@ -379,11 +383,10 @@ defmodule SymphonyElixir.CommandCode.AppServer do
 
   defp tool_result_text(result) when is_list(result) do
     result
-    |> Enum.map(fn
+    |> Enum.map_join("\n", fn
       %{"text" => text} when is_binary(text) -> text
       other -> inspect(other)
     end)
-    |> Enum.join("\n")
   end
 
   defp tool_result_text(_result), do: ""

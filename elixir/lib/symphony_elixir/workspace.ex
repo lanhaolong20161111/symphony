@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH, Shell}
+  alias SymphonyElixir.{Config, PathSafety, Shell, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 

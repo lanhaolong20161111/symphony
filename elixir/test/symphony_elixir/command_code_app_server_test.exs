@@ -27,7 +27,16 @@ defmodule SymphonyElixir.CommandCode.AppServerTest do
   @run_end ~s({"type":"event","event":{"type":"run_end","result":{"finalText":"ok","stopReason":"end_turn","turnCount":1,"usage":) <> @usage <> ~s(}}})
   @result_line ~s({"type":"result","subtype":"success","sessionId":"cmd-sess-1","stopReason":"end_turn","usage":) <> @usage <> ~s(,"durationMs":3076,"finalText":"ok"})
 
-  @happy_lines [@run_start, @thinking_delta, @text_delta, @message_update, @message_end, @model_request_end, @run_end, @result_line]
+  @happy_lines [
+    @run_start,
+    @thinking_delta,
+    @text_delta,
+    @message_update,
+    @message_end,
+    @model_request_end,
+    @run_end,
+    @result_line
+  ]
 
   describe "backend selection" do
     test "the default backend is still the Codex app-server" do
