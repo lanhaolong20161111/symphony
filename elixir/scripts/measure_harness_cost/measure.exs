@@ -129,7 +129,7 @@ defmodule MeasureHarnessCost do
     case backend.start_session(ws) do
       {:ok, session} ->
         try do
-          loop(backend, session, issue, 1, [], [])
+          loop(backend, session, issue, 1, [], [], ws)
         after
           backend.stop_session(session)
         end
@@ -139,7 +139,7 @@ defmodule MeasureHarnessCost do
     end
   end
 
-  defp loop(backend, session, issue, turn, results, messages) do
+  defp loop(backend, session, issue, turn, results, messages, ws) do
     prompt = if turn == 1, do: config().prompt, else: config().continue_prompt
     parent = self()
 
@@ -151,15 +151,15 @@ defmodule MeasureHarnessCost do
 
     done? =
       case result do
-        {:ok, _} -> turn >= config().max_turns or verify_passed?()
+        {:ok, _} -> turn >= config().max_turns or verify_passed?(ws)
         _ -> true
       end
 
-    if done?, do: {turn, results, messages}, else: loop(backend, session, issue, turn + 1, results, messages)
+    if done?, do: {turn, results, messages}, else: loop(backend, session, issue, turn + 1, results, messages, ws)
   end
 
-  defp verify_passed? do
-    case run_shell(config().verify, nil) do
+  defp verify_passed?(ws) do
+    case run_shell(config().verify, ws) do
       nil -> true
       {0, _out} -> true
       _ -> false
