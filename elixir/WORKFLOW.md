@@ -1,20 +1,34 @@
 ---
 tracker:
-  kind: linear
+  kind: github
+  # GitHub Issues. `repo` is owner/name; the token is read from the environment
+  # (GITHUB_TOKEN, or GH_TOKEN / GITHUB_ENTERPRISE_TOKEN), so no secret lives in this file.
+  # GitHub's own states are open/closed -- the tracker validates that these are a subset of
+  # ["open"] / ["closed"], so do not invent workflow states here (Linear's Todo/Doing/Done do not
+  # exist in this adapter).
   provider:
-    project_slug: "symphony-0c79b11b75ea"
+    repo: lanhaolong20161111/beekeeper
   required_labels: []
   active_states:
-    - Todo
-    - In Progress
-    - Merging
-    - Rework
+    - open
   terminal_states:
-    - Closed
-    - Cancelled
-    - Canceled
-    - Duplicate
-    - Done
+    - closed
+# ── Fallback tracker: local files, no account, no token, no network ──
+#    Replace `tracker.kind: github` above with `file` when there is no Linear/GitHub to point at,
+#    or when you want to drive Symphony against a hand-written backlog. A working starting point
+#    ships in `examples/file-tracker/tickets/` -- copy it, point `path` at the copy.
+#
+#    One file per ticket: Markdown with YAML front matter, and the body becomes the issue
+#    description. Move work along by editing `state:` (an agent can do that itself). A `.md` file
+#    without front matter is ignored, so a README can live beside the tickets; a ticket carrying
+#    `blocked_by:` is held back (visible as blocked) rather than silently dropped.
+# tracker:
+#   kind: file
+#   provider:
+#     path: examples/file-tracker/tickets
+#   required_labels: []
+#   active_states: [open, ready]
+#   terminal_states: [done, cancelled]
 polling:
   interval_ms: 5000
 workspace:
