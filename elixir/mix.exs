@@ -25,6 +25,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRunner,
           SymphonyElixir.Application,
           SymphonyElixir.CLI,
+          SymphonyElixir.ACP.AppServer,
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.HttpServer,
@@ -69,6 +70,10 @@ defmodule SymphonyElixir.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      # Zero-dependency ACP (Agent Client Protocol) client SDK. Required by
+      # `SymphonyElixir.ACP.AppServer`, which drives non-Codex coding agents (DSH, WorkBuddy).
+      # Path dep because the SDK is developed alongside Symphony in this workspace.
+      {:acp_sdk, path: "../../elixir_acp_sdk"},
       {:bandit, "~> 1.8"},
       {:floki, ">= 0.30.0", only: :test},
       {:lazy_html, ">= 0.1.0", only: :test},

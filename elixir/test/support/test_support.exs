@@ -103,6 +103,7 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          agent_backend: "codex",
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
@@ -114,6 +115,12 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          acp_adapter: "dsh",
+          acp_command: [],
+          acp_cli_path: nil,
+          acp_model: nil,
+          acp_init_timeout_ms: 60_000,
+          acp_turn_timeout_ms: 3_600_000,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -141,6 +148,7 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    agent_backend = Keyword.get(config, :agent_backend)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -152,6 +160,12 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    acp_adapter = Keyword.get(config, :acp_adapter)
+    acp_command = Keyword.get(config, :acp_command)
+    acp_cli_path = Keyword.get(config, :acp_cli_path)
+    acp_model = Keyword.get(config, :acp_model)
+    acp_init_timeout_ms = Keyword.get(config, :acp_init_timeout_ms)
+    acp_turn_timeout_ms = Keyword.get(config, :acp_turn_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -182,6 +196,7 @@ defmodule SymphonyElixir.TestSupport do
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
+        "  backend: #{yaml_value(agent_backend)}",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
@@ -194,6 +209,7 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        acp_yaml(acp_adapter, acp_command, acp_cli_path, acp_model, acp_init_timeout_ms, acp_turn_timeout_ms),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
@@ -206,7 +222,15 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    # Backslashes must be escaped: a Windows path in a YAML double-quoted scalar is otherwise
+    # read as escapes (`C:\Users\...` has `\U`, which some parsers turn into U+2028), silently
+    # corrupting the value on the way back in.
+    body =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
+    "\"" <> body <> "\""
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
@@ -252,6 +276,20 @@ defmodule SymphonyElixir.TestSupport do
       ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
       !is_nil(max_concurrent_agents_per_host) &&
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp acp_yaml(adapter, command, cli_path, model, init_timeout_ms, turn_timeout_ms) do
+    [
+      "acp:",
+      "  adapter: #{yaml_value(adapter)}",
+      command not in [nil, []] && "  command: #{yaml_value(command)}",
+      !is_nil(cli_path) && "  cli_path: #{yaml_value(cli_path)}",
+      !is_nil(model) && "  model: #{yaml_value(model)}",
+      "  init_timeout_ms: #{yaml_value(init_timeout_ms)}",
+      "  turn_timeout_ms: #{yaml_value(turn_timeout_ms)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

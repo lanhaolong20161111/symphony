@@ -4,6 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.ACP.AppServer, as: AcpAppServer
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
@@ -88,12 +89,13 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
+    backend = agent_backend()
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- backend.start_session(workspace, worker_host: worker_host) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
-        AppServer.stop_session(session)
+        backend.stop_session(session)
       end
     end
   end
@@ -102,7 +104,7 @@ defmodule SymphonyElixir.AgentRunner do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           agent_backend().run_turn(
              app_session,
              prompt,
              issue,
@@ -183,6 +185,18 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
+  end
+
+  # The single selection point between coding-agent backends. `agent.backend` is validated by
+  # `SymphonyElixir.Config.Schema.Agent` to be "codex" or "acp"; anything else falls back to the
+  # Codex app-server so an unexpected value can never silently disable agent execution.
+  @doc false
+  @spec agent_backend() :: module()
+  def agent_backend do
+    case Config.settings!().agent.backend do
+      "acp" -> AcpAppServer
+      _ -> AppServer
+    end
   end
 
   defp selected_worker_host(nil, []), do: nil

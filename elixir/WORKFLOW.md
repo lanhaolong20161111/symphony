@@ -30,6 +30,7 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  backend: codex
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
@@ -37,6 +38,14 @@ codex:
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+# Only read when `agent.backend: acp`; ignored on the default Codex path.
+# adapter: "dsh" (default) or "workbuddy"; command defaults to the adapter's own argv;
+# cli_path points at the agent's node entry point; model must be a value the agent
+# advertised in `session/new` configOptions.
+acp:
+  adapter: dsh
+  init_timeout_ms: 60000
+  turn_timeout_ms: 3600000
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

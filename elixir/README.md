@@ -206,6 +206,99 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+### Other coding-agent backends (ACP)
+
+`agent.backend` picks which coding agent runs the turns. The default, `codex`, is unchanged. Setting
+it to `acp` swaps in `SymphonyElixir.ACP.AppServer`, which drives any
+[ACP](https://agentclientprotocol.com) agent over the [`acp_sdk`](../../elixir_acp_sdk) client SDK.
+The message contract (`:session_started`, `:turn_ended_with_error`, ...), the workspace safety check,
+and the orchestrator are all identical on both paths — nothing else in the workflow file changes.
+
+```yaml
+agent:
+  backend: acp          # "codex" (default) | "acp"
+acp:
+  adapter: dsh          # "dsh" | "workbuddy"
+  command: []           # optional explicit argv; [] = use the adapter default
+  cli_path: null        # node entry point for the adapter (see below)
+  model: null           # passed to session/set_config_option("model", value)
+  init_timeout_ms: 60000
+  turn_timeout_ms: 3600000
+```
+
+| Key | Meaning |
+|---|---|
+| `agent.backend` | `codex` (default) or `acp`. Anything else fails config validation. |
+| `acp.adapter` | `dsh` (DeepSeek Harness) or `workbuddy` (WorkBuddy / CodeBuddy). |
+| `acp.command` | Explicit argv list. When empty the adapter's own default command is used. |
+| `acp.cli_path` | Path to the adapter's node entry point. **Required in practice for WorkBuddy.** |
+| `acp.model` | Applied after the handshake via `session/set_config_option`. Must be a value the agent advertised in `session/new`'s `configOptions`, otherwise the agent rejects it with `-32602`. |
+| `acp.init_timeout_ms` | Handshake timeout. Raise it for slow cold starts. |
+| `acp.turn_timeout_ms` | Max silence while a turn streams; on expiry the turn is cancelled. |
+
+DSH:
+
+```yaml
+agent:
+  backend: acp
+acp:
+  adapter: dsh
+  # Either put `dsh` on PATH and leave this empty, or point at the node entry point directly:
+  # cli_path: "C:/Users/me/AppData/Local/npm-cache/_npx/<hash>/node_modules/@deepseek-ai/dsh/lib/bin.js"
+  model: '["doubao-ark","glm-5-3-flash-260828"]'
+```
+
+- `cli_path` builds `["node", "<cli_path>", "--profile", "acp"]`; without it the command is
+  `["dsh", "--profile", "acp"]` (the npm `.cmd` shim works, but calling the node entry point
+  directly starts roughly 10x faster).
+- DSH's `session/new` accepts **only** `cwd` + `mcpServers`; extra keys are rejected with `-32602`.
+- `acp.model` is mandatory in practice: the profile's default provider route fails the first prompt
+  with `-32603` when it has no API key. The value is a JSON string exactly as DSH advertises it in
+  `session/new` → `configOptions[].options[].value`.
+
+WorkBuddy:
+
+```yaml
+agent:
+  backend: acp
+acp:
+  adapter: workbuddy
+  cli_path: "F:/workbuddy/resources/app.asar.unpacked/cli/dist/codebuddy-headless.js"
+```
+
+- `cli_path` is required — the headless entry point is packed inside the app and its location is
+  machine-specific. It builds
+  `["node", <cli_path>, "--acp", "--acp-transport", "stdio", "--permission-mode", "acceptEdits"]`.
+- The CLI must already be logged in (run `/login` once). Otherwise `session/new` still succeeds and
+  the turn finishes with `stopReason: "refusal"` — that is the environment, not a Symphony error.
+
+CommandCode, and every other gateway model: **no new backend is needed.** CommandCode ships no
+coding-agent protocol — `command-code --help` (v1.56.0) offers `-p` one-shot output and `cmd mcp`
+as an MCP *client*, no ACP/app-server mode. What it ships is a provider API
+(`https://api.commandcode.ai/provider/v1`, OpenAI-compatible `/chat/completions`), so it is a
+**model route**, not an agent. Register it as a provider in the agent's own settings
+(`~/.dsh/settings.yaml`) and then just select the route the agent advertises:
+
+```yaml
+agent:
+  backend: acp
+acp:
+  adapter: dsh
+  model: '["commandcode","deepseek/deepseek-v4-flash"]'
+```
+
+- Verified end to end on this machine: the turn ran on that route (`stopReason: "end_turn"`, reply
+  `你好`), the agent's own system prompt reported `powered by the deepseek/deepseek-v4-flash model`,
+  and the recorder read the session back as `models = ["commandcode/deepseek/deepseek-v4-flash"]`.
+- Ask the agent for its route list (`session/new` → `configOptions`) instead of hardcoding values;
+  13 CommandCode routes were advertised here. A value that is not advertised is rejected.
+- The same route works for any provider the agent already knows (Doubao/Ark, Zhipu, ...), including
+  an OpenAI-compatible endpoint you add to its settings yourself.
+
+Scope of this backend: **local only**. `worker_host` must be nil; a remote host returns
+`{:error, {:unsupported_worker_host, host}}` because the Codex SSH path is intentionally untouched.
+Tracker/MCP tool parity for ACP agents is not implemented yet.
+
 ### Linear adapter profile
 
 - Config: use `tracker.kind: linear` with `tracker.provider.endpoint` (default
@@ -306,6 +399,7 @@ The observability UI now runs on a minimal Phoenix stack:
 ## Project Layout
 
 - `lib/`: application code and Mix tasks
+- `lib/symphony_elixir/acp/`: the ACP backend for non-Codex agents (`agent.backend: acp`)
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
 - `../.codex/`: repository-local Codex skills and setup helpers
