@@ -188,9 +188,18 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:command, :string, default: "codex app-server")
 
+      # codex 0.154.0 renamed this tagged variant: the old `reject` tag is gone and the
+      # app-server answers `-32600 unknown variant \`reject\`, expected one of
+      # untrusted | on-request | granular | never`. The inner shape and its meaning ("reject
+      # these approval categories outright") are unchanged, so `granular` is the
+      # semantics-preserving rename — verified against a real `codex app-server` on 2026-09-21
+      # (both `granular` and the string `never` are accepted).
+      #
+      # Do **not** "simplify" this to `"never"`: that means *never ask for approval*, i.e. let the
+      # agent proceed — the opposite of this fail-closed default.
       field(:approval_policy, StringOrMap,
         default: %{
-          "reject" => %{
+          "granular" => %{
             "sandbox_approval" => true,
             "rules" => true,
             "mcp_elicitations" => true

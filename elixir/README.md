@@ -156,7 +156,9 @@ Notes:
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
 - Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+  - `codex.approval_policy` defaults to `{"granular":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+    (codex 0.154.0 renamed the old `reject` tag to `granular` and rejects the former with
+    `-32600 unknown variant`; the nested shape and its meaning are unchanged)
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each

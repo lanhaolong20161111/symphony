@@ -1017,7 +1017,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
-             "reject" => %{
+             "granular" => %{
                "sandbox_approval" => true,
                "rules" => true,
                "mcp_elicitations" => true
