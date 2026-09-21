@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH, Shell}
 
   @initialize_id 1
   @thread_start_id 2
@@ -190,7 +190,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, nil, dynamic_tool_binding) do
-    executable = System.find_executable("bash")
+    # `Shell.find_bash/0` rather than `System.find_executable("bash")`: on Windows the latter finds
+    # WSL's bash, which cannot run a Windows launch command (it exits 127 on `codex`).
+    executable = Shell.find_bash()
 
     if is_nil(executable) do
       {:error, :bash_not_found}
@@ -221,7 +223,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp local_launch_command(dynamic_tool_binding) do
     [
       tracker_secret_unset_command(dynamic_tool_binding),
-      "exec #{Config.settings!().codex.command}"
+      # `Shell.normalize_paths/1`: this string is a bash *script*, so a Windows path inside the
+      # configured command would lose its backslashes and the child would die with exit 127.
+      "exec #{Shell.normalize_paths(Config.settings!().codex.command)}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" && ")

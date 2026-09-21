@@ -354,6 +354,12 @@ defmodule SymphonyElixir.TestSupport do
   defp hook_entry(_name, nil), do: nil
 
   defp hook_entry(name, command) when is_binary(command) do
+    # Hooks are shell scripts, so the paths embedded in them must be shell paths: on Windows
+    # `Path.join/2` produces `C:\...`, and a POSIX shell eats the backslashes (`\U`, `\l`, ...)
+    # so `cp C:\...\README.md` becomes `cp C:...README.md`. Forward slashes are what a Windows
+    # shell script should carry anyway, and they are identical on POSIX.
+    command = String.replace(command, "\\", "/")
+
     indented =
       command
       |> String.split("\n")

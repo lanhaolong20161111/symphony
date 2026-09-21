@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, PathSafety, SSH, Shell}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -401,7 +401,9 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        # Resolve the shell explicitly: a bare `"sh"` is not on the Windows PATH, and the `bash`
+        # that *is* on it is WSL's, which cannot run these hook scripts.
+        System.cmd(Shell.find_sh() || "sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
       end)
 
     case Task.yield(task, timeout_ms) do
