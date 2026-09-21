@@ -147,7 +147,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     alias SymphonyElixir.Config.Schema
 
-    @backends ["codex", "acp"]
+    @backends ["codex", "acp", "commandcode"]
 
     @primary_key false
     embedded_schema do
@@ -270,6 +270,33 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule CommandCode do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Explicit argv. When empty, the backend builds `["command-code", ...]` (or
+      # `["node", cli_path, ...]` when `cli_path` is set).
+      field(:command, {:array, :string}, default: [])
+      # The `command-code/dist/index.mjs` entry point — skips the npm shim layer.
+      field(:cli_path, :string)
+      field(:model, :string)
+      field(:effort, :string)
+      # Escape hatch appended verbatim before `-p <prompt>` (e.g. `["--max-turns", "50"]`).
+      field(:extra_args, {:array, :string}, default: [])
+      field(:turn_timeout_ms, :integer, default: 3_600_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :cli_path, :model, :effort, :extra_args, :turn_timeout_ms], empty_values: [])
+      |> validate_number(:turn_timeout_ms, greater_than: 0)
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -340,6 +367,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:acp, Acp, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:commandcode, CommandCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -435,6 +463,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:acp, with: &Acp.changeset/2)
+    |> cast_embed(:commandcode, with: &CommandCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

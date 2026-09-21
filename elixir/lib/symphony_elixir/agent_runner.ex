@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.ACP.AppServer, as: AcpAppServer
+  alias SymphonyElixir.CommandCode.AppServer, as: CommandCodeAppServer
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
@@ -195,6 +196,7 @@ defmodule SymphonyElixir.AgentRunner do
   def agent_backend do
     case Config.settings!().agent.backend do
       "acp" -> AcpAppServer
+      "commandcode" -> CommandCodeAppServer
       _ -> AppServer
     end
   end

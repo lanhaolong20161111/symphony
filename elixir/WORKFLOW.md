@@ -32,12 +32,26 @@ agent:
   max_turns: 20
   backend: codex
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  # This installation points Codex at the CommandCode gateway.
+  # ⚠️ `codex --profile <name>` does NOT apply to `app-server` (codex rejects it: "--profile only
+  #    applies to runtime commands and `codex mcp`"), so the provider is pinned with --config here.
+  # ⚠️ Model names are gateway-specific: `gpt-5.5` returns 403 MODEL_NOT_IN_PLAN on CommandCode.
+  #    The 49 usable CommandCode ids are listed in ~/.dsh/settings.yaml under
+  #    llm-pi-ai.providers.commandcode.models — e.g. deepseek/deepseek-v4.1-flash,
+  #    deepseek/deepseek-v4-flash, moonshotai/Kimi-K3, zai-org/GLM-5.3, xai/grok-4.6.
+  command: codex --config shell_environment_policy.inherit=all --config model_provider=commandcode --config 'model="deepseek/deepseek-v4.1-flash"' --config model_reasoning_effort=high app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+# ── Alternative: skip Codex entirely and let CommandCode drive its own harness (`cmd -p`) ──
+#    Set `agent.backend: commandcode` and uncomment the block below. Note the cost trade-off:
+#    codex's prompt prefix caches at ~98% while `cmd`'s first request only caches ~32%.
+# commandcode:
+#   cli_path: "C:/Users/lhl20/AppData/Roaming/npm/node_modules/command-code/dist/index.mjs"
+#   model: deepseek/deepseek-v4.1-flash
+#   turn_timeout_ms: 3600000
 # Only read when `agent.backend: acp`; ignored on the default Codex path.
 # adapter: "dsh" (default) or "workbuddy"; command defaults to the adapter's own argv;
 # cli_path points at the agent's node entry point; model must be a value the agent

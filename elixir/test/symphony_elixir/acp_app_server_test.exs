@@ -112,7 +112,7 @@ defmodule SymphonyElixir.ACP.AppServerTest do
     end
 
     test "the schema accepts the acp backend and rejects anything else" do
-      assert Schema.Agent.backends() == ["codex", "acp"]
+      assert Schema.Agent.backends() == ["codex", "acp", "commandcode"]
       assert Schema.Acp.adapters() == ["dsh", "workbuddy"]
 
       assert %{backend: "acp"} =

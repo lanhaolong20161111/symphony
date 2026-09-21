@@ -121,6 +121,12 @@ defmodule SymphonyElixir.TestSupport do
           acp_model: nil,
           acp_init_timeout_ms: 60_000,
           acp_turn_timeout_ms: 3_600_000,
+          commandcode_command: [],
+          commandcode_cli_path: nil,
+          commandcode_model: nil,
+          commandcode_effort: nil,
+          commandcode_extra_args: [],
+          commandcode_turn_timeout_ms: 3_600_000,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -166,6 +172,12 @@ defmodule SymphonyElixir.TestSupport do
     acp_model = Keyword.get(config, :acp_model)
     acp_init_timeout_ms = Keyword.get(config, :acp_init_timeout_ms)
     acp_turn_timeout_ms = Keyword.get(config, :acp_turn_timeout_ms)
+    commandcode_command = Keyword.get(config, :commandcode_command)
+    commandcode_cli_path = Keyword.get(config, :commandcode_cli_path)
+    commandcode_model = Keyword.get(config, :commandcode_model)
+    commandcode_effort = Keyword.get(config, :commandcode_effort)
+    commandcode_extra_args = Keyword.get(config, :commandcode_extra_args)
+    commandcode_turn_timeout_ms = Keyword.get(config, :commandcode_turn_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -210,6 +222,14 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         acp_yaml(acp_adapter, acp_command, acp_cli_path, acp_model, acp_init_timeout_ms, acp_turn_timeout_ms),
+        commandcode_yaml(
+          commandcode_command,
+          commandcode_cli_path,
+          commandcode_model,
+          commandcode_effort,
+          commandcode_extra_args,
+          commandcode_turn_timeout_ms
+        ),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
@@ -289,6 +309,20 @@ defmodule SymphonyElixir.TestSupport do
       !is_nil(cli_path) && "  cli_path: #{yaml_value(cli_path)}",
       !is_nil(model) && "  model: #{yaml_value(model)}",
       "  init_timeout_ms: #{yaml_value(init_timeout_ms)}",
+      "  turn_timeout_ms: #{yaml_value(turn_timeout_ms)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp commandcode_yaml(command, cli_path, model, effort, extra_args, turn_timeout_ms) do
+    [
+      "commandcode:",
+      command not in [nil, []] && "  command: #{yaml_value(command)}",
+      !is_nil(cli_path) && "  cli_path: #{yaml_value(cli_path)}",
+      !is_nil(model) && "  model: #{yaml_value(model)}",
+      !is_nil(effort) && "  effort: #{yaml_value(effort)}",
+      extra_args not in [nil, []] && "  extra_args: #{yaml_value(extra_args)}",
       "  turn_timeout_ms: #{yaml_value(turn_timeout_ms)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
