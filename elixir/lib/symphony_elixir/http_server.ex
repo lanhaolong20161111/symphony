@@ -28,7 +28,7 @@ defmodule SymphonyElixir.HttpServer do
           endpoint_opts = [
             server: true,
             http: [ip: ip, port: port],
-            url: [host: normalize_host(host)],
+            url: [host: normalize_host(host), path: url_path()],
             orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base()
@@ -40,11 +40,34 @@ defmodule SymphonyElixir.HttpServer do
             |> Keyword.merge(endpoint_opts)
 
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
+          # The layout embeds this so the console client asks for the socket under the same prefix
+          # the pages are served from; empty (the default) keeps the upstream behaviour.
+          Application.put_env(:symphony_elixir, :url_path, url_path())
           Endpoint.start_link()
         end
 
-      _ ->
+      other ->
+        # The observability endpoint is opt-in: `server.port` has no schema default, so an
+        # unconfigured workflow lands here. Refusing quietly is how you end up wondering why
+        # nothing is listening, so say it out loud once, with the way to turn it on.
+        require Logger
+
+        Logger.warning(
+          "Observability endpoint disabled (server.port is #{inspect(other)}); " <>
+            "set `server: {host, port}` in WORKFLOW.md to enable /api/v1/state"
+        )
+
         :ignore
+    end
+  end
+
+  # Served through a reverse-proxy mount prefix, every absolute URL and the LiveView socket have
+  # to carry it; empty means "served at the root", which is the default and unchanged.
+  defp url_path do
+    case System.get_env("SYMPHONY_URL_PATH") do
+      nil -> ""
+      "" -> ""
+      path -> "/" <> String.trim(path, "/")
     end
   end
 
@@ -78,9 +101,15 @@ defmodule SymphonyElixir.HttpServer do
     end
   end
 
-  defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"
-  defp normalize_host(host) when is_binary(host), do: host
-  defp normalize_host(host), do: to_string(host)
+  # `cond` rather than three clauses: the trailing clause was provably unreachable, and this keeps
+  # "empty means loopback" while every branch stays reachable for the checker.
+  defp normalize_host(host) do
+    cond do
+      host in ["", nil] -> "127.0.0.1"
+      is_binary(host) -> host
+      true -> to_string(host)
+    end
+  end
 
   defp secret_key_base do
     Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)

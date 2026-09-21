@@ -33,7 +33,10 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
-            var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
+            var socketPath =
+              document.querySelector("meta[name='live-socket-path']")?.content || "/live";
+
+            var liveSocket = new window.LiveView.LiveSocket(socketPath, window.Phoenix.Socket, {
               params: {_csrf_token: csrfToken}
             });
 
@@ -41,6 +44,7 @@ defmodule SymphonyElixirWeb.Layouts do
             window.liveSocket = liveSocket;
           });
         </script>
+        <meta name="live-socket-path" content={Application.get_env(:symphony_elixir, :url_path, "") <> "/live"} />
         <link rel="stylesheet" href={@dashboard_css_url} />
       </head>
       <body>
