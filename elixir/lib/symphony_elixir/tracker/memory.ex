@@ -30,6 +30,13 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
+  @doc """
+  The behaviour marks `validate_config/1` optional, so leaving it out is legal -- it only makes
+  Elixir 1.20's type checker warn at the dispatch site. Being explicit here keeps a `mix build`
+  on newer toolchains warning-free, and there is nothing to validate for an in-memory tracker.
+  """
+  @spec validate_config(map()) :: :ok | {:error, term()}
+  def validate_config(_tracker_settings), do: :ok
   @spec secret_environment_names(map()) :: [String.t()]
   def secret_environment_names(_tracker_settings), do: []
 
