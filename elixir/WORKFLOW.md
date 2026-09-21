@@ -30,15 +30,37 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-  backend: codex
+  backend: acp
+# NOTE: the observability endpoint is OFF by default. HttpServer.start_link/1 only starts the
+# Phoenix endpoint when Config.server_port() is an integer, and server.port has NO schema
+# default (nil -> :ignore -> nothing listens at all). Host already defaults to loopback, which
+# is what we want: that endpoint reads files, runs commands and starts agents, with no auth.
+server:
+  host: 127.0.0.1
+  port: 4001
+# ── Optional: drive ZCode (Z.AI's coding agent) over ACP instead of DSH ──
+#    Verified end-to-end on this machine: handshake, prompt, and usage updates all come back.
+#    Requirements, in order of how easy they are to miss:
+#      * zcode-acp-server must be installed globally WITH `--ignore-scripts` (its postinstall is a
+#        POSIX one-liner, so a plain `npm i -g` fails on Windows and leaves no dist/).
+#      * ZCODE_BIN  = the zcode.cjs inside the ZCode desktop bundle (it is NOT on PATH).
+#      * ZCODE_NODE = an explicit node (>= 22). WITHOUT it the bridge execs the .cjs directly and
+#        dies with `spawn EFTYPE` -- this is the single thing that cost the most to find.
+#      * ZCODE_PROVIDER / ZCODE_MODEL pin a provider+model. ZCODE_MODEL is passed straight through
+#        to the provider (it is NOT validated against the local model list), which is why
+#        `deepseek-flash` works even though the app's own model entry was deleted.
+#    The wrapper below holds all four; swap the acp block for this to use ZCode:
+# acp:
+#   adapter: dsh
+#   command: ['sh', 'C:/Users/lhl20/code/symphony-workspaces/zcode-acp.sh']
+#   init_timeout_ms: 180000
+#   turn_timeout_ms: 300000# ── Alternative: drive the same gateway through Codex ──
+#    Only read when `agent.backend: codex`. Pick it if you need remote workers (ssh hosts) or
+#    want a second, independent path into the gateway.
+# ⚠️ `codex --profile <name>` does NOT apply to `app-server` (codex rejects it: "--profile only
+#    applies to runtime commands and `codex mcp`"), so the provider is pinned with --config here.
+# ⚠️ Model names are gateway-specific: `gpt-5.5` returns 403 MODEL_NOT_IN_PLAN on CommandCode.
 codex:
-  # This installation points Codex at the CommandCode gateway.
-  # ⚠️ `codex --profile <name>` does NOT apply to `app-server` (codex rejects it: "--profile only
-  #    applies to runtime commands and `codex mcp`"), so the provider is pinned with --config here.
-  # ⚠️ Model names are gateway-specific: `gpt-5.5` returns 403 MODEL_NOT_IN_PLAN on CommandCode.
-  #    The 49 usable CommandCode ids are listed in ~/.dsh/settings.yaml under
-  #    llm-pi-ai.providers.commandcode.models — e.g. deepseek/deepseek-v4.1-flash,
-  #    deepseek/deepseek-v4-flash, moonshotai/Kimi-K3, zai-org/GLM-5.3, xai/grok-4.6.
   command: codex --config shell_environment_policy.inherit=all --config model_provider=commandcode --config 'model="deepseek/deepseek-v4.1-flash"' --config model_reasoning_effort=high app-server
   approval_policy: never
   thread_sandbox: workspace-write
@@ -52,12 +74,21 @@ codex:
 #   cli_path: "C:/Users/lhl20/AppData/Roaming/npm/node_modules/command-code/dist/index.mjs"
 #   model: deepseek/deepseek-v4.1-flash
 #   turn_timeout_ms: 3600000
-# Only read when `agent.backend: acp`; ignored on the default Codex path.
-# adapter: "dsh" (default) or "workbuddy"; command defaults to the adapter's own argv;
-# cli_path points at the agent's node entry point; model must be a value the agent
-# advertised in `session/new` configOptions.
+# ── Default path: Symphony -> DSH (ACP) -> CommandCode gateway ──
+#    Symphony spawns DSH's own ACP entry point and DSH calls the model. `model` is the route DSH
+#    advertised in its `session/new` configOptions, written as a JSON array [provider, model id].
+#    `commandcode` is the provider in ~/.dsh/settings.yaml pointed at the CommandCode gateway;
+#    its usable model ids live under llm-pi-ai.providers.commandcode.models.
+#
+#    Leaving `model` unset also works (DSH then falls back to its own agent-default-model), but
+#    pinning it here makes the workflow independent of that setting.
+#
+#    Measured on one turn of the same task against the same gateway
+#    (see scripts/measure_harness_cost/README.md): dsh ~4.4K equivalent tokens,
+#    codex ~4.9-8.5K, `cmd` ~15.6K — hence dsh as the default.
 acp:
   adapter: dsh
+  model: '["commandcode","deepseek/deepseek-v4.1-flash"]'
   init_timeout_ms: 60000
   turn_timeout_ms: 3600000
 ---
