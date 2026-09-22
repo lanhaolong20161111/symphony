@@ -12,6 +12,8 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 
 ## Running Symphony
 
+This repository is a fork; [what this fork changes and why](docs/fork-changes.md) is the ledger for it, including how to get upstream behaviour back.
+
 There is a step-by-step [quickstart](docs/quickstart.md) -- including how to run with **no
 account at all** (a file-backed tracker), how to turn the observability endpoint on, and what to
 check when nothing happens.
