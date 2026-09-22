@@ -157,6 +157,27 @@ confirmed to predate a change.
 | every run fails on the first turn | the agent backend rejected an option (this happened when codex renamed an approval policy); read the first `turn_ended_with_error` rather than the last one |
 | the console is blank but the API works | the LiveView socket: when served through a mount, `SYMPHONY_URL_PATH` must match the prefix, otherwise the browser dials `/live` on the wrong app |
 
+## Assigning work from a commander
+
+`Orchestrator` is the only thing that decides what runs -- how many at once, what waits, what
+retries -- but it does not invent work: its input is the tracker, and its output is one agent run
+per dispatchable ticket. So "let a commander hand out the tasks" is not a missing feature; it is a
+**second workflow whose job is to write tickets**.
+
+`examples/planner/` is a runnable one: a goal ticket in, tickets with `blocked_by` out, then the
+normal workflow executes them in order. Its README records the two things that bite -- the ticket
+path must be **absolute** (each agent works in its own clone, so a relative path resolves inside a
+throwaway checkout), and dependencies exist only on the **file tracker**, which is why the example
+is file-backed.
+
+What the agents themselves can do depends on the backend, and this is easy to get wrong. The
+tracker adapters advertise a provider-native tool -- GitHub's is `github_api`, a general REST call
+**executed server-side with Symphony's credentials** -- so on the **codex** backend an agent can
+file issues itself. The **acp** backend has no dynamic-tool channel at all, so under ACP (the
+default here) the only way an agent creates work is by writing files. Stripping the tracker token
+out of the agent's environment and offering it a mediated tool are two different things: the first
+does not remove the capability when the second is present.
+
 ## What reloads, and what does not
 
 | change | takes effect | how |

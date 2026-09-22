@@ -46,15 +46,24 @@ defmodule Mix.Tasks.Workflow.Check do
 
     rendered = render_prompt!()
 
-    if is_binary(rendered) and String.contains?(rendered, @sample_issue.identifier) do
-      Mix.shell().info("  prompt template renders (#{byte_size(rendered)} bytes)")
-      Mix.shell().info("workflow.check: ok")
-      :ok
-    else
-      Mix.raise(
-        "WORKFLOW.md prompt rendered without the issue identifier; the template probably drops " <>
-          "its variables"
-      )
+    # The property worth asserting is "the template rendered", not "it mentions a particular
+    # variable": a planner prompt may use only the title and description, and asserting the
+    # identifier would reject a perfectly good workflow. A leftover `{{` means a variable did not
+    # resolve, which is the failure this step exists to catch.
+    cond do
+      not is_binary(rendered) or String.trim(rendered) == "" ->
+        Mix.raise("WORKFLOW.md prompt rendered empty; runs would start with no brief")
+
+      String.contains?(rendered, "{{") ->
+        Mix.raise(
+          "WORKFLOW.md prompt has unrendered variables; check the `{{ ... }}` names against the " <>
+            "issue fields"
+        )
+
+      true ->
+        Mix.shell().info("  prompt template renders (#{byte_size(rendered)} bytes)")
+        Mix.shell().info("workflow.check: ok")
+        :ok
     end
   end
 
