@@ -341,6 +341,29 @@ defmodule SymphonyElixir.ACP.AppServer do
   defp acp_mcp_servers(%{tracker_tools: true}), do: [tracker_tools_server()]
   defp acp_mcp_servers(_acp), do: []
 
+  # The MCP server is a separate process and inherits nothing, so the declaration has to name what it
+  # needs. Without the token the workflow fails to validate and the server advertises **zero tools**,
+  # which reads on the agent side as "no such server" -- measured, and the failure mode that cost a
+  # session. PATH is needed for the escript itself on Windows.
+  defp tracker_tools_env do
+    secret_names = tracker_secret_env_names()
+
+    ["PATH", "SystemRoot" | secret_names]
+    |> Enum.uniq()
+    |> Enum.flat_map(fn name ->
+      case System.get_env(name) do
+        nil -> []
+        value -> [%{"name" => name, "value" => value}]
+      end
+    end)
+  end
+
+  defp tracker_secret_env_names do
+    Map.get(SymphonyElixir.Tracker.bind_agent_tools(), :secret_environment_names, [])
+  rescue
+    _error -> []
+  end
+
   defp tracker_tools_server do
     escript = Path.expand("bin/symphony")
 
@@ -351,7 +374,11 @@ defmodule SymphonyElixir.ACP.AppServer do
       )
     end
 
-    %{"command" => escript, "args" => ["--mcp", Path.expand(SymphonyElixir.Workflow.workflow_file_path())]}
+    %{
+      "command" => escript,
+      "args" => ["--mcp", Path.expand(SymphonyElixir.Workflow.workflow_file_path())],
+      "env" => tracker_tools_env()
+    }
   end
 
   # ───────────────── 启动 ─────────────────

@@ -56,12 +56,34 @@ defmodule SymphonyElixir.CLI do
   defp run_mcp_server(positional, deps) do
     case maybe_set_mcp_workflow(positional, deps) do
       :ok ->
+        prepare_mcp_io()
         TrackerServer.run()
         System.halt(0)
 
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
+    end
+  end
+
+  # Two things this process needs before it can serve tools, both of which cost a debugging session
+  # when missing:
+  #
+  #   * the HTTP client applications. Tool calls go out over HTTP, and on this path the application
+  #     is deliberately not started (that is what keeps a second Orchestrator off the same tracker),
+  #     so `Req`'s stack has to be started explicitly -- without it every tool call raises, the
+  #     server dies, and the client sees `MCP error -32000: Connection closed`.
+  #   * the logger pointed at stderr. stdout is the protocol here; the BEAM's default handler writes
+  #     crash reports to stdout, which corrupts the stream and makes the client restart the server.
+  defp prepare_mcp_io do
+    :logger.update_handler_config(:default, :config, %{type: :standard_error})
+
+    case Application.ensure_all_started(:req) do
+      {:ok, _apps} ->
+        :ok
+
+      {:error, reason} ->
+        IO.puts(:stderr, "symphony mcp: could not start the HTTP client: #{inspect(reason)}")
     end
   end
 

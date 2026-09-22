@@ -180,11 +180,26 @@ by `Tracker.execute_bound_agent_tool/4` with Symphony's own configuration: the a
 name and arguments, and never receives the tracker token. That is the same boundary the Codex path
 draws, reached a different way.
 
-A real ACP session measured how far this gets: DSH does **launch** the declared server (its stderr
-shows up in the ACP stream), but on this version it never speaks MCP to it -- the session succeeds
-and the agent has no such tool; with a tap in between, DSH raises `-32603 Internal error` and the tap
-sees zero bytes in either direction. So under ACP this route is blocked on the agent side, and the
-HTTP route below is the one that works today.
+This works end to end, measured against a live ACP session: the agent called `github_api`, the MCP
+server ran it with Symphony's credentials, and the agent reported the real GitHub number back while
+holding no token of its own. DSH supports this properly -- `dsh-acp` mounts declared servers through
+`@deepseek-ai/dsh-mcp-client`, which is built on the official MCP SDK, with `transport: "stdio"` and
+`failOnStartupError: true`.
+
+Three requirements, each of which produced a confusing failure before it was understood:
+
+1. **`command` must be an absolute path.** DSH rejects anything else with `-32602 mcpServers[0].command
+   must be an absolute path`.
+2. **The declaration must carry `env`.** A declared server is a separate process and inherits
+   nothing. Without the token it fails to validate the workflow and advertises **zero tools**; on the
+   agent side that reads as "no such server". Entries are `%{"name" => ..., "value" => ...}`, and
+   `PATH` (plus `SystemRoot` on Windows) is needed for the escript itself. The ACP adapter fills this
+   in when `acp.tracker_tools` is on.
+3. **Nothing but JSON may reach stdout.** stdout is the protocol. The BEAM's default logger writes
+   crash reports there, which corrupts the stream and makes the client restart the server mid-call
+   (`MCP error -32000: Connection closed`). `bin/symphony --mcp` points the logger at stderr, and
+   that is also why this entry is an escript and not a `mix` task -- `mix` writes compile output to
+   stdout.
 
 Off by default, because it widens what an agent may do to the tracker. The server itself is
 `bin/symphony --mcp [WORKFLOW.md]`, which is also usable by hand:
