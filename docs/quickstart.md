@@ -136,3 +136,33 @@ confirmed to predate a change.
 | no runs, ever | the tracker returns no dispatchable issues: check `active_states` against what the tickets actually say, and remember `blocked_by:` holds tickets back |
 | every run fails on the first turn | the agent backend rejected an option (this happened when codex renamed an approval policy); read the first `turn_ended_with_error` rather than the last one |
 | the console is blank but the API works | the LiveView socket: when served through a mount, `SYMPHONY_URL_PATH` must match the prefix, otherwise the browser dials `/live` on the wrong app |
+
+## Test tags
+
+A handful of tests need something the machine may not have. They carry tags, and
+`test_helper.exs` excludes them on Windows so that a local run is a signal rather than noise
+(CI runs on Linux, where nothing is excluded):
+
+| tag | means | why it is excluded on Windows |
+|---|---|---|
+| `:needs_ssh` | the remote-worker tests | they need a resolvable ssh host; without one they sit until their timeout |
+| `:needs_symlinks` | symlink-escape tests | creating symlinks needs Developer Mode |
+| `:posix_paths` | tests that assume a POSIX root (`/tmp`) or a POSIX shell | the git-bash assumption does not hold; a fake `gh` stub written as `#!/bin/sh` produces no output |
+
+Run everything anyway with:
+
+```sh
+mise exec -- mix test --include needs_ssh --include needs_symlinks --include posix_paths
+```
+
+Three failures worth knowing about, because each looked like a product bug at first:
+
+- **Wall-clock assertions** (`assert_due_in_range`, the turn-timeout test): the remainder is
+  measured after an unbounded amount of VM and OS scheduling, so a loaded machine eats the slack.
+  They are widened rather than tagged, with the upper bound still exact -- a retry scheduled
+  *later* than configured is the bug worth failing on.
+- **A path built by `Path.join` from `System.tmp_dir!()`** mixes separators on Windows, and
+  `Path.wildcard` then matches nothing at all -- which made `specs.check` inspect zero files while
+  reporting success. `Path.expand` before globbing.
+- **Timing tests that pass alone and fail in a full run** are the normal case, not a paradox: run
+  them alone first (`mix test path/to/file.exs:LINE`) and check whether they are flaky or real.
