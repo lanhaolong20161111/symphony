@@ -310,8 +310,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp do_start_session(port, workspace, session_policies, dynamic_tool_binding) do
     case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding)
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        start_thread(port, workspace, session_policies, dynamic_tool_binding)
+
+      {:error, reason} ->
+        # The handshake itself: if this fails, nothing about the configured policies is reachable
+        # yet, so report it as its own step rather than as a generic session failure.
+        Logger.error("codex rejected initialize: #{inspect(reason, limit: 5)}")
+        {:error, {:initialize_rejected, reason}}
     end
   end
 
@@ -338,6 +344,20 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{"id" => thread_id} -> {:ok, thread_id}
           _ -> {:error, {:invalid_thread_payload, thread_payload}}
         end
+
+      {:error, reason} ->
+        # Name the version-sensitive options that were sent. codex renamed an approval policy once
+        # ("reject" -> "granular"), and every run then failed here, before its first turn, with an
+        # error that never mentioned the option -- which is the expensive part to debug. The server
+        # stays authoritative: no local allowlist, just its answer alongside what we asked for.
+        Logger.error(
+          "codex rejected thread/start with approvalPolicy=#{inspect(approval_policy)} " <>
+            "sandbox=#{inspect(thread_sandbox)}: #{inspect(reason, limit: 5)}"
+        )
+
+        {:error,
+         {:thread_start_rejected,
+          %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, reason}}
 
       other ->
         other
