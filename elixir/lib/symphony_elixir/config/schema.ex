@@ -361,12 +361,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:port, :integer)
       field(:host, :string, default: "127.0.0.1")
+      # Off by default: exposes POST /api/v1/tools/:tool, which runs the tracker's provider-native
+      # tools with Symphony's credentials. See ObservabilityApiController.tool/2.
+      field(:tracker_tools, :boolean, default: false)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host], empty_values: [])
+      |> cast(attrs, [:port, :host, :tracker_tools], empty_values: [])
       |> validate_number(:port, greater_than_or_equal_to: 0)
     end
   end

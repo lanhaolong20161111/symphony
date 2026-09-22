@@ -191,7 +191,30 @@ It deliberately does not start the application -- the tracker adapter is a plain
 configuration comes from the workflow file -- so it cannot put a second Orchestrator on the same
 tracker as the instance that spawned it.
 
-## Assigning work from a commander
+### The same tools over HTTP
+
+For a backend where the agent has a shell but MCP is unwanted or unavailable -- a Codex turn, or an
+ACP session you would rather not hand a server declaration -- the tools are also reachable on the
+observability endpoint's loopback:
+
+```sh
+# in WORKFLOW.md:
+#   server: {host: 127.0.0.1, port: 4001, tracker_tools: true}
+
+curl -s -X POST http://127.0.0.1:4001/api/v1/tools/github_api \
+  -H 'content-type: application/json' \
+  -d '{"method":"GET","path":"/repos/owner/name/issues"}'
+```
+
+The body is the tool's arguments. Off by default for the same reason as the MCP server, and the
+credential stays here: the endpoint runs the tool with Symphony's configuration. Tell the agent it
+exists from the workflow prompt; nothing advertises it to the agent's tool list.
+
+Known gap, measured while testing this: a request body that is **not** a JSON object (an array, a
+bare string, a number) raises inside the endpoint's parser rather than being answered with a
+status. The recorder's endpoint had the same class of gap and fixed it by wrapping `Plug.Parsers` so
+its failures become responses; this endpoint has not been fixed yet, and the test for this route
+deliberately covers object bodies only.
 
 `Orchestrator` is the only thing that decides what runs -- how many at once, what waits, what
 retries -- but it does not invent work: its input is the tracker, and its output is one agent run
