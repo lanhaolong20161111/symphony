@@ -74,11 +74,7 @@ defmodule SymphonyElixirWeb.ObservabilityToolsTest do
     assert %{"error" => %{"code" => "no_agent_tools"}} = json_response(post_tool(%{}), 404)
   end
 
-  # Object bodies with nonsense in them: the route answers, it does not crash. A *non*-object body
-  # (a JSON array, a bare string) never reaches here at all -- it raises inside the endpoint's
-  # parser, so the client gets an exception rather than a status. That is a gap in the endpoint, not
-  # in this route: the same one the recorder's endpoint had, and it needs the same fix (wrap
-  # Plug.Parsers so its failures become responses). Recorded here so it is not mistaken for covered.
+  # Object bodies with nonsense in them: the route answers, it does not crash.
   test "object bodies with unusable values are rejected, never a 500", %{dir: dir} do
     write_workflow!(dir, true)
     start_endpoint()
@@ -89,6 +85,27 @@ defmodule SymphonyElixirWeb.ObservabilityToolsTest do
       assert response.status in [400, 404],
              "body #{inspect(body)} produced #{response.status}"
     end
+  end
+
+  # Bodies the parser cannot turn into parameters. Before the endpoint wrapped Plug.Parsers these
+  # raised inside it, so the client got an exception rather than a status -- the same gap the
+  # recorder's endpoint had. Note the bodies are sent as raw binaries: a list handed to ConnTest is
+  # not a request body at all and raises in the test helper, which is how this was first misread.
+  test "bodies the parser rejects are answered with a status, never an exception", %{dir: dir} do
+    write_workflow!(dir, true)
+    start_endpoint()
+
+    for body <- ["not json at all", "[1, 2, 3]", ~s("a bare string"), "{\"unclosed\": ", ""] do
+      response = post_tool(body)
+
+      assert response.status in [400, 404, 413, 415],
+             "body #{inspect(body)} produced #{response.status}"
+    end
+
+    # And the malformed ones are specifically 400, with a code, rather than whatever the route does
+    # with empty parameters.
+    assert %{"error" => %{"code" => "malformed_body"}} =
+             json_response(post_tool("not json at all"), 400)
   end
 
   test "the route is absent from the router while the endpoint is not running", %{dir: dir} do

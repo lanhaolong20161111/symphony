@@ -30,7 +30,9 @@ defmodule SymphonyElixirWeb.Endpoint do
   plug(Plug.RequestId)
   plug(Plug.Telemetry, event_prefix: [:phoenix, :endpoint])
 
-  plug(Plug.Parsers,
+  # Plug.Parsers, wrapped so the failures it raises become responses instead of exceptions.
+  # See SymphonyElixirWeb.BodyParser.
+  plug(SymphonyElixirWeb.BodyParser,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     json_decoder: Jason

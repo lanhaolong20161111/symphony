@@ -210,11 +210,11 @@ The body is the tool's arguments. Off by default for the same reason as the MCP 
 credential stays here: the endpoint runs the tool with Symphony's configuration. Tell the agent it
 exists from the workflow prompt; nothing advertises it to the agent's tool list.
 
-Known gap, measured while testing this: a request body that is **not** a JSON object (an array, a
-bare string, a number) raises inside the endpoint's parser rather than being answered with a
-status. The recorder's endpoint had the same class of gap and fixed it by wrapping `Plug.Parsers` so
-its failures become responses; this endpoint has not been fixed yet, and the test for this route
-deliberately covers object bodies only.
+Bodies this parser cannot turn into parameters -- malformed JSON, a JSON array, a bare string -- are
+answered with a 400 (`malformed_body`) rather than an exception, because the endpoint wraps
+`Plug.Parsers` in `SymphonyElixirWeb.BodyParser`. The recorder's endpoint had the same gap and the
+same fix. Worth knowing when writing a test for any route here: sending a **list** to `ConnTest.post/3`
+is not a request body at all and raises in the helper -- send the raw JSON string instead.
 
 `Orchestrator` is the only thing that decides what runs -- how many at once, what waits, what
 retries -- but it does not invent work: its input is the tracker, and its output is one agent run
