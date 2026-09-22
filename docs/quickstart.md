@@ -117,10 +117,15 @@ upstream behaviour exactly as it was.
 ## 5. Check your work
 
 ```sh
-mise exec -- mix lint                     # specs.check + credo --strict
+mise exec -- mix compile --force --warnings-as-errors   # full type check (see below)
+mise exec -- mix lint                                   # specs.check + credo --strict
 mise exec -- mix format --check-formatted
 mise exec -- mix test
 ```
+
+`mix compile --force` is not redundant with `mix build`: the type checker only reports on files it
+actually compiles, so an incremental build hides type problems in everything that did not change.
+That is how six dead clauses were found here, none of them in a file the build had touched.
 
 On Windows a handful of tests fail for environmental reasons (symlinks need Developer Mode, ssh
 needs a remote, some paths assume a POSIX root) and the full suite can hang on the live tests.

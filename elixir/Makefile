@@ -1,4 +1,4 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps build fmt fmt-check lint test coverage type-check ci dialyzer e2e
 
 MIX ?= mix
 
@@ -13,6 +13,13 @@ deps:
 
 build:
 	$(MIX) build
+
+# A full recompile on purpose: the type checker only reports on files it compiles, so an
+# incremental build hides type problems in everything that did not change. Warnings are errors
+# here -- that is the whole point of the step -- and dependencies are exempt (their warnings are
+# not ours to fix; mint's deprecated xref option is the current example).
+type-check:
+	$(MIX) compile --force --warnings-as-errors
 
 fmt:
 	$(MIX) format
@@ -39,6 +46,7 @@ e2e:
 ci:
 	$(MAKE) setup
 	$(MAKE) build
+	$(MAKE) type-check
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(MAKE) coverage
