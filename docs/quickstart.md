@@ -171,3 +171,34 @@ Three failures worth knowing about, because each looked like a product bug at fi
   reporting success. `Path.expand` before globbing.
 - **Timing tests that pass alone and fail in a full run** are the normal case, not a paradox: run
   them alone first (`mix test path/to/file.exs:LINE`) and check whether they are flaky or real.
+
+## Operating notes
+
+Four behaviours that are easy to get wrong, and that no error message will tell you about:
+
+**A reload is not a restart.** `WORKFLOW.md` is polled every second and takes effect without one
+(`WorkflowStore` keeps the last good copy, so a broken edit cannot take a running instance down).
+But not everything is read per use: the observability endpoint's `server.host` / `server.port` are
+read once in `HttpServer.start_link/1`, and `SYMPHONY_URL_PATH` is read at boot. Changing those
+needs a restart, and nothing will say so.
+
+**Cancelling a run discards its workspace.** Moving an issue to a terminal state stops the running
+agent (`terminate_running_issue/3`), and for a *blocked* issue it also releases the claim and
+removes the workspace. The `before_remove` hook does run, so a PR-cleaning hook is fine, but
+anything uncommitted in that workspace is gone -- "mark it done to stop it" is a destructive way to
+pause, not a gentle one.
+
+**Coming back from blocked means starting over.** A run that needs input goes to `blocked`;
+clearing it means moving the issue out of a terminal state, which re-dispatches it -- and the
+workspace went with the cancel above. The prompt says "resume from the current workspace state",
+which is true within a run's turns, not across a cancel. If you want an agent to continue, add to
+the issue and leave its state alone.
+
+**A workspace that exists is assumed usable.** `ensure_workspace/2` returns an existing directory
+as-is, and hooks run under `hooks.timeout_ms` with the task killed on timeout -- so a hook that
+timed out half way through `git clone` leaves a workspace the next run will happily work in. If a
+run fails strangely early, delete its workspace directory and let it be recreated.
+
+**Workspace cleanup is not continuous.** At boot, `run_terminal_workspace_cleanup/0` removes the
+workspaces of issues already in a terminal state; after that, nothing collects them. Workspaces of
+issues that never reach a terminal state, or that fail before one, are yours to remove.
