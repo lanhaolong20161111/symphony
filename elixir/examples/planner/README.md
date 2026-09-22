@@ -50,6 +50,10 @@ point of having two files -- the executor workflow never has it.
 
 ## The traps, all measured
 
+**The repository must have issues enabled.** GitHub lets a repository switch them off, and a fork does
+not copy them; with issues disabled the planner polls for a goal it can never see. Check with
+`gh repo view <owner>/<name> --json hasIssuesEnabled`.
+
 **The file planner's path must be absolute.** Every agent works in its own clone under
 `workspace.root`, so a relative ticket directory resolves *inside that clone*. The planner writes
 beautiful tickets into a throwaway checkout and the next poll sees nothing, with no error anywhere.
