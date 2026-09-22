@@ -77,6 +77,17 @@ certainly the declaration, not the agent: `command` must be absolute, the declar
 `env` (a declared server inherits nothing, and without the token it advertises zero tools), and
 nothing but JSON may reach stdout.
 
+## What the executor can and cannot do
+
+Measured on a real run of the tickets a planner had filed: the agent cloned, edited, verified with
+probe scripts it wrote itself, committed, and **pushed a branch**. Git authentication works, so its
+work is publishable. What it could not do is touch the tracker, because the executor workflow
+deliberately has no `acp.tracker_tools`.
+
+So the boundary is sharper than "the agent has no credentials": it may publish code, and it may not
+close its own tickets. Closing is an operator action, which is why a finished issue still reads as
+open until someone says otherwise.
+
 ## After it runs
 
 - **Check what it filed** before executing: a planner is an agent, and its judgement is the product.
