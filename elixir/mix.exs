@@ -56,6 +56,10 @@ defmodule SymphonyElixir.MixProject do
       escript: escript(),
       releases: releases(),
       aliases: aliases(),
+      # Phoenix's code reloader needs this Mix listener to watch files and recompile as they change;
+      # without it the reloader still compiles on the next request, but nothing is pushed to the
+      # browser, so live reload never fires. `phx.new` generates this line for the same reason.
+      listeners: [Phoenix.CodeReloader],
       deps: deps()
     ]
   end
@@ -80,6 +84,12 @@ defmodule SymphonyElixir.MixProject do
       {:lazy_html, ">= 0.1.0", only: :test},
       {:phoenix, "~> 1.8.0"},
       {:phoenix_html, "~> 4.2"},
+      # Dev-only, like `phx.new` generates: this is the module behind the `if code_reloading?`
+      # block in SymphonyElixirWeb.Endpoint. `plug Phoenix.LiveReloader` is compiled in whenever
+      # code_reloading? is true, and that setting is read at compile time -- so without this the
+      # dev build fails on an undefined module, and with `only: :dev` neither `mix test` nor a
+      # release ever sees it.
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.1.0"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},

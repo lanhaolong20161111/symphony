@@ -15,6 +15,26 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   check_origin: false,
   server: false
 
+if config_env() == :dev do
+  # The development reloaders, matching what `phx.new` generates for a new application. Two halves
+  # are needed and neither works alone: this config, and the `if code_reloading?` block in
+  # SymphonyElixirWeb.Endpoint. Both are dev-only, so `mix test` and releases are untouched.
+  #
+  # The code reloader recompiles changed modules on the next request; the live reloader refreshes
+  # connected pages (the LiveView console) when one of these patterns changes. The list is pointed
+  # at this repository's tree, which is not a stock layout.
+  config :symphony_elixir, SymphonyElixirWeb.Endpoint,
+    code_reloader: true,
+    live_reload: [
+      patterns: [
+        ~r"priv/static/.*\.(js|css|png|jpeg|jpg|gif|svg)$",
+        ~r"lib/symphony_elixir_web/router\.ex$",
+        ~r"lib/symphony_elixir_web/presenter\.ex$",
+        ~r"lib/symphony_elixir_web/(controllers|components|live)/.*\.(ex|heex)$"
+      ]
+    ]
+end
+
 if config_env() == :test do
   config :symphony_elixir,
     workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__)

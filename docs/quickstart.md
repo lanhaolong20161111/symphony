@@ -157,6 +157,47 @@ confirmed to predate a change.
 | every run fails on the first turn | the agent backend rejected an option (this happened when codex renamed an approval policy); read the first `turn_ended_with_error` rather than the last one |
 | the console is blank but the API works | the LiveView socket: when served through a mount, `SYMPHONY_URL_PATH` must match the prefix, otherwise the browser dials `/live` on the wrong app |
 
+## Development reloaders
+
+Run the console with `iex -S mix phx.server` rather than `mix phx.server`: same reloaders, plus a
+shell in which you can inspect and patch the running system (`recompile()`, `:sys.get_state/1`,
+`Supervisor.restart_child/2`).
+
+Symphony's endpoint now carries Phoenix's two development reloaders, the same way `phx.new`
+generates them. Two halves are needed and **neither works alone**:
+
+- `config/config.exs` sets `code_reloader: true` and the `live_reload` patterns, in a `:dev`-only
+  block;
+- `lib/symphony_elixir_web/endpoint.ex` has the matching `if code_reloading?` block with the
+  reloader's socket and plugs, and `mix.exs` registers `Phoenix.CodeReloader` as a Mix listener --
+  without the listener the reloader still compiles on the next request, but nothing is pushed to
+  the browser, so live reload never fires (Mix says so in a warning if it is missing).
+
+Three things to know:
+
+- **`code_reloading?` is compile time.** It is a macro, so the plugs are baked into the compiled
+  endpoint: changing `code_reloader` needs a recompile, not just a restart, and that is why the
+  dependency is `only: :dev` and the block is absent from `mix test` and from releases (verified:
+  a `MIX_ENV=test` compile contains no reference to `Phoenix.LiveReloader`).
+- **`config/*.exs` still never reloads.** Only modules and templates do. To change a setting on a
+  running node, `Application.put_env/3`; to change the workflow, edit `WORKFLOW.md` (polled every
+  second).
+- **Dependencies and `mix.exs` need a restart**, as always.
+
+## Poking a running node
+
+`HttpServer` is a direct child of `SymphonyElixir.Supervisor`, so the observability endpoint can be
+stopped and started on its own -- which is how a `server.host` / `server.port` change takes effect
+without restarting the application:
+
+```elixir
+Supervisor.which_children(SymphonyElixir.Supervisor)          # find the child id first
+:ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+{:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+```
+
+Measured, not assumed: with that pair the port is listening, not listening, listening again.
+
 ## Test tags
 
 A handful of tests need something the machine may not have. They carry tags, and
