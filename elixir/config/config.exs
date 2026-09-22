@@ -38,4 +38,8 @@ end
 if config_env() == :test do
   config :symphony_elixir,
     workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__)
+
+  # Tests rewrite the workflow file constantly, so a reload that changes server.port would ask the
+  # supervisor to bounce a real endpoint in the middle of the suite. Off here; on everywhere else.
+  config :symphony_elixir, restart_endpoint_on_workflow_change: false
 end

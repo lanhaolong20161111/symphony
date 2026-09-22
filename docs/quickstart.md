@@ -157,6 +157,17 @@ confirmed to predate a change.
 | every run fails on the first turn | the agent backend rejected an option (this happened when codex renamed an approval policy); read the first `turn_ended_with_error` rather than the last one |
 | the console is blank but the API works | the LiveView socket: when served through a mount, `SYMPHONY_URL_PATH` must match the prefix, otherwise the browser dials `/live` on the wrong app |
 
+## What reloads, and what does not
+
+| change | takes effect | how |
+|---|---|---|
+| a module, template or route | as you save | the dev reloaders (see below); run `iex -S mix phx.server` |
+| `WORKFLOW.md`: tracker, polling, agent limits, hooks, workspace root, prompt | within a second | `WorkflowStore` polls the file and keeps the last good copy, so a broken edit cannot take a running instance down |
+| `WORKFLOW.md`: `server.host` / `server.port` | within a second | the store notices the endpoint's settings changed and bounces that child through the supervisor -- measured moving a running instance from 4002 back to 4001 without restarting the application |
+| `SYMPHONY_URL_PATH` | on the next endpoint bounce or restart | read from the environment when the endpoint starts, so any later bounce picks a changed value up |
+| anything in `config/*.exs` | never | restart. On a running node, `Application.put_env/3` is the only way to move a setting |
+| `mix.exs`, dependencies, `code_reloader` itself | never | restart. `code_reloading?` is a compile-time macro, so the reloader plugs are baked into each build |
+
 ## Development reloaders
 
 Run the console with `iex -S mix phx.server` rather than `mix phx.server`: same reloaders, plus a

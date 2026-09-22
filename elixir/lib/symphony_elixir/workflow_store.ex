@@ -15,7 +15,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defmodule State do
     @moduledoc false
 
-    defstruct [:path, :stamp, :workflow, :settings]
+    defstruct [:path, :stamp, :workflow, :settings, :endpoint_identity]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -132,6 +132,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defp reload_path(path, state) do
     case load_state(path) do
       {:ok, new_state} ->
+        maybe_restart_endpoint(state, new_state)
         {:ok, new_state}
 
       {:error, reason} ->
@@ -159,7 +160,14 @@ defmodule SymphonyElixir.WorkflowStore do
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
          {:ok, stamp} <- current_stamp(path) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings}}
+      {:ok,
+       %State{
+         path: path,
+         stamp: stamp,
+         workflow: workflow,
+         settings: settings,
+         endpoint_identity: endpoint_identity(settings)
+       }}
     else
       {:error, reason} ->
         {:error, reason}
@@ -177,5 +185,53 @@ defmodule SymphonyElixir.WorkflowStore do
 
   defp log_reload_error(path, reason) do
     Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
+  end
+
+  # The endpoint reads `server.host` / `server.port` once, when HttpServer starts it, so a workflow
+  # reload used to change nothing and say nothing -- the last runtime setting that could not be
+  # reached without restarting the application. Bounce the endpoint instead: terminate_child plus
+  # restart_child is the pair that works (measured: the port goes down and comes back), and the
+  # restart re-reads the workflow.
+  #
+  # In a Task, not inline: terminate_child/2 is a synchronous call to the supervisor that kills a
+  # sibling, so doing it here would block this store and race its own restart.
+  defp maybe_restart_endpoint(%State{} = old, %State{} = new) do
+    enabled? = Application.get_env(:symphony_elixir, :restart_endpoint_on_workflow_change, true)
+
+    if enabled? and old.endpoint_identity != new.endpoint_identity do
+      Logger.info(
+        "Observability endpoint settings changed " <>
+          "#{inspect(old.endpoint_identity)} -> #{inspect(new.endpoint_identity)}; restarting it"
+      )
+
+      _ = Task.start(&restart_endpoint/0)
+    end
+
+    :ok
+  end
+
+  # Everything the endpoint reads exactly once: the workflow's server block, the port override an
+  # embedding application may set, and the mount path from the environment.
+  defp endpoint_identity(settings) do
+    {
+      settings.server.port,
+      settings.server.host,
+      Application.get_env(:symphony_elixir, :server_port_override),
+      SymphonyElixir.HttpServer.mount_path()
+    }
+  end
+
+  # Extracted so the Task body stays flat, and so the two supervisor calls live together. "Not
+  # found" (the endpoint is disabled now, or was never started) and "already running" both mean
+  # the configuration just loaded is not the one being served; the caller logged the values.
+  defp restart_endpoint do
+    _ = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+
+    case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer) do
+      {:ok, _pid} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, :running} -> :ok
+      other -> Logger.error("Observability endpoint restart failed: #{inspect(other)}")
+    end
   end
 end

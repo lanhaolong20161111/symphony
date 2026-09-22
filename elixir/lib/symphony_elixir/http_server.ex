@@ -16,6 +16,20 @@ defmodule SymphonyElixir.HttpServer do
     }
   end
 
+  @doc """
+  The mount path this endpoint serves under, from `SYMPHONY_URL_PATH`.
+
+  Empty (the default) means "served at the root", which is upstream's behaviour.
+  """
+  @spec mount_path() :: String.t()
+  def mount_path do
+    case System.get_env("SYMPHONY_URL_PATH") do
+      nil -> ""
+      "" -> ""
+      path -> "/" <> String.trim(path, "/")
+    end
+  end
+
   @spec start_link(keyword()) :: GenServer.on_start() | :ignore
   def start_link(opts \\ []) do
     case Keyword.get(opts, :port, Config.server_port()) do
@@ -28,7 +42,7 @@ defmodule SymphonyElixir.HttpServer do
           endpoint_opts = [
             server: true,
             http: [ip: ip, port: port],
-            url: [host: normalize_host(host), path: url_path()],
+            url: [host: normalize_host(host), path: mount_path()],
             orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base()
@@ -42,7 +56,7 @@ defmodule SymphonyElixir.HttpServer do
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
           # The layout embeds this so the console client asks for the socket under the same prefix
           # the pages are served from; empty (the default) keeps the upstream behaviour.
-          Application.put_env(:symphony_elixir, :url_path, url_path())
+          Application.put_env(:symphony_elixir, :url_path, mount_path())
           Endpoint.start_link()
         end
 
@@ -58,16 +72,6 @@ defmodule SymphonyElixir.HttpServer do
         )
 
         :ignore
-    end
-  end
-
-  # Served through a reverse-proxy mount prefix, every absolute URL and the LiveView socket have
-  # to carry it; empty means "served at the root", which is the default and unchanged.
-  defp url_path do
-    case System.get_env("SYMPHONY_URL_PATH") do
-      nil -> ""
-      "" -> ""
-      path -> "/" <> String.trim(path, "/")
     end
   end
 
