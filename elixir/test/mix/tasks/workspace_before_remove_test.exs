@@ -49,6 +49,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     end)
   end
 
+  @tag :posix_paths
   test "uses current branch for lookup when branch option is omitted" do
     with_fake_gh_and_git(
       """
@@ -100,6 +101,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     )
   end
 
+  @tag :posix_paths
   test "closes open pull requests for the branch and tolerates close failures" do
     with_fake_gh(fn log_path ->
       File.write!(log_path, "")
@@ -130,6 +132,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     end)
   end
 
+  @tag :posix_paths
   test "formats close failures without command stderr output" do
     with_fake_gh(
       """
@@ -167,6 +170,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     )
   end
 
+  @tag :posix_paths
   test "no-ops when PR list fails for current branch" do
     with_fake_gh(
       """
@@ -234,6 +238,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     )
   end
 
+  @tag :posix_paths
   test "no-ops when gh auth is unavailable" do
     with_fake_gh(
       """

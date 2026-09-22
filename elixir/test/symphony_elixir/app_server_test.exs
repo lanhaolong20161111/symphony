@@ -119,7 +119,10 @@ defmodule SymphonyElixir.AppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server",
-        codex_turn_timeout_ms: 250
+        # The fixture emits an update every 150ms, so this only has to outlast a stalled machine,
+        # not race it: at 250ms a loaded full-suite run timed the turn out early and failed on
+        # {:ok, _}, while an isolated run passed.
+        codex_turn_timeout_ms: 1_000
       )
 
       issue = %Issue{
