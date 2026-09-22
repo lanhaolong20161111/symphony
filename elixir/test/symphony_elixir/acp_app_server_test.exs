@@ -339,6 +339,7 @@ defmodule SymphonyElixir.ACP.AppServerTest do
       end)
     end
 
+    @tag :needs_symlinks
     test "rejects a symlinked workspace that escapes the root" do
       with_local_workspace_setup(fn test_root, workspace_root ->
         outside = Path.join(test_root, "outside")

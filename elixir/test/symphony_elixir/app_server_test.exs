@@ -39,6 +39,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  @tag :needs_symlinks
   test "app server rejects symlink escape cwd paths under the workspace root" do
     test_root =
       Path.join(
@@ -1496,6 +1497,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  @tag :needs_ssh
   test "app server launches over ssh for remote workers" do
     test_root =
       Path.join(

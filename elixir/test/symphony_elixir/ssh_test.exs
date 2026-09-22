@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.SSHTest do
   use ExUnit.Case, async: false
+  @moduletag :needs_ssh
 
   alias SymphonyElixir.SSH
 

@@ -103,11 +103,14 @@ defmodule SymphonyElixir.CoreTest do
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_github_token = System.get_env("GITHUB_TOKEN")
 
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
 
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
+    System.put_env("GITHUB_TOKEN", "test-github-token")
     Workflow.clear_workflow_file_path()
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
@@ -115,8 +118,8 @@ defmodule SymphonyElixir.CoreTest do
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(get_in(tracker, ["provider", "project_slug"]))
+    assert Map.get(tracker, "kind") == "github"
+    assert is_binary(get_in(tracker, ["provider", "repo"]))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
@@ -134,9 +137,11 @@ defmodule SymphonyElixir.CoreTest do
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_github_token = System.get_env("GITHUB_TOKEN")
     env_api_key = "test-linear-api-key"
 
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
     System.put_env("LINEAR_API_KEY", env_api_key)
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -1483,10 +1488,13 @@ defmodule SymphonyElixir.CoreTest do
   test "in-repo WORKFLOW.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_github_token = System.get_env("GITHUB_TOKEN")
 
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
 
     System.put_env("LINEAR_API_KEY", "test-linear-api-key")
+    System.put_env("GITHUB_TOKEN", "test-github-token")
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
 
     issue = %Issue{
@@ -1502,7 +1510,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
+    assert prompt =~ "You are working on ticket `MT-616`"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
@@ -1707,6 +1715,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  @tag :needs_ssh
   test "agent runner surfaces ssh startup failures instead of silently hopping hosts" do
     test_root =
       Path.join(

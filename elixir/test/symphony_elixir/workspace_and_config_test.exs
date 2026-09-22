@@ -5,6 +5,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
+  @tag :posix_paths
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
@@ -168,6 +169,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag :needs_symlinks
   test "workspace rejects symlink escapes under the configured root" do
     test_root =
       Path.join(
@@ -196,6 +198,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag :needs_symlinks
   test "recorded workspace removal rejects symlink escapes before hooks" do
     test_root =
       Path.join(
@@ -232,6 +235,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag :needs_symlinks
   test "workspace canonicalizes symlinked workspace roots before creating issue directories" do
     test_root =
       Path.join(
@@ -300,6 +304,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag :posix_paths
   test "workspace retries after_create after a failed new workspace bootstrap" do
     test_root =
       Path.join(
@@ -1166,6 +1171,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  @tag :posix_paths
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
@@ -1530,6 +1536,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag :posix_paths
   test "path safety returns errors for invalid path segments" do
     invalid_segment = String.duplicate("a", 300)
     path = Path.join(System.tmp_dir!(), invalid_segment)
@@ -1598,6 +1605,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
+  @tag :needs_ssh
   test "remote workspace lifecycle uses ssh host aliases from worker config" do
     test_root =
       Path.join(

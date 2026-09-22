@@ -107,7 +107,7 @@ acp:
   turn_timeout_ms: 3600000
 ---
 
-You are working on a Linear ticket `{{ issue.identifier }}`
+You are working on ticket `{{ issue.identifier }}`
 
 {% if attempt %}
 Follow-up context:
