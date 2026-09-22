@@ -355,9 +355,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             "sandbox=#{inspect(thread_sandbox)}: #{inspect(reason, limit: 5)}"
         )
 
-        {:error,
-         {:thread_start_rejected,
-          %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, reason}}
+        {:error, {:thread_start_rejected, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, reason}}
 
       other ->
         other
