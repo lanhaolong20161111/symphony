@@ -13,6 +13,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         %{
           generated_at: generated_at,
+          paused: Map.get(snapshot, :paused, false),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),

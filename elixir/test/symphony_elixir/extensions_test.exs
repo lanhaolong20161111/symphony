@@ -262,6 +262,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
+             # paused is part of the payload now; a snapshot provider that does not report it is
+             # treated as not paused by the presenter.
+             "paused" => false,
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{

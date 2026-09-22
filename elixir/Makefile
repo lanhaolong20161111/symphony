@@ -1,4 +1,4 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage type-check ci dialyzer e2e
+.PHONY: help all setup deps build fmt fmt-check lint test coverage type-check workflow-check ci dialyzer e2e
 
 MIX ?= mix
 
@@ -20,6 +20,11 @@ build:
 # not ours to fix; mint's deprecated xref option is the current example).
 type-check:
 	$(MIX) compile --force --warnings-as-errors
+
+# The tracker's token only has to be present for this to validate the file -- nothing is called --
+# so a placeholder keeps the step runnable in CI without a secret.
+workflow-check:
+	GITHUB_TOKEN=workflow-check $(MIX) workflow.check
 
 fmt:
 	$(MIX) format
@@ -47,6 +52,7 @@ ci:
 	$(MAKE) setup
 	$(MAKE) build
 	$(MAKE) type-check
+	$(MAKE) workflow-check
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(MAKE) coverage

@@ -101,6 +101,20 @@ open http://127.0.0.1:4001/                      # the console (LiveView)
 The endpoint has **no authentication** and can read files, run commands and start agents, so it
 is loopback-only by design. Do not expose it.
 
+### Intervening
+
+Four verbs, no more:
+
+| verb | effect |
+|---|---|
+| `POST /api/v1/refresh` | poll the tracker now instead of waiting for the next interval (202) |
+| `POST /api/v1/pause` | stop taking on new work; runs already in flight keep going, and are still reconciled -- a drain, not a freeze |
+| `POST /api/v1/resume` | start taking on new work again |
+| *edit the tracker* | move an issue to a terminal state to stop its run -- note this also removes the workspace (see Operating notes) |
+
+`GET /api/v1/state` reports `paused`, so the flag is observable rather than something you have to
+remember setting.
+
 ### Serving the console behind a proxy mount
 
 If something else fronts Symphony on a path prefix (for example the recorder serving it at
@@ -118,6 +132,7 @@ upstream behaviour exactly as it was.
 
 ```sh
 mise exec -- mix compile --force --warnings-as-errors   # full type check (see below)
+GITHUB_TOKEN=workflow-check mise exec -- mix workflow.check   # config + prompt template
 mise exec -- mix lint                                   # specs.check + credo --strict
 mise exec -- mix format --check-formatted
 mise exec -- mix test

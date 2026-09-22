@@ -41,6 +41,8 @@ Only two engine-level changes are visible to a caller, plus the example workflow
 | `.gitattributes` | `* text=auto eol=lf` | line endings only |
 | `test/` tags and `test_helper.exs` | `:needs_ssh`, `:needs_symlinks`, `:posix_paths`, excluded on win32 | test-only; CI runs on Linux where nothing is excluded |
 | `docs/quickstart.md`, `docs/fork-changes.md`, README pointer | documentation | documentation |
+| `mix workflow.check` (`lib/mix/tasks/workflow.check.ex`) | validates WORKFLOW.md: the front matter against the config schema **and** the prompt body by rendering it once | a Mix task, run by hand or by the gate; it starts nothing and changes no runtime behaviour |
+| `POST /api/v1/pause` / `resume`, `paused` in the snapshot (`orchestrator.ex`, `presenter.ex`, `observability_api_controller.ex`, `router.ex`) | drains the queue: no new issues are dispatched, while runs in flight keep being reconciled and can finish | nothing is paused unless the endpoint is called; the default is `paused: false`, and `maybe_dispatch/1`'s unpaused path is the original code unchanged |
 | `scripts/measure_harness_cost/` | a tool that measures what a harness costs per ticket | a script, not part of the application |
 
 ## CI and toolchain

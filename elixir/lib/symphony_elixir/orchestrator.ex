@@ -37,6 +37,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
+      paused: false,
       blocked: %{},
       retry_attempts: %{},
       codex_totals: nil,
@@ -254,6 +255,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
+    # Paused means "do not take on new work": reconciliation below still runs, so runs already in
+    # flight keep being tracked and can finish, fail or retry. A drain, not a freeze.
+    if state.paused do
+      state
+    else
+      dispatch_new_work(state)
+    end
+  end
+
+  defp dispatch_new_work(%State{} = state) do
     state =
       state
       |> reconcile_running_issues()
@@ -1377,6 +1388,28 @@ defmodule SymphonyElixir.Orchestrator do
     request_refresh(__MODULE__)
   end
 
+  @doc """
+  Stop taking on new work. Runs already in flight keep going, so this drains rather than freezes.
+  """
+  @spec pause() :: map() | :unavailable
+  def pause, do: pause(__MODULE__)
+
+  @spec pause(GenServer.server()) :: map() | :unavailable
+  def pause(server) do
+    if Process.whereis(server), do: GenServer.call(server, :pause), else: :unavailable
+  end
+
+  @doc """
+  Resume taking on new work.
+  """
+  @spec resume() :: map() | :unavailable
+  def resume, do: resume(__MODULE__)
+
+  @spec resume(GenServer.server()) :: map() | :unavailable
+  def resume(server) do
+    if Process.whereis(server), do: GenServer.call(server, :resume), else: :unavailable
+  end
+
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
     if Process.whereis(server) do
@@ -1474,12 +1507,23 @@ defmodule SymphonyElixir.Orchestrator do
        blocked: blocked,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
+       paused: state.paused,
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
        }
      }, state}
+  end
+
+  def handle_call(:pause, _from, state) do
+    Logger.info("Orchestrator paused: no new work will be dispatched")
+    {:reply, %{paused: true}, %{state | paused: true}}
+  end
+
+  def handle_call(:resume, _from, state) do
+    Logger.info("Orchestrator resumed")
+    {:reply, %{paused: false}, %{state | paused: false}}
   end
 
   def handle_call(:request_refresh, _from, state) do
