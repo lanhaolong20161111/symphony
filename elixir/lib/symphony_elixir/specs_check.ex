@@ -33,7 +33,12 @@ defmodule SymphonyElixir.SpecsCheck do
         [path]
 
       File.dir?(path) ->
-        Path.wildcard(Path.join(path, "**/*.ex"))
+        # Path.expand is load-bearing on Windows: a path built by Path.join from System.tmp_dir!()
+        # mixes separators ("C:\\...\\Temp/specs-check-1") and Path.wildcard then matches nothing at
+        # all -- not even "*.ex" -- so the task reported "all public functions have @spec" about a
+        # directory it never read. Expanding first fixes that, and `**/*.ex` still covers files
+        # directly inside the directory (adding a flat "*.ex" pattern on top double-counted them).
+        Path.wildcard(Path.join(Path.expand(path), "**/*.ex"))
 
       true ->
         []
