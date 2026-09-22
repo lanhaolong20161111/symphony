@@ -1260,10 +1260,17 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  # The bounds are wall clock, but the measurement happens after an unbounded amount of VM and OS
+  # scheduling: the retry is scheduled, then the test sleeps, reads the state and computes the
+  # remainder. Two Windows runs measured 87ms and 804ms of that overhead, which is more slack than
+  # the 500ms-wide windows allow, so the lower bound is slack-adjusted. The upper bound stays
+  # exact -- scheduling a retry *later* than configured is the bug worth failing on.
+  @due_in_range_slack_ms 1_000
+
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
-    assert remaining_ms >= min_remaining_ms
+    assert remaining_ms >= min_remaining_ms - @due_in_range_slack_ms
     assert remaining_ms <= max_remaining_ms
   end
 
