@@ -207,10 +207,24 @@ observability endpoint's loopback:
 # in WORKFLOW.md:
 #   server: {host: 127.0.0.1, port: 4001, tracker_tools: true}
 
+# Put the arguments in a file and send it with --data-binary. Inlining escaped JSON is the one way
+# to get this wrong: on Windows PowerShell mangles the quotes, and a real ACP agent that tried the
+# inline form got a 400 malformed_body back (answered, not crashed -- but it had to rewrite the
+# command itself to finish the job).
+printf '%s' '{"method":"GET","path":"/repos/owner/name/issues"}' > body.json
 curl -s -X POST http://127.0.0.1:4001/api/v1/tools/github_api \
-  -H 'content-type: application/json' \
-  -d '{"method":"GET","path":"/repos/owner/name/issues"}'
+  -H 'content-type: application/json' --data-binary @body.json
 ```
+
+A prompt that asks an agent to use it, measured against a live ACP session: the agent ran the
+command, read the real GitHub payload back, and reported the number -- while holding no tracker
+credential of its own, since the endpoint executes with Symphony's configuration.
+
+Note the response shape: the tool result comes back as the provider-native envelope,
+`%{"contentItems" => [%{"type" => "inputText", "text" => "<the tool's JSON, as a string>"}], "output"
+=> ...}`, not as a bare JSON body. Read `contentItems[0].text` and decode it. (Chasing that with a
+regex against the whole response is how this note got written: the inner quotes are escaped, so a
+pattern like `"limit": 5000` will not match even when the call succeeded.)
 
 The body is the tool's arguments. Off by default for the same reason as the MCP server, and the
 credential stays here: the endpoint runs the tool with Symphony's configuration. Tell the agent it
