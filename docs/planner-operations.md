@@ -84,9 +84,13 @@ probe scripts it wrote itself, committed, and **pushed a branch**. Git authentic
 work is publishable. What it could not do is touch the tracker, because the executor workflow
 deliberately has no `acp.tracker_tools`.
 
-So the boundary is sharper than "the agent has no credentials": it may publish code, and it may not
-close its own tickets. Closing is an operator action, which is why a finished issue still reads as
-open until someone says otherwise.
+**But do not read that as a boundary, because it is not one.** On the same run the agent also reached
+`gh` from its shell and opened a pull request by itself: stripping the tracker token from the
+environment removes an *environment variable*, not the on-disk credential store that `gh` and `git`
+use. So the mediated tools are off by design, and the agent can still administer the tracker through
+the shell if it decides to. If that matters -- and with a write-capable token it does -- it has to be
+enforced where the credentials live (a locked-down home, a scoped token, a container), not by leaving
+a name out of the child's environment.
 
 ## After it runs
 
