@@ -157,6 +157,40 @@ confirmed to predate a change.
 | every run fails on the first turn | the agent backend rejected an option (this happened when codex renamed an approval policy); read the first `turn_ended_with_error` rather than the last one |
 | the console is blank but the API works | the LiveView socket: when served through a mount, `SYMPHONY_URL_PATH` must match the prefix, otherwise the browser dials `/live` on the wrong app |
 
+## Giving an ACP agent the tracker tools
+
+A Codex app-server turn can be handed tools directly (`dynamicTools`). An ACP session cannot: its
+tool channel is MCP, so the tools have to arrive as an MCP server. Measured against DSH (see
+`examples/mcp_declaration_probe.exs` in the ACP SDK), the declaration it honours is a **stdio
+entry** -- `%{"command" => ...}` -- not the `type: "acp"` tunnel variant: with the tunnel form the
+handshake succeeded and `mcp/connect` never arrived.
+
+So Symphony serves its own tracker tools over stdio:
+
+```sh
+mise exec -- mix escript.build                     # produces bin/symphony
+# in WORKFLOW.md:
+#   acp:
+#     tracker_tools: true
+```
+
+With that on, an ACP agent sees the configured tracker's provider-native tools -- for GitHub, a
+single `github_api` tool -- and calls them like any other MCP tool. The call is executed **here**,
+by `Tracker.execute_bound_agent_tool/4` with Symphony's own configuration: the agent sends a tool
+name and arguments, and never receives the tracker token. That is the same boundary the Codex path
+draws, reached a different way.
+
+Off by default, because it widens what an agent may do to the tracker. The server itself is
+`bin/symphony --mcp [WORKFLOW.md]`, which is also usable by hand:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | bin/symphony --mcp
+```
+
+It deliberately does not start the application -- the tracker adapter is a plain module and the
+configuration comes from the workflow file -- so it cannot put a second Orchestrator on the same
+tracker as the instance that spawned it.
+
 ## Assigning work from a commander
 
 `Orchestrator` is the only thing that decides what runs -- how many at once, what waits, what

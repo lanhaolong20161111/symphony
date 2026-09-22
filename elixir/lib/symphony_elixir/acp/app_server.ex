@@ -334,6 +334,26 @@ defmodule SymphonyElixir.ACP.AppServer do
 
   defp configured_command(_command), do: []
 
+  # The agent gets Symphony's tracker tools as an MCP server. Measured: DSH launches the MCP server
+  # itself (`%{"command" => ...}`) rather than connecting back through the ACP tunnel, so the
+  # declaration is a command line. Off unless `acp.tracker_tools: true`: it widens what an agent may
+  # do to the tracker, so it is not a default.
+  defp acp_mcp_servers(%{tracker_tools: true}), do: [tracker_tools_server()]
+  defp acp_mcp_servers(_acp), do: []
+
+  defp tracker_tools_server do
+    escript = Path.expand("bin/symphony")
+
+    unless File.regular?(escript) do
+      Logger.warning(
+        "acp.tracker_tools is on but #{escript} does not exist; build it with `mix escript.build` " <>
+          "or the agent will not see any tracker tools"
+      )
+    end
+
+    %{"command" => escript, "args" => ["--mcp", Path.expand(SymphonyElixir.Workflow.workflow_file_path())]}
+  end
+
   # ───────────────── 启动 ─────────────────
 
   defp start_client(adapter, command, workspace, acp, opts) do
@@ -343,7 +363,8 @@ defmodule SymphonyElixir.ACP.AppServer do
         command: command,
         cwd: workspace,
         init_timeout: init_timeout_ms(acp),
-        config_options: acp_config_options(acp)
+        config_options: acp_config_options(acp),
+        mcp_servers: acp_mcp_servers(acp)
       ]
       |> put_transport(Keyword.get(opts, :transport))
 

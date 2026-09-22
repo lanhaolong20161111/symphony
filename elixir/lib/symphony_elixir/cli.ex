@@ -4,9 +4,10 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.LogFile
+  alias SymphonyElixir.MCP.TrackerServer
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, mcp: :boolean]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -25,13 +26,54 @@ defmodule SymphonyElixir.CLI do
   @doc false
   @spec main([String.t()], (-> ensure_started_result())) :: no_return()
   def main(args, ensure_all_started) do
-    case evaluate(args, runtime_deps(ensure_all_started)) do
+    deps = runtime_deps(ensure_all_started)
+
+    case OptionParser.parse(args, strict: @switches) do
+      {opts, positional, []} -> serve_or_run(args, deps, Keyword.get(opts, :mcp, false), positional)
+      _ -> run_via_supervisor(args, deps)
+    end
+  end
+
+  defp serve_or_run(_args, deps, true, positional), do: run_mcp_server(positional, deps)
+  defp serve_or_run(args, deps, false, _positional), do: run_via_supervisor(args, deps)
+
+  defp run_via_supervisor(args, deps) do
+    case evaluate(args, deps) do
       :ok ->
         wait_for_shutdown()
 
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
+    end
+  end
+
+  # `--mcp` serves Symphony's tracker tools over stdio (see `MCP.TrackerServer`). It deliberately
+  # does not start the application: the tracker adapter is a plain module and the configuration is
+  # read from the workflow file, so a full start would add nothing except a second Orchestrator
+  # polling the same tracker as the instance that spawned this process. The optional path argument
+  # is what the ACP declaration passes, so the child reads the same workflow as its parent.
+  defp run_mcp_server(positional, deps) do
+    case maybe_set_mcp_workflow(positional, deps) do
+      :ok ->
+        TrackerServer.run()
+        System.halt(0)
+
+      {:error, message} ->
+        IO.puts(:stderr, message)
+        System.halt(1)
+    end
+  end
+
+  defp maybe_set_mcp_workflow([], _deps), do: :ok
+
+  defp maybe_set_mcp_workflow([path], deps) do
+    expanded = Path.expand(path)
+
+    if deps.file_regular?.(expanded) do
+      deps.set_workflow_file_path.(expanded)
+    else
+      {:error, "Workflow file not found: #{expanded}"}
     end
   end
 
@@ -78,7 +120,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]`n        symphony --mcp [path-to-WORKFLOW.md]   (serve tracker tools over stdio, for ACP agents)"
   end
 
   @spec runtime_deps() :: deps()

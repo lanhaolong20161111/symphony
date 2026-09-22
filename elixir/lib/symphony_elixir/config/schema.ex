@@ -259,6 +259,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:model, :string)
       field(:init_timeout_ms, :integer, default: 60_000)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
+      # Off by default: with this on the agent is handed Symphony's tracker tools (as an MCP server it
+      # may call), which widens what it can do to the tracker. See `MCP.TrackerServer`.
+      field(:tracker_tools, :boolean, default: false)
     end
 
     @doc false
@@ -270,7 +273,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:adapter, :command, :cli_path, :model, :init_timeout_ms, :turn_timeout_ms],
+        [:adapter, :command, :cli_path, :model, :init_timeout_ms, :turn_timeout_ms, :tracker_tools],
         empty_values: []
       )
       |> validate_inclusion(:adapter, @adapters)
