@@ -180,6 +180,12 @@ by `Tracker.execute_bound_agent_tool/4` with Symphony's own configuration: the a
 name and arguments, and never receives the tracker token. That is the same boundary the Codex path
 draws, reached a different way.
 
+A real ACP session measured how far this gets: DSH does **launch** the declared server (its stderr
+shows up in the ACP stream), but on this version it never speaks MCP to it -- the session succeeds
+and the agent has no such tool; with a tap in between, DSH raises `-32603 Internal error` and the tap
+sees zero bytes in either direction. So under ACP this route is blocked on the agent side, and the
+HTTP route below is the one that works today.
+
 Off by default, because it widens what an agent may do to the tracker. The server itself is
 `bin/symphony --mcp [WORKFLOW.md]`, which is also usable by hand:
 
