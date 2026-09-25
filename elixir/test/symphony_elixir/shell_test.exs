@@ -44,5 +44,52 @@ defmodule SymphonyElixir.ShellTest do
         assert is_list(Shell.git_roots())
       end
     end
+
+    test "the second call in a run does not touch the disk again" do
+      stub_probe()
+
+      # The injected probe stands in for `System.find_executable/1`, the one filesystem walk
+      # `git_roots/0` performs, and reports every call to this test. A second probe would
+      # therefore show up as a second message.
+      first = Shell.git_roots()
+      assert_received :git_executable_probed
+
+      second = Shell.git_roots()
+      refute_received :git_executable_probed
+      assert second == first
+    end
+
+    test "a new run probes again instead of reusing the previous run's roots" do
+      stub_probe()
+
+      # One run: the run owner probes once and caches in its own process dictionary.
+      Shell.git_roots()
+      assert_received :git_executable_probed
+      Shell.git_roots()
+      refute_received :git_executable_probed
+
+      # A new run is a new process: it must not inherit the earlier run's cached roots.
+      Task.async(fn -> Shell.git_roots() end) |> Task.await()
+      assert_received :git_executable_probed
+    end
+  end
+
+  # Swaps the probe behind `git_roots/0` for one that reports every call to the test process, so a
+  # cached call (no message) is distinguishable from one that walked the filesystem again.
+  defp stub_probe do
+    test_pid = self()
+    previous = Application.get_env(:symphony_elixir, :shell_find_executable)
+
+    Application.put_env(:symphony_elixir, :shell_find_executable, fn name ->
+      send(test_pid, :git_executable_probed)
+      System.find_executable(name)
+    end)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:symphony_elixir, :shell_find_executable)
+        probe -> Application.put_env(:symphony_elixir, :shell_find_executable, probe)
+      end
+    end)
   end
 end

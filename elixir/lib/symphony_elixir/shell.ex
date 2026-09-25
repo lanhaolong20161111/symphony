@@ -23,6 +23,8 @@ defmodule SymphonyElixir.Shell do
   Nothing changes on non-Windows hosts.
   """
 
+  @git_roots_cache_key {__MODULE__, :git_roots}
+
   @doc """
   bash for `-lc` launch commands.
 
@@ -99,11 +101,30 @@ defmodule SymphonyElixir.Shell do
     if windows?(), do: String.replace(command, "\\", "/"), else: command
   end
 
-  @doc "The Git for Windows installation roots to probe, most specific first."
+  @doc """
+  The Git for Windows installation roots to probe, most specific first.
+
+  Probed once per run: the first call in the run owner walks `PATH` and later calls in that same
+  process return the cached list, so the workspace hooks and launch setup of one run do not each
+  re-walk the filesystem. The cache lives in the process dictionary, so a new run (a new process)
+  probes again and can never reuse a stale list.
+  """
   @spec git_roots() :: [String.t()]
   def git_roots do
+    case Process.get(@git_roots_cache_key) do
+      nil ->
+        roots = probe_git_roots()
+        Process.put(@git_roots_cache_key, roots)
+        roots
+
+      roots ->
+        roots
+    end
+  end
+
+  defp probe_git_roots do
     from_git =
-      case System.find_executable("git") do
+      case find_executable("git") do
         nil ->
           []
 
@@ -131,6 +152,12 @@ defmodule SymphonyElixir.Shell do
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()
   end
+
+  # The single filesystem probe behind `git_roots/0`. Tests swap the probe function to count
+  # probes and prove the cache short-circuits the second call; production always uses `System`.
+  defp find_executable(name), do: probe().(name)
+
+  defp probe, do: Application.get_env(:symphony_elixir, :shell_find_executable, &System.find_executable/1)
 
   defp git_shell(relative_candidates) do
     roots = git_roots()
