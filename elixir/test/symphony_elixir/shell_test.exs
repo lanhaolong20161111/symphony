@@ -44,5 +44,43 @@ defmodule SymphonyElixir.ShellTest do
         assert is_list(Shell.git_roots())
       end
     end
+
+    test "the second call in a run does not touch the disk again" do
+      previous = Application.get_env(:symphony_elixir, :shell_probe_module)
+      Application.put_env(:symphony_elixir, :shell_probe_module, SymphonyElixir.ShellTest.ProbeStub)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:symphony_elixir, :shell_probe_module)
+          module -> Application.put_env(:symphony_elixir, :shell_probe_module, module)
+        end
+      end)
+
+      # `ProbeStub` stands in for `System.find_executable/1`, the one filesystem walk
+      # `git_roots/0` performs, and reports every probe to the calling process. A second
+      # probe would therefore show up as a second message.
+      first = Shell.git_roots()
+      assert_received :git_executable_probed
+
+      second = Shell.git_roots()
+      refute_received :git_executable_probed
+      assert second == first
+    end
+  end
+end
+
+defmodule SymphonyElixir.ShellTest.ProbeStub do
+  @moduledoc false
+
+  @doc """
+  Test double for the `System` probe used by `SymphonyElixir.Shell.git_roots/0`.
+
+  Records each probe in the caller's mailbox and then returns the real result, so a test can tell
+  a cached call (no message) apart from one that walked the filesystem again.
+  """
+  @spec find_executable(String.t()) :: String.t() | nil
+  def find_executable(name) do
+    send(self(), :git_executable_probed)
+    System.find_executable(name)
   end
 end
