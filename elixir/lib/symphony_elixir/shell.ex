@@ -104,8 +104,10 @@ defmodule SymphonyElixir.Shell do
   @doc """
   The Git for Windows installation roots to probe, most specific first.
 
-  Probed once per run: the first call in a process walks `PATH`, later calls return the cached
-  list, so the workspace hooks and launch setup of one run do not each re-walk the filesystem.
+  Probed once per run: the first call in the run owner walks `PATH` and later calls in that same
+  process return the cached list, so the workspace hooks and launch setup of one run do not each
+  re-walk the filesystem. The cache lives in the process dictionary, so a new run (a new process)
+  probes again and can never reuse a stale list.
   """
   @spec git_roots() :: [String.t()]
   def git_roots do
@@ -151,11 +153,11 @@ defmodule SymphonyElixir.Shell do
     |> Enum.uniq()
   end
 
-  # The single filesystem probe behind `git_roots/0`. Tests swap the probe module to count probes
-  # and prove the cache short-circuits the second call; production always uses `System`.
-  defp find_executable(name), do: probe_module().find_executable(name)
+  # The single filesystem probe behind `git_roots/0`. Tests swap the probe function to count
+  # probes and prove the cache short-circuits the second call; production always uses `System`.
+  defp find_executable(name), do: probe().(name)
 
-  defp probe_module, do: Application.get_env(:symphony_elixir, :shell_probe_module, System)
+  defp probe, do: Application.get_env(:symphony_elixir, :shell_find_executable, &System.find_executable/1)
 
   defp git_shell(relative_candidates) do
     roots = git_roots()

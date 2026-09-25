@@ -406,11 +406,16 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
+    # Resolve the shell in the run owner (this process) *before* the hook task is spawned. A bare
+    # `"sh"` is not on the Windows PATH, and the `bash` that *is* on it is WSL's, which cannot run
+    # these hook scripts. `Shell.find_sh/0` walks `PATH` through `Shell.git_roots/0`, whose cache
+    # lives in the calling process: resolving here makes every hook and the launch setup of one run
+    # share a single probe, whereas resolving inside the task would re-walk `PATH` in every hook.
+    shell = Shell.find_sh() || "sh"
+
     task =
       Task.async(fn ->
-        # Resolve the shell explicitly: a bare `"sh"` is not on the Windows PATH, and the `bash`
-        # that *is* on it is WSL's, which cannot run these hook scripts.
-        System.cmd(Shell.find_sh() || "sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd(shell, ["-lc", command], cd: workspace, stderr_to_stdout: true)
       end)
 
     case Task.yield(task, timeout_ms) do
