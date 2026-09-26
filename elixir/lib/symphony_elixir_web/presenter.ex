@@ -106,6 +106,11 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
       state: entry.state,
+      # Which agent this run is on, so a person reading the API can see the route without opening
+      # the agent's own session file. `model` is nil when the workflow does not pin one.
+      backend: Map.get(entry, :backend),
+      adapter: Map.get(entry, :adapter),
+      model: Map.get(entry, :model),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,

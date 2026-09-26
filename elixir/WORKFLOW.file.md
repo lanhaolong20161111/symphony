@@ -145,6 +145,18 @@ Description:
 
 {{ issue.description }}
 
+## Who you are
+
+- backend: `{{ agent.backend }}`
+- adapter: `{{ agent.adapter }}`
+- model: `{{ agent.model }}`
+- session: `{{ run.session_id }}`
+- workspace: `{{ run.workspace }}`
+- turn: {{ run.turn }}
+
+If the ticket asks which agent or which model is running, **this is the answer, and it is
+authoritative**. Do not go looking for it in the workspace or in the environment -- it is not there,
+and searching for it wastes the whole run.
 ## Your workspace
 
 Your working directory is a fresh clone of the target repository. Do all code work there.

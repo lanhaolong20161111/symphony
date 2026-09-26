@@ -561,16 +561,70 @@ defmodule SymphonyElixir.Janitor do
     end
   end
 
-  # Commenting the link back is what lets a person follow progress without ever leaving the issue.
+  # Posts the pull request's URL onto the issue, which is what lets a person follow progress without
+  # ever leaving it.
+  #
+  # Every path here says something. The first version used a `with` whose `else` was `_ -> :ok`, and
+  # the pattern was `[_, url] <- Regex.run(~r{https://\S+/pull/\d+}, ..)`: that regex has **no capture
+  # group**, so `Regex.run/2` returns a one-element list and the two-element pattern never matched.
+  # The comment was therefore never posted, for any ticket, in either mode -- and because the failure
+  # path was silent, nothing anywhere said so.
   defp comment_pr_link(id, ticket_path, output, cfg) do
-    with [_, url] <- Regex.run(~r{https://\S+/pull/\d+}, output),
-         [_, number] <- Regex.run(~r/^issue:\s*(\d+)/m, File.read!(ticket_path)) do
-      gh(["issue", "comment", number, "--repo", cfg.repo, "--body", "干完了，改动在这里：#{url}"])
-      Logger.info("janitor: #{id} PR link posted to issue ##{number}")
+    with url when is_binary(url) <- pull_request_url(output),
+         number when is_binary(number) <- issue_number(File.read!(ticket_path)) do
+      body = "干完了，改动在这里：#{url}"
+
+      case gh(["issue", "comment", number, "--repo", cfg.repo, "--body", body]) do
+        {:ok, _output, 0} ->
+          Logger.info("janitor: #{id} PR link posted to issue ##{number}")
+
+        other ->
+          Logger.warning("janitor: #{id} could not comment on issue ##{number}: #{inspect(other)}")
+      end
     else
-      _ -> :ok
+      nil ->
+        Logger.warning("janitor: #{id} has no PR url or issue number; cannot post the link")
     end
   end
+
+  @doc """
+  The pull request URL out of `gh pr create`'s output, or `nil`.
+
+  Public and tested because the shape of `Regex.run/2`'s return value is exactly what went wrong
+  once: a pattern without a capture group returns `[match]`, not `[match, group]`.
+  """
+  @spec pull_request_url(String.t()) :: String.t() | nil
+  def pull_request_url(output) when is_binary(output) do
+    case Regex.run(~r{https://\S+/pull/\d+}, output) do
+      [url] -> url
+      _ -> nil
+    end
+  end
+
+  def pull_request_url(_output), do: nil
+
+  @doc """
+  The issue number recorded in a ticket file, or `nil`.
+
+  Reads the front matter through `Ticket.split/1` rather than scanning the whole file: a ticket whose
+  body happens to contain a line like `issue: 999` must not be mistaken for a link to issue 999, and
+  reusing the ticket parser keeps one definition of what the front matter even is.
+  """
+  @spec issue_number(String.t()) :: String.t() | nil
+  def issue_number(ticket_text) when is_binary(ticket_text) do
+    case Ticket.split(ticket_text) do
+      {:ok, %{front_matter: front_matter}} ->
+        case Ticket.get(front_matter, "issue") do
+          "" -> nil
+          number -> number
+        end
+
+      :skip ->
+        nil
+    end
+  end
+
+  def issue_number(_ticket_text), do: nil
 
   defp has_pull_request?(branch, cfg) do
     case gh_json(["pr", "list", "--repo", cfg.repo, "--head", branch, "--state", "all",

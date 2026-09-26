@@ -102,6 +102,16 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    # The prompt can tell the agent who it is and which run it belongs to; only this layer knows the
+    # session and the workspace, so they travel in the opts. `session_id` is read the same way the
+    # turn result is read below, so the two cannot disagree.
+    opts =
+      Keyword.put(opts, :run, %{
+        workspace: workspace,
+        session_id: app_session[:session_id],
+        turn: turn_number
+      })
+
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-

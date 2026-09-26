@@ -326,7 +326,70 @@ know. Two decisions worth keeping:
   make a child conditional.
 * **The server is last in the list**, for the same reason, from the other side.
 
-### The trap that made this confusing to debug
+## The agent now knows who it is
+
+`PromptBuilder` used to render exactly two variables, `issue` and `attempt`. Nothing about the run
+reached the agent -- not the backend, not the model, not the session, not the workspace -- and
+because rendering uses `strict_variables: true`, a workflow could not even name the missing
+variable: the template would fail to render. A ticket reading "tell me the name of the running
+agent" was therefore **unanswerable**, and the agent behaved accordingly: it read the ticket twice,
+searched the environment for anything called `AGENT` or `SYMPHONY`, tried to list agents, then
+invented a file to patch and fought the patch tool until it was stopped. That is a missing channel,
+not a confused agent.
+
+`SymphonyElixir.AgentIdentity` now answers "which agent is this" in one place, and two callers use it
+so they cannot disagree:
+
+| caller | what it shows |
+|---|---|
+| `PromptBuilder` | `agent.backend`, `agent.adapter`, `agent.model`, plus `run.workspace`, `run.session_id`, `run.turn` |
+| the observability snapshot | the same three fields on every entry in `running[]`, so `/api/v1/state` and the dashboard say which route a run is on |
+
+Before this, the only way to find out which model a run was using was to open the agent's rollout
+file under `~/.codex/sessions` -- which is how the CommandCode routing was confirmed earlier, and it
+is not something a person should have to do.
+
+Two honest limits, both reported rather than papered over:
+
+* **The model is best-effort on the codex backend.** `acp.model` and `commandcode.model` are
+  configuration fields; codex has none, so its model lives inside `codex.command` (a shell string)
+  and the rest of its route lives in `~/.codex/config.toml`. `AgentIdentity` reads a `model=` or
+  `-m/--model` out of the command when the workflow pins one and reports `nil` when it does not --
+  which is the true answer, because in that case only codex's configuration knows. A test asserts
+  that `model_provider=` is not mistaken for `model=`.
+* **`run.session_id` is empty on turn 1 with the codex backend.** That backend learns its session id
+  from the first turn's *response*, so at the moment the first prompt is built there is nothing to
+  report. The ACP backend knows it from the handshake. The agent reported the empty value as empty
+  rather than guessing, which is the behaviour the prompt asks for.
+
+The workflow prompt now carries a "Who you are" block built from those variables, with one
+instruction attached: this is authoritative, do not go looking for it in the workspace or the
+environment. Measured on the ticket that had failed before -- it answered from the prompt, named the
+backend and the model correctly, and said so.
+
+## Every failure path has to say something
+
+The pull-request link comment never worked, for any ticket, in either mode, and nothing anywhere
+said so. The cause was one pattern shape:
+
+```elixir
+with [_, url] <- Regex.run(~r{https://\S+/pull/\d+}, output), ...
+```
+
+That regex has **no capture group**, so `Regex.run/2` returns a one-element list `[match]`, and the
+two-element pattern `[_, url]` cannot match. The `with` fell through to an `else` that was
+`_ -> :ok`. The URL was right there in the log line printed immediately before, which is why the
+output looked correct while the comment never appeared.
+
+Both halves of the lesson are now in the code: the parsing moved into two public, tested functions
+(`Janitor.pull_request_url/1` and `Janitor.issue_number/1`, the latter reading the front matter
+through `Ticket.split/1` so a body line cannot be mistaken for one), and `comment_pr_link/4` logs
+every branch -- no URL, no issue number, and a failing `gh` call each say something different.
+
+This is the same failure as the janitor's silent `:ignore` and the tracker's silent BOM skip: **a
+path that does nothing quietly is the hardest kind to find.**
+
+### The trap that made the supervised janitor confusing to debug
 
 Adding the config and restarting is not enough: **Symphony runs `bin/symphony`, an escript built
 earlier.** The rebuilt source had the `janitor` block in the schema and the server module in the

@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentIdentity, AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -1442,6 +1442,10 @@ defmodule SymphonyElixir.Orchestrator do
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
 
+    # Which agent these runs are on. Config-derived, and deliberately the same function the prompt
+    # builder uses, so what the dashboard shows and what the agent is told cannot disagree.
+    identity = AgentIdentity.current()
+
     running =
       state.running
       |> Enum.map(fn {issue_id, metadata} ->
@@ -1450,6 +1454,9 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: metadata.identifier,
           issue_url: metadata.issue.url,
           state: metadata.issue.state,
+          backend: identity.backend,
+          adapter: identity.adapter,
+          model: identity.model,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
