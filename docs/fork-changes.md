@@ -232,3 +232,59 @@ Neither is a style preference; both are forced by the reader.
   `local_launch_command/1` interpolates it into `exec ..`), so **bash** does its word splitting and
   shell quoting is stripped before codex sees the TOML fragments. That is why the upstream example
   writes `'model="gpt-5.5"'` with the quotes it does.
+
+---
+
+# The host janitor, and why it is Elixir
+
+The deployment above needs a process that is neither Symphony nor the agent: it keeps the ticket
+repository in step with GitHub, regenerates the boards, and publishes finished work. It began as a
+Windows PowerShell script and is now `mix janitor`.
+
+| | PowerShell (`elixir/scripts/janitor.ps1`, kept for its comments) | `mix janitor` |
+|---|---|---|
+| arguments | one string, split by a shell | a list, never split |
+| JSON | `ConvertFrom-Json` plus manual key walking | the built-in `JSON` module |
+| text | explicit UTF-8 everywhere, BOM-sensitive in both directions | UTF-8 by construction |
+| a hung child | hung one whole round for 62 minutes | per-call timeout that kills the process tree |
+| errors | `$LASTEXITCODE` checked by hand | `{:ok, _}` / `{:error, _}` |
+| tests | none possible | 23, and `mix lint` clean |
+
+`mix janitor [--once] [--interval N] [--skip-mirror]` runs it. It deliberately does **not** start the
+application: Symphony's app starts the observability endpoint, so `Mix.Task.run("app.start")` would
+make the janitor fight a running orchestrator for `server.port`. It starts `:logger` and nothing
+else, so the two can run side by side -- which is the normal deployment, since Symphony executes
+tickets and the janitor keeps the paperwork.
+
+The PowerShell traps are recorded here because none of them is visible from the outside, and each
+one cost real time:
+
+| # | trap | what it cost |
+|---|---|---|
+| 1 | a `.ps1` without a BOM is decoded as ANSI | non-ASCII comments shredded the script's syntax |
+| 2 | `[regex]::Replace($s, $p, $r, 1)` -- the static overload has **no count parameter**, so the trailing `1` becomes `RegexOptions` (1 = IgnoreCase) | every match replaced; a second copy of a key ended up inside a ticket body |
+| 3 | a multi-line argument to a native command is split on whitespace | `gh` read fragments of a ticket body as command-line flags |
+| 4 | native stdout is decoded with the console codepage | every non-ASCII title and comment came back as mojibake |
+| 5 | `$_` inside a nested `Where-Object` is the inner item | every count in the board's view bar read zero |
+| 6 | `Get-Content` / `Set-Content` default encodings | mangled non-ASCII and added a BOM -- and a BOM hides a ticket from the tracker entirely |
+| 7 | `Select-Object -Last N` truncates the pipe | a command that had succeeded looked like it had failed |
+| 8 | a nested-quantifier regex backtracked exponentially | one command hung for two minutes |
+| 9 | a native child exits but leaves its stdout pipe open | a whole round hung for **62 minutes** with no child process left alive |
+| 10 | only Windows PowerShell 5.1 is present on this machine | none of the modern conveniences |
+| 11 | native failures do not raise | every call needed a hand-written status check |
+
+Three properties of the port are deliberate; do not "simplify" them away:
+
+* **`Shell.run/3` opens a port instead of calling `System.cmd/3`.** `System.cmd` has no timeout, and
+  the 62-minute hang was a child that had *already exited* -- so the only reliable escape is to hold
+  the OS pid and kill the process tree (`taskkill /T /F`).
+* **`Ticket.set_key/3` edits only the front-matter section** and passes `global: false`, which makes
+  trap 2 structurally impossible. A test asserts that a body line repeating the same key is left
+  alone.
+* **The board timestamps use `time: :local`.** The first version formatted a UTC timestamp into a
+  board a person reads, so every "Updated" cell was eight hours early -- and, worse, the value then
+  differed from the file just written, so the board rewrote and committed itself on every round.
+
+`mix janitor` is idempotent: a second round with nothing changed performs no action and makes no
+commit. That is worth asserting whenever the mirror logic is touched, because the failure mode is a
+repository that commits itself every thirty seconds.

@@ -82,36 +82,20 @@ hooks:
         echo "after_run: pr create failed (already open, or no gh auth)"
     fi
 agent:
-  # One ticket on the first run: keep it small, and use max_turns as a brake
-  # (an earlier run today spun on a dangling reference and burned a lot of budget).
-  max_concurrent_agents: 2
+  # ACP backend: DSH speaks the agent protocol; the model route comes from acp.model.
+  backend: acp
+  max_concurrent_agents: 1
   max_turns: 5
-codex:
-  # Route: CommandCode's DeepSeek V4.1 Flash -- NOT the operator's own DeepSeek API key.
-  # Measured 2026-09-26: without this the run lands on model_provider=deepseek
-  # (base_url https://api.deepseek.com/) and bills the official key; one stuck run spent
-  # 11.4M input / 152k output tokens there before it was caught.
-  #
-  # `--profile commandcode` does NOT work on codex 0.155.1: it rejects the legacy
-  # `[profiles.commandcode]` table in config.toml and demands the settings move to a
-  # separate ~/.codex/commandcode.config.toml. We deliberately do not touch that config --
-  # the same settings are passed explicitly instead.
-  #
-  # Note the quoting: Symphony hands this whole string to `bash -lc` (codex/app_server.ex
-  # local_launch_command/1), so bash does the word splitting and shell quotes are stripped
-  # before codex sees the TOML fragments.
-  command: codex --config shell_environment_policy.inherit=all --config model_provider='"commandcode"' --config 'model="deepseek/deepseek-v4.1-flash"' app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
-  turn_sandbox_policy:
-    type: workspaceWrite
-    networkAccess: true
-    # The ticket file lives OUTSIDE the agent's workspace, and workspaceWrite only allows
-    # writes inside the workspace by default => without this the agent can read the ticket
-    # but not change its state. The key name is inferred (camelCase, same family as
-    # networkAccess); if codex rejects it, thread/start will say so and we adjust.
-    writableRoots:
-      - C:/Users/lhl20/code/symphony-tickets
+acp:
+  adapter: dsh
+  command: ["dsh", "--profile", "acp"]
+  # DSH's session/new accepts only cwd + mcpServers, so the model has to go through
+  # session/set_config_option, whose value is a JSON STRING ["<provider>","<model>"]
+  # (see AcpSdk.Adapters.DSH). The value must match one of the entries that session/new
+  # returns in configOptions, or the switch is rejected with -32602.
+  model: '["commandcode","deepseek/deepseek-v4.1-flash"]'
+  init_timeout_ms: 120000
+  turn_timeout_ms: 3600000
 ---
 
 You are working on ticket `{{ issue.identifier }}`.
