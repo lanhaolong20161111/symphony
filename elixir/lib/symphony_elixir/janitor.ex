@@ -202,25 +202,77 @@ defmodule SymphonyElixir.Janitor do
     write_state(cfg, state)
   end
 
+  # Decides what the ticket's state should become, from what the issue says about it.
+  #
+  # Precedence, and why:
+  #
+  #   1. **A closed issue wins over any label.** Closing is deliberate and unmistakable; whatever
+  #      label is left behind is just the state it had when it was closed. Reading that label back
+  #      is how a ticket the person had just finished got flipped to `ready` on the very next line
+  #      of the log -- and, because it happened every round, the mirror never settled.
+  #   2. **A label equal to the state we last pushed means there is nothing to do.** Both sides
+  #      write, so without this rule they overwrite each other every round.
+  #   3. **A label equal to the ticket's own state means the agent already got there.**
+  #   4. Otherwise the label is a person's instruction, and it wins.
+  #
+  # Everything is compared as *internal* states. Comparing an internal state against the label a
+  # person sees is never equal -- that was the second half of the same bug, and it is why the
+  # bookkeeping stores `state` rather than `label`.
+  @doc """
+  The state a ticket should take given what its issue reports, or `:keep`.
+
+  Input keys: `:closed`, `:claimed` (internal state or `nil`), `:last` (the internal state the
+  janitor last pushed) and `:current` (the ticket's own state).
+  """
+  @spec next_state(%{
+          closed: boolean(),
+          claimed: String.t() | nil,
+          last: String.t() | nil,
+          current: String.t()
+        }) :: String.t() | :keep
+  def next_state(%{closed: true, current: current}) do
+    if current in @terminal_states, do: :keep, else: "done"
+  end
+
+  def next_state(%{claimed: nil}), do: :keep
+  def next_state(%{claimed: claimed, last: last}) when claimed == last, do: :keep
+  def next_state(%{claimed: claimed, current: current}) when claimed == current, do: :keep
+  def next_state(%{claimed: claimed}), do: claimed
+
+  # Clauses of `sync_issue/3` stay adjacent: a clause on the far side of another function is a
+  # compiler warning, and `--warnings-as-errors` turns that into a gate failure.
   defp sync_issue(%{issue: ""} = row, state, cfg), do: adopt_issue(row, state, cfg)
 
   defp sync_issue(row, state, cfg) do
-    entry = Map.get(state, row.id, %{"label" => "", "comment" => 0})
+    entry = Map.get(state, row.id, %{"state" => nil, "comment" => 0})
 
     with {:ok, issue} <- gh_json(["issue", "view", row.issue, "--repo", cfg.repo,
                                        "--json", "state,labels,assignees,comments"]) do
       labels = Enum.map(issue["labels"] || [], & &1["name"])
 
-      # Each step returns the row it may have changed. Dropping the updated row is how a closed
-      # issue would get its "waiting for you" label written straight back on.
-      {row, entry} = pull_closed(row, issue, entry)
-      {row, entry} = pull_label(row, Labels.state_from_labels(labels), entry)
+      decision =
+        next_state(%{
+          closed: issue["state"] == "CLOSED",
+          claimed: Labels.state_from_labels(labels),
+          last: entry["state"],
+          current: row.state
+        })
+
+      {row, entry} = apply_state(row, decision, entry)
       row = pull_assignee(row, issue)
       entry = pull_comments(row, issue, entry)
       entry = push_label(row, labels, entry, cfg)
 
       {:ok, Map.put(state, row.id, entry)}
     end
+  end
+
+  defp apply_state(row, :keep, entry), do: {row, entry}
+
+  defp apply_state(row, state, entry) do
+    write_state_key(row, "state", state)
+    Logger.info("janitor: #{row.id} state -> #{state}")
+    {%{row | state: state, state_label: Labels.friendly(state)}, Map.put(entry, "state", state)}
   end
 
   # A ticket with no issue (created by hand) gets one, and the number goes back into the ticket so
@@ -243,7 +295,7 @@ defmodule SymphonyElixir.Janitor do
           [_, number] ->
             File.write!(path, Ticket.set_key(File.read!(path), "issue", number))
             Logger.info("janitor: #{row.id} adopted into issue ##{number}")
-            {:ok, Map.put(state, row.id, %{"label" => row.state_label, "comment" => 0})}
+            {:ok, Map.put(state, row.id, %{"state" => row.state, "comment" => 0})}
 
           _ ->
             {:error, {:unexpected_output, output}}
@@ -259,36 +311,6 @@ defmodule SymphonyElixir.Janitor do
 
   defp body_for_issue(row, cfg) do
     "Ticket file: https://github.com/#{cfg.tickets_repo}/blob/master/#{row.id}.md\n\n#{row.body}"
-  end
-
-  defp pull_closed(row, issue, entry) do
-    cond do
-      issue["state"] != "CLOSED" ->
-        {row, entry}
-
-      row.state in @terminal_states ->
-        {row, entry}
-
-      true ->
-        write_state_key(row, "state", "done")
-        Logger.info("janitor: #{row.id} state <- issue closed")
-        {%{row | state: "done", state_label: Labels.friendly("done")}, Map.put(entry, "label", Labels.friendly("done"))}
-    end
-  end
-
-  # Human write surface: the state label. The test is "not the label we last wrote", otherwise the
-  # two sides overwrite each other every round.
-  defp pull_label(row, claimed, entry) do
-    last = entry["label"]
-
-    cond do
-      claimed == nil or claimed == last -> {row, entry}
-      claimed == row.state -> {row, Map.put(entry, "label", claimed)}
-      true ->
-        write_state_key(row, "state", claimed)
-        Logger.info("janitor: #{row.id} state <- issue label (#{Labels.friendly(claimed)})")
-        {%{row | state: claimed, state_label: Labels.friendly(claimed)}, Map.put(entry, "label", claimed)}
-    end
   end
 
   defp pull_assignee(row, issue) do
@@ -373,7 +395,9 @@ defmodule SymphonyElixir.Janitor do
           gh(["issue", "edit", row.issue, "--repo", cfg.repo, "--remove-label", label])
         end)
 
-        Map.put(entry, "label", desired)
+        # Record the internal state we just put on the issue, so the next round's read of that same
+        # label is recognised as ours rather than as a person's instruction.
+        Map.put(entry, "state", row.state)
     end
   end
 
