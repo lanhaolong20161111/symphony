@@ -38,6 +38,20 @@ workspace:
 server:
   host: 127.0.0.1
   port: 4001
+janitor:
+  # Host-side caretaker, supervised by this application: keeps the ticket repository in step with
+  # GitHub, regenerates the boards, and publishes work the agent has finished.
+  #
+  # Off by default -- nothing starts unless a workflow asks for it. When on, one round runs every
+  # interval_ms; see SymphonyElixir.Janitor.Server.
+  enabled: true
+  interval_ms: 30000
+  tickets_path: C:/Users/lhl20/code/symphony-tickets
+  workspace_root: C:/Users/lhl20/code/symphony-file-workspaces
+  # Tickets are data in their own repository; issues are the human surface in the code repository.
+  tickets_repo: lanhaolong20161111/beekeeper-tickets
+  issues_repo: lanhaolong20161111/beekeeper
+  state_file: C:/Users/lhl20/code/symphony-janitor-state.json
 hooks:
   timeout_ms: 600000
   after_create: |
@@ -151,7 +165,12 @@ the file *is* the tracker.
 ## Steps
 
 1. Set the ticket to `state: in-progress`.
-2. Do the work the ticket describes. If it describes a bug, reproduce it first so the target is explicit.
+2. Do the work the ticket describes. If it describes a bug, reproduce it first so the target is
+   explicit.
+   **If the ticket asks a question instead of requesting a change, answer it in a new file
+   `ANSWER.md` at the root of your workspace, and change nothing else.** A question produces no
+   diff, so without that file the answer reaches nobody: the host publishes your working tree, and
+   that file is what carries it back to the person who asked.
 3. Establish the acceptance check, and run it.
    - If the ticket has a `Validation` section, **that** is the check. Run it and make it pass before
      you go on.

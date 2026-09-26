@@ -40,7 +40,11 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.WorkflowStore,
       SymphonyElixir.AgentRuntimeSupervisor,
       SymphonyElixir.HttpServer,
-      SymphonyElixir.StatusDashboard
+      SymphonyElixir.StatusDashboard,
+      # Last on purpose: it reads `Config.settings!/0` in `init/1`, so the workflow has to be
+      # loaded by then. It returns `:ignore` unless `janitor.enabled` is true, so adding it here
+      # changes nothing for a workflow that does not ask for it.
+      SymphonyElixir.Janitor.Server
     ]
 
     Supervisor.start_link(

@@ -374,6 +374,46 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Janitor do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Off by default, like every other addition in this fork: nothing starts unless a workflow
+      # asks for it. See `SymphonyElixir.Janitor.Server` for what it does when it is on.
+      field(:enabled, :boolean, default: false)
+      field(:interval_ms, :integer, default: 30_000)
+      field(:tickets_path, :string)
+      field(:workspace_root, :string)
+      # The repository the tickets live in, and the one the issues live in. They are different
+      # repositories on purpose: tickets are data, issues are the human surface.
+      field(:tickets_repo, :string)
+      field(:issues_repo, :string)
+      field(:state_file, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :interval_ms,
+          :tickets_path,
+          :workspace_root,
+          :tickets_repo,
+          :issues_repo,
+          :state_file
+        ],
+        empty_values: []
+      )
+      |> validate_number(:interval_ms, greater_than: 0)
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -386,6 +426,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:janitor, Janitor, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -482,6 +523,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:janitor, with: &Janitor.changeset/2)
   end
 
   defp finalize_settings(settings) do

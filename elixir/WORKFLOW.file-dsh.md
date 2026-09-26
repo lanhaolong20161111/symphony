@@ -135,7 +135,12 @@ the file *is* the tracker.
 ## Steps
 
 1. Set the ticket to `state: in-progress`.
-2. Do the work the ticket describes. If it describes a bug, reproduce it first so the target is explicit.
+2. Do the work the ticket describes. If it describes a bug, reproduce it first so the target is
+   explicit.
+   **If the ticket asks a question instead of requesting a change, answer it in a new file
+   `ANSWER.md` at the root of your workspace, and change nothing else.** A question produces no
+   diff, so without that file the answer reaches nobody: the host publishes your working tree, and
+   that file is what carries it back to the person who asked.
 3. Establish the acceptance check, and run it.
    - If the ticket has a `Validation` section, **that** is the check. Run it and make it pass before
      you go on.

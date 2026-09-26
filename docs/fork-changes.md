@@ -125,6 +125,14 @@ cannot do becomes the whole run's activity.** The agent does not skip an impossi
 around it -- deleting `_build`, creating a `subst` drive, probing ACLs, trying
 `http.sslBackend=openssl`. One run spent 6.4M input / 80k output tokens on pitfall 8(b).
 
+And a corollary, learned the same way: **a ticket can be a question, and a workspace holds no answer
+to it.** A ticket reading "tell me the name of the running agent" left the agent alone in a clone
+with nothing to change; it read the ticket twice, searched the environment for anything named
+`AGENT`/`SYMPHONY`, tried to list agents, then invented a file to patch and fought the patch tool
+until it was stopped. So the prompt now says that a ticket which *asks* rather than requests is
+answered in `ANSWER.md` at the workspace root: a question produces no diff, and that file is what
+carries the answer back to the person, through the same publish path as any code change.
+
 ## Two structural findings
 
 ### 1. In the `workspaceWrite` sandbox the agent cannot publish
@@ -288,3 +296,48 @@ Three properties of the port are deliberate; do not "simplify" them away:
 `mix janitor` is idempotent: a second round with nothing changed performs no action and makes no
 commit. That is worth asserting whenever the mirror logic is touched, because the failure mode is a
 repository that commits itself every thirty seconds.
+
+## The janitor is also a supervised child
+
+`janitor.enabled: true` in a workflow starts `SymphonyElixir.Janitor.Server` as the last child of
+the application supervisor, where it runs the same rounds `mix janitor` runs. Off by default, like
+every other addition in this fork: `init/1` returns `:ignore` when it is not enabled, so a workflow
+that does not ask for it sees no new process, no new log line and no new config key in effect.
+
+| | `mix janitor` | `janitor.enabled: true` |
+|---|---|---|
+| who supervises it | whatever launched it -- a terminal, a job, nothing | the application supervisor |
+| if it crashes | it is gone, and nobody notices | restarted (`:permanent`) |
+| if the machine reboots | nothing starts it | starts with Symphony |
+| logs | its own stdout | Symphony's structured log |
+
+The round is deliberately **synchronous** inside `handle_info/2`. The interesting question is what
+bounds a round, and the answer is the per-command killable timeout in `Janitor.Shell.run/3`, not a
+second deadline layered on top. A linked task would add that duplicate deadline and would also take
+the server down with it when it died. Nothing calls into the server, so blocking its mailbox for a
+round costs nothing.
+
+`config/schema.ex` gained the `janitor` block, and `docs` here is the only other place that needs to
+know. Two decisions worth keeping:
+
+* **`Config.settings!/0` is read in `init/1`, not while building the child list.** The child list is
+  evaluated *before* `Supervisor.start_link/2` runs, so at that moment `WorkflowStore` has not
+  started and the settings cannot be trusted yet. `:ignore` from `init/1` is the idiomatic way to
+  make a child conditional.
+* **The server is last in the list**, for the same reason, from the other side.
+
+### The trap that made this confusing to debug
+
+Adding the config and restarting is not enough: **Symphony runs `bin/symphony`, an escript built
+earlier.** The rebuilt source had the `janitor` block in the schema and the server module in the
+tree; the running binary had neither, and an unknown top-level workflow key is **silently ignored**,
+so nothing anywhere complained that `janitor.enabled: true` was doing nothing. The symptom was a
+workflow that started normally and a feature that never ran.
+
+`mix escript.build` is therefore part of changing anything under `lib/`, and the cheap check is to
+compare mtimes: a binary older than the source it is supposed to contain cannot contain it.
+
+A second, smaller confusion in the same session: the janitor *was* running, but its log line was in
+`symphony.log.2` while `symphony.log.1` -- ten megabytes of an earlier run -- still looked like the
+current file. Grep every file the log directory holds, or check the state file's mtime, which every
+round rewrites.
