@@ -69,3 +69,166 @@ Two things written elsewhere during this work were wrong and are corrected here:
   acea168..HEAD -- lib/symphony_elixir/config/schema.ex` is empty.
 - The Makefile's `build` target is fine: `mix build` is an alias (`build: ["escript.build"]`) in
   `mix.exs`. An earlier "task not found" was a wrong-directory mistake, not a broken target.
+
+---
+
+# Operating the file tracker end to end (2026-09-26)
+
+A separate deployment from the planner work above: tickets live as Markdown files in a **git
+repository with a private GitHub remote**, and the fork's own `tracker/file.ex` reads them. Nothing
+in this section changes engine code -- it is a `WORKFLOW.md` variant plus a host-side script. It is
+written down here because every item below cost real time to find, and a fresh agent will otherwise
+re-derive all of it.
+
+Artifacts (all outside this repository except the workflow):
+
+| artifact | where | what it is |
+|---|---|---|
+| `elixir/WORKFLOW.file.md` | this repo (untracked at the time of writing) | `tracker.kind: file`, `active_states: [ready, in-progress]`, `terminal_states: [done, cancelled, failed]`, a purpose-built prompt, and a publishing hook |
+| `symphony-janitor.ps1` | `~/code/` (host-side, not in any repo) | the host janitor: board, ticket sync, publish sweep, GitHub Issue mirror |
+| `beekeeper-tickets` | private GitHub repo | the ticket queue; only safe because it holds nothing but Markdown |
+| `~/code/symphony-file-workspaces/<identifier>/` | local | one workspace per ticket, named after the identifier |
+
+## The state machine, and why `in-progress` must be active
+
+`orchestrator.ex`'s `reconcile_issue_state/4` has four branches:
+
+```
+terminal                          -> terminate, and clean the workspace
+not routable                      -> terminate, keep the workspace
+active                            -> refresh and keep going
+anything else (non-active)        -> "Issue moved to non-active state", terminate, keep the workspace
+```
+
+So the third and fourth branches together force the design: **a state the agent sets while working
+must be in `active_states`**, or reconcile terminates the run the instant the agent touches the
+ticket. That is why `in-progress` is listed as active, and why `in-review` is deliberately in
+neither list -- it is the "stop and wait for a human" state, and it works for free.
+
+## Measured pitfalls
+
+Each of these was hit, diagnosed and fixed here; none is a guess.
+
+| # | symptom | cause | fix |
+|---|---|---|---|
+| 1 | `System.cmd("sh", ..)` -> `:enoent` | `sh` was not on `PATH`; `bash` resolved to WSL's, which cannot run a Windows command | the fork's `Shell.find_bash/0` / `find_sh/0` already pick Git's; the launcher also prepends Git's `bin`/`usr\bin` (harmless redundancy) |
+| 2 | `Workspace hook timed out hook=after_create` | `hooks.timeout_ms` defaults to `60_000`, while `git clone` + `mix deps.get` needs >90s | `hooks.timeout_ms: 600000` |
+| 3 | the retry reused a half-empty workspace and the agent ran with no source | after a hook timeout Windows cannot delete the partial directory (`:eacces`), so the next attempt found a directory that was non-empty but incomplete | make the hook **idempotent**: `if [ ! -d .git ]; then git clone ..; fi` |
+| 4 | `{:approval_required, %{"method" => "item/commandExecution/requestApproval"}}` in an endless retry loop | `approval_policy: on-request` has no operator channel to answer it | `approval_policy: never` -- `codex/app_server.ex` auto-approves only when the policy equals `"never"` |
+| 5 | a ticket **silently disappeared** from the queue (the queue just looked empty) | the file was written as UTF-8 **with a BOM**; `file.ex`'s front matter regex is `\A---`, which a BOM breaks, and a `.md` without front matter is *skipped by design* | write ticket files as UTF-8 **without** BOM. This is the failure mode `file.ex`'s own moduledoc names as the worst one, and it is reachable by any Windows editor that adds a BOM |
+| 6 | `{:file_tracker_invalid_yaml, .., %YamlElixir.ParsingError{}}` | `title: Smoke test: add a marker line ..` -- an **unquoted colon** inside a plain YAML scalar | quote it: `title: "Smoke test: add a marker line .."` |
+| 7 | `%YamlElixir.ParsingError{type: :invalid_unicode, message: "Invalid Unicode character at byte #156"}` | non-ASCII in the **workflow's** front matter (a Chinese comment). The workflow and the tickets go through the same parser, but only the workflow rejects it -- measured: a ticket with a Chinese title, Chinese labels and a Chinese body parses fine | keep the workflow's front matter strictly ASCII; comments go in the body or as ASCII |
+| 8 | a run burned its entire budget flailing | the prompt asked for something the sandbox forbids. Three separate instances, in this order: (a) `.codex/skills/{linear,commit,push,pull,land}` references that do not exist when the hook clones a non-symphony repo; (b) a `Validation` of `mix format --check-formatted`, which compiles deps, and the sandbox can neither reach Hex nor run MSVC; (c) "commit, push and open a PR", which finding 1 below makes impossible | treat the prompt as a specification the sandbox must satisfy: every command named in a ticket has to be runnable *there*, and nothing may ask the agent to publish |
+
+Pitfall 8 has a shape worth stating plainly, because it recurred: **anything in the prompt the agent
+cannot do becomes the whole run's activity.** The agent does not skip an impossible step, it works
+around it -- deleting `_build`, creating a `subst` drive, probing ACLs, trying
+`http.sslBackend=openssl`. One run spent 6.4M input / 80k output tokens on pitfall 8(b).
+
+## Two structural findings
+
+### 1. In the `workspaceWrite` sandbox the agent cannot publish
+
+Measured, from the agent's own shell output:
+
+```
+fatal: cannot lock ref 'refs/heads/symphony/SYM-6':
+       unable to create directory for .git/refs/heads/symphony/SYM-6
+
+gh : failed to load config: open C:\Users\..\AppData\Roaming\GitHub CLI\config.yml:
+     Access is denied.
+```
+
+`.git/` is read-only for the agent and `gh` cannot read its own configuration (it lives under
+`%APPDATA%`, outside the workspace). So `git add`, `git checkout -b`, `git commit`, `git push` and
+`gh pr create` **all fail**, no matter how `networkAccess` is set, and there is no permission to
+escalate to (the agent correctly refused to try).
+
+Consequence: the agent's job ends at "files changed and validated, ticket set to `in-review`", and
+**publishing is the host's job**. A hook or a host-side sweep runs outside that sandbox and has
+`.git`, `gh` and the certificate store.
+
+### 2. `hooks.after_run` does not fire on the path that matters
+
+`agent_runner.ex` wraps all turns in `try/after`, so `after_run` looks like the natural place to
+publish. It is not:
+
+```
+agent sets the ticket to `in-review`
+  -> reconcile sees a non-active state
+  -> terminate_running_issue/3 -> stop_running_task/3 -> terminate_task/2
+  -> Task.Supervisor.terminate_child/2  (or Process.exit(pid, :shutdown))
+```
+
+That is an **external** exit signal, and the run task does **not** set `trap_exit`, so the process is
+killed without unwinding and the `after` block never runs. `after_run` is kept in the workflow for
+the other path (a run that completes while the ticket is still active), but the host sweep is what
+actually publishes. Both are idempotent, so they cannot double-publish.
+
+The general lesson: **do not hang required work off `after_*` hooks in this orchestrator** until you
+have checked how the run is terminated.
+
+## The janitor, and each of its criteria
+
+`symphony-janitor.ps1` runs every 30s and does four things. The criteria are the load-bearing part:
+
+| phase | criterion | why exactly that |
+|---|---|---|
+| board | every `.md` with front matter, except `BOARD-*` and `README.md` | front matter is what makes a file a ticket; the generated view files must never be mistaken for tickets (they are not: they have no front matter, and `file.ex` skips those) |
+| ticket sync | `git add -A` -> commit -> `pull --rebase --autostash` -> push | `--autostash` is what lets it run while an agent is mid-edit on a ticket file |
+| publish sweep | ticket state is `in-review` **and** (workspace is dirty **or** the branch has no PR) | the second half is not redundant: if the push succeeds and `gh pr create` fails, the workspace is already clean, so a dirty-only trigger would never retry |
+| Issue mirror | one GitHub Issue per ticket, id recorded back into the ticket as `issue:` | the id gives a stable link in both directions without title searching |
+
+**Single writer per field** -- the rule that keeps this from becoming two sources of truth:
+
+| field | written by | flows |
+|---|---|---|
+| `state`, `assignee_id`, discussion | the human, through the Issue | Issue -> janitor -> ticket file |
+| code changes, the PR | the agent | workspace -> janitor -> branch + PR |
+| the boards | the janitor alone | read-only for everyone else |
+
+The conflict rule for `state` is what makes that work: the janitor remembers the label it last wrote,
+and only treats the label as a human edit when it differs from **that** value. Without it the two
+sides would fight every 30s.
+
+## Board conventions
+
+- `README.md` is the repository's landing page: a link bar with per-state counts, then the full table.
+- `BOARD-<state>.md` is one view per state, header carrying the count; terminal states are capped at
+  20 rows with a "showing 20 of N" note.
+- The boards carry **no front matter**, which is both what keeps the tracker from reading them and
+  what keeps the janitor from listing them.
+- Everything in them is regenerated every 30s, so hand edits are lost; each file says so.
+
+## Windows PowerShell 5.1 + `gh`: six more ways to lose time
+
+These are host-side, but they are the difference between a working janitor and a confusing one.
+
+| # | symptom | cause | fix |
+|---|---|---|---|
+| 1 | `Unexpected token '}'` from a script that looks fine | this machine runs **Windows PowerShell 5.1**, which decodes a `.ps1` as ANSI unless it has a BOM; the Chinese comments were mangled into stray quotes | save the script as UTF-8 **with** BOM. Every edit tool that rewrites the file without one breaks it again |
+| 2 | a key was written twice, once of them into the ticket body | `[regex]::Replace($s, $p, $r, 1)` -- the **static** overload has no count parameter, so the trailing `1` is taken as `RegexOptions` (`1` = IgnoreCase) and *every* match is replaced | use the instance form: `([regex]$p).Replace($s, $r, 1)` |
+| 3 | `Cannot convert value "5845913451" to type "System.Int32"` | GitHub comment ids exceed `Int32` | cast with `[long]` |
+| 4 | `unknown flag: --> README.md\` exits 0` | PowerShell 5.1 passes a **multi-line** argument to a native command by splitting it on whitespace, so `gh` saw fragments of the body as flags; the body's backticks were also eaten as escapes | `--body-file <temp file>`, never `--body "<multiline>"` |
+| 5 | every Chinese title and comment came back as mojibake | PowerShell 5.1 decodes a native command's stdout with the **console** codepage (GBK here) while `gh` emits UTF-8 | `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)` and `$OutputEncoding` likewise, before shelling out |
+| 6 | `could not add label: 'state:in-review' not found`, and the whole `gh issue create` failed | GitHub labels must exist before they can be attached | create the state labels once at startup; ignore "already exists" |
+
+Two related notes on encodings, because they pull in opposite directions: ticket files must be UTF-8
+**without** BOM (pitfall 5 above), and PowerShell scripts must be UTF-8 **with** BOM (item 1 here).
+Neither is a style preference; both are forced by the reader.
+
+## Corrections to earlier claims
+
+- An early note said the run "used the operator's official DeepSeek API key" as a property of the
+  setup. It was a property of the *default* `~/.codex/config.toml` only: `model_provider = "deepseek"`
+  with no pin in the workflow. The workflow now passes
+  `--config model_provider='"commandcode"' --config 'model="deepseek/deepseek-v4.1-flash"'`
+  explicitly, verified from `session_meta` in the rollout (`"model_provider": "commandcode"`).
+- `--profile commandcode` does **not** work on codex 0.155.1: it rejects the legacy
+  `[profiles.commandcode]` table and demands the settings move to a separate
+  `~/.codex/commandcode.config.toml`. The workflow deliberately does not touch that config and
+  passes the same settings explicitly instead.
+- The codex command string is handed to `bash -lc` (`codex/app_server.ex`'s
+  `local_launch_command/1` interpolates it into `exec ..`), so **bash** does its word splitting and
+  shell quoting is stripped before codex sees the TOML fragments. That is why the upstream example
+  writes `'model="gpt-5.5"'` with the quotes it does.
