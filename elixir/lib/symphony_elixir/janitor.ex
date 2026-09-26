@@ -43,6 +43,12 @@ defmodule SymphonyElixir.Janitor do
   @command_timeout 120_000
   @terminal_states ~w(done cancelled)
 
+  # Marker left in the how-to comment so it is posted at most once per issue. A person who opens a
+  # plain issue and sees nothing happen has no way to learn why; measured on issue #26, where the
+  # answer was "there is no agent-task label" and nothing in the system said so.
+  @howto_marker "<!-- symphony:how-to -->"
+  @advice_window_days 7
+
   @typedoc "Everything the janitor needs to know about where things live."
   @type config :: %{
           tickets: String.t(),
@@ -150,7 +156,62 @@ defmodule SymphonyElixir.Janitor do
         Logger.warning("janitor: cannot list issues: #{inspect(reason)}")
     end
 
+    advise_unlabelled(cfg)
     :ok
+  end
+
+  # Explains, on the issue itself, why nothing is happening.
+  #
+  # Silence is the worst outcome for the person this whole flow exists for: they open an issue, no
+  # agent appears, and nothing anywhere says the label is the switch. This costs one comment per
+  # recent unlabelled issue, ever, and it says both halves -- how to ask for work, and that a
+  # question can be work too.
+  defp advise_unlabelled(cfg) do
+    since = Date.utc_today() |> Date.add(-@advice_window_days) |> Date.to_iso8601()
+
+    args = ["issue", "list", "--repo", cfg.repo, "--state", "open", "--limit", "50",
+            "--search", "created:>=#{since}", "--json", "number,labels,comments"]
+
+    case gh_json(args) do
+      {:ok, issues} -> Enum.each(issues, &advise_issue(&1, cfg))
+      {:error, reason} -> Logger.warning("janitor: cannot scan for unlabelled issues: #{inspect(reason)}")
+    end
+  end
+
+  defp advise_issue(issue, cfg) do
+    if needs_advice?(issue) do
+      number = to_string(issue["number"])
+      gh(["issue", "comment", number, "--repo", cfg.repo, "--body", advice_text(cfg)])
+      Logger.info("janitor: issue ##{number} has no #{@task_label} label; posted how-to")
+    end
+  end
+
+  defp needs_advice?(issue) do
+    labels = Enum.map(issue["labels"] || [], & &1["name"])
+
+    managed =
+      Enum.any?(labels, fn label ->
+        label in [@task_label, @managed_label] or Labels.internal(label) != nil
+      end)
+
+    already_asked =
+      Enum.any?(issue["comments"] || [], fn comment ->
+        String.contains?(comment["body"] || "", @howto_marker)
+      end)
+
+    not managed and not already_asked
+  end
+
+  defp advice_text(cfg) do
+    """
+    这条 issue 上没有 `agent-task` 标签，所以 agent 不会处理它 —— janitor 只接收带这个标签的 issue，这样普通的 issue 不会被误当成任务。
+
+    * **想让 agent 干活**（包括让它查东西、回答问题）：在右侧 Labels 里加上 **`agent-task`**，半分钟内它就会变成一张票并开工。
+      下次也可以直接用那个表单：https://github.com/#{cfg.repo}/issues/new/choose
+    * **只是随手记一下 / 纯讨论**：忽略这条评论就行，不用做任何事。
+
+    #{@howto_marker}
+    """
   end
 
   defp receive_issue(issue, known, cfg) do
@@ -164,8 +225,8 @@ defmodule SymphonyElixir.Janitor do
   defp create_ticket_from_issue(issue, number, cfg) do
     id = "SYM-#{number}"
     body = to_string(issue["body"] || "")
-    what = section(body, "要做什么") || String.trim(body)
-    done = section(body, "怎么算做完了")
+    what = Ticket.form_answer(body, "要做什么") || String.trim(body)
+    done = Ticket.form_answer(body, "怎么算做完了")
 
     text =
       Ticket.build(id, to_string(issue["title"] || id), number, what) <>
@@ -174,14 +235,6 @@ defmodule SymphonyElixir.Janitor do
     path = Path.join(cfg.tickets, "#{id}.md")
     File.write!(path, text)
     Logger.info("janitor: created #{id}.md from issue ##{number}")
-  end
-
-  # GitHub renders a form answer as "### <label>\n<answer>", up to the next "###".
-  defp section(body, label) do
-    case Regex.run(~r/###\s*#{Regex.escape(label)}\s*\r?\n(.*?)(?=\r?\n###|\z)/s, body) do
-      [_, answer] -> String.trim(answer)
-      _ -> nil
-    end
   end
 
   # ── 2. mirror ─────────────────────────────────────────────────────────────────

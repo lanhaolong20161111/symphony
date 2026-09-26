@@ -120,6 +120,44 @@ defmodule SymphonyElixir.Janitor.TicketTest do
     end
   end
 
+  describe "form_answer/2" do
+    # The body GitHub produces for the issue form in this repository. The second heading carries a
+    # parenthetical hint, which is exactly what an exact-match pattern chokes on.
+    @form_body """
+    ### 要做什么
+
+    在 README.md 末尾加一行。
+
+    ### 怎么算做完了（可以不填）
+
+    README 里有标记
+
+    ### 急不急（可以不填）
+
+    不急
+    """
+
+    test "reads an answer whose heading is exactly the label" do
+      assert Ticket.form_answer(@form_body, "要做什么") == "在 README.md 末尾加一行。"
+    end
+
+    test "reads an answer whose heading carries a parenthetical hint" do
+      # Measured bug: the pattern required the label to be followed by end-of-line, so this answer
+      # was never found and the ticket never got a Validation section.
+      assert Ticket.form_answer(@form_body, "怎么算做完了") == "README 里有标记"
+      assert Ticket.form_answer(@form_body, "急不急") == "不急"
+    end
+
+    test "an absent section is nil, and a body that is not a form is nil" do
+      assert Ticket.form_answer(@form_body, "不存在的栏") == nil
+      assert Ticket.form_answer("just a sentence\n", "要做什么") == nil
+    end
+
+    test "answers do not bleed into each other" do
+      refute Ticket.form_answer(@form_body, "要做什么") =~ "README 里有标记"
+    end
+  end
+
   describe "problems/1" do
     test "a healthy ticket has none" do
       assert Ticket.problems(@ticket) == []

@@ -121,6 +121,25 @@ defmodule SymphonyElixir.Janitor.Ticket do
   end
 
   @doc """
+  Reads one answer out of a GitHub issue-form body.
+
+  A form renders each answer as `### <label>` on its own line, followed by the answer up to the
+  next `###`. The label is whatever the form file says -- **including any parenthetical hint**,
+  such as `怎么算做完了（可以不填）`. Matching the label exactly is why the "how to tell it is done"
+  answer never became a `Validation` section: the heading had a suffix and the pattern did not allow
+  one. Only the label is matched, never the rest of the line.
+  """
+  @spec form_answer(String.t(), String.t()) :: String.t() | nil
+  def form_answer(body, label) when is_binary(body) and is_binary(label) do
+    pattern = ~r/###\s*#{Regex.escape(label)}[^\n]*\r?\n(.*?)(?=\r?\n###|\z)/s
+
+    case Regex.run(pattern, body) do
+      [_, answer] -> String.trim(answer)
+      _ -> nil
+    end
+  end
+
+  @doc """
   Reports conditions that make a file a bad ticket, without changing anything.
 
   * `:bom` -- a leading UTF-8 BOM, which hides the ticket from the tracker entirely.
