@@ -110,18 +110,46 @@ acp:
   # and expire at month end -- so the goal is to spend them deliberately. A named high-coefficient
   # model burns them several times faster than the router default for work of the same size.
   model: auto
-  # Authenticate during the handshake, on the SAME client that then runs the turns. Measured:
-  # that recipe completes a turn (`stop_reason: end_turn`, body "OK"), while a *fresh* connection
-  # straight afterwards is refused -- WorkBuddy's authentication is per connection, so
-  # "connect, then authenticate later" cannot work.
+  # `authenticate` is deliberately ABSENT -- do not put it back.
   #
-  # When the cached login is gone, the agent asks for a human: it sends `_codebuddy.ai/authUrl`
-  # with the sign-in URL, and the client now logs it, so the URL shows up in this host's log and
-  # an operator can simply open it. Before that fix the notification was discarded and the URL was
-  # invisible to everyone.
-  authenticate: internal
-  # Interactive -- one measured WeChat login took 8.5 minutes, hence 15 and not the 5 default.
-  authenticate_timeout_ms: 900000
+  # Measured: `authenticate` begins by LOGGING OUT. Its source reads
+  #
+  #     this.authManager.currentSessionSubject.getValue() && (
+  #       logger.info("User already logged in, logging out first to force re-authentication..."),
+  #       await this.authManager.logout());
+  #
+  # and logout RENAMES the shared credential file
+  #
+  #     %LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info
+  #
+  # to a timestamped backup -- four of them were found on disk, one per past `authenticate`
+  # call. So an unattended host that authenticates on every start destroys the login state that
+  # this machine's desktop app and every other process share; and because that file is watched
+  # by a cross-process watcher, their in-memory sessions go stale at the same moment.
+  #
+  # The symptom is the trap: `authenticate` reports SUCCESS, and the next five `session/prompt`
+  # calls still answer `Authentication required` (all five billed). The earlier note here --
+  # "authentication is per connection, so authenticate during the handshake" -- was reading a
+  # shared-state collision as a protocol requirement.
+  #
+  # Instead: mint a long-lived token ONCE, and let the environment carry it.
+  #
+  #     cd elixir_acp_sdk
+  #     mix run examples/workbuddy_token_mint.exs      # interactive: opens a browser once
+  #
+  #     $env:CODEBUDDY_AUTH_TOKEN = "<token>"          # then start symphony
+  #
+  # `CODEBUDDY_AUTH_TOKEN` outranks the file store, so nothing shared is touched, no lock is
+  # taken and the watcher is irrelevant. The ACP child inherits symphony's environment (the SDK
+  # only passes `:env` when it has something to add or strip), so no per-workflow wiring is
+  # needed here. The token lasts about 55 days (`expiresIn 4752000`); re-mint when it expires.
+  #
+  # It is an account credential: environment only -- never a file that git or the ticket repo
+  # sees. Keep max_concurrent_agents at 1 until that variable is actually in place.
+  #
+  # The agent still sends `_codebuddy.ai/authUrl` when a session has expired; the SDK logs it at
+  # info level, so the sign-in URL is visible in this host's log.
+  #
   # 19.8MB packed JS: cold start is slow.
   init_timeout_ms: 150000
   turn_timeout_ms: 3600000
