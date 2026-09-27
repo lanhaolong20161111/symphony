@@ -268,6 +268,9 @@ defmodule SymphonyElixir.ExtensionsTest do
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
+                 "adapter" => nil,
+                 "backend" => nil,
+                 "model" => nil,
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "issue_url" => "https://example.org/issues/MT-HTTP",

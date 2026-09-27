@@ -26,9 +26,15 @@ defmodule SymphonyElixirWeb.Router do
     pipe_through(:browser)
 
     live("/", DashboardLive, :index)
+    live("/tasks", TaskLive, :index)
   end
 
   scope "/", SymphonyElixirWeb do
+    # Task management API — must precede the /api/v1/:issue_identifier catch-all.
+    get("/api/v1/tasks", TaskApiController, :index)
+    post("/api/v1/tasks", TaskApiController, :create)
+    patch("/api/v1/tasks/:id", TaskApiController, :update)
+
     get("/api/v1/state", ObservabilityApiController, :state)
 
     match(:*, "/", ObservabilityApiController, :method_not_allowed)

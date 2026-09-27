@@ -439,6 +439,133 @@ pre,
   color: var(--danger);
 }
 
+.task-form {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+  max-width: 48rem;
+}
+
+.form-field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.form-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.form-input,
+.form-textarea {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.94rem;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.form-input:focus,
+.form-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.12);
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 3.5rem;
+  font-family: inherit;
+}
+
+.form-hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.task-submit {
+  justify-self: start;
+  margin-top: 0.35rem;
+}
+
+.task-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.dep-list {
+  font-family: "Sohne Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.dep-graph {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.dep-node {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.85rem;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--card-muted);
+  font-size: 0.9rem;
+}
+
+.dep-arrow {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.dep-free {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(16, 163, 127, 0.18);
+  color: var(--accent-ink);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.state-form {
+  margin: 0;
+}
+
+.state-select {
+  appearance: none;
+  padding: 0.3rem 1.6rem 0.3rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.82)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%236e6e80' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E")
+    no-repeat right 0.5rem center;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease;
+}
+
+.state-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 @media (max-width: 860px) {
   .app-shell {
     padding: 1rem 0.85rem 2rem;

@@ -42,6 +42,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.Presenter,
           SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,
+          SymphonyElixirWeb.TaskApiController,
+          SymphonyElixirWeb.TaskLive,
           SymphonyElixirWeb.Router,
           SymphonyElixirWeb.Router.Helpers
         ]
