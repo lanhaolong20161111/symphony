@@ -404,3 +404,69 @@ A second, smaller confusion in the same session: the janitor *was* running, but 
 `symphony.log.2` while `symphony.log.1` -- ten megabytes of an earlier run -- still looked like the
 current file. Grep every file the log directory holds, or check the state file's mtime, which every
 round rewrites.
+
+### Two corrections to that section, learned the hard way
+
+**An escript is a zip archive.** Module names are findable in it (they are in the archive's directory
+entries) but **string literals are not** -- they are inside compressed BEAM chunks. So
+`ReadAllBytes` + `Contains("some log message")` returns `false` for code that is definitely present,
+which is exactly the wrong answer when the whole point is to check whether a rebuild picked up a
+change. That false negative cost a full run of a two-ticket experiment. Verify against the compiled
+artifact instead:
+
+    _build/dev/lib/<app>/ebin/Elixir.SomeApp.Module.beam    # uncompressed, literals are visible
+
+And the mtime comparison above is necessary but **not sufficient**: it tells you the binary is newer
+than *some* source, not that it contains *your* change. When the SDK is a `path:` dependency, editing
+it changes nothing about the fork's own sources, so `escript.build` is required and easy to forget --
+which is how a fix that had been verified standalone was still absent from the running host.
+
+## Why WorkBuddy is not wired in
+
+The ACP integration works and was verified layer by layer: the handshake, the ten-model catalog, the
+`session/set_model` dialect, handshake-time `authenticate`, and a turn that returns `end_turn` with
+the body "OK". It is still **not usable unattended, and that is a property of its authentication, not
+a bug to iterate on**.
+
+What was measured:
+
+* **`authenticate` is interactive.** Every call needs a human to open a sign-in URL. A run in
+  Symphony authenticated, reported success, and then returned `Authentication required` for **all
+  five turns** -- five wasted turns, billed.
+* **Every run needs its own login.** A second ticket asked for one ten seconds after the first
+  started.
+* **The login appears to be scoped to the working directory.** The CLI keeps sessions under
+  `~/.codebuddy/projects/<cwd-slug>/`, and Symphony gives every ticket a fresh workspace. This is the
+  most likely explanation for why the same sequence works in a probe (cwd: the SDK checkout) and not
+  in Symphony (cwd: a ticket workspace) -- but it is a **hypothesis, not a measurement**: the control
+  experiment was invalid because the account had already been signed out by the repeated attempts.
+
+### The rule this produced
+
+> **In an unattended design, "sign in again" is never a step. It is a disproof.**
+> A route that needs a person to get through is attended. Write that down and stop -- do not queue it
+> as "try once more". Three separate sign-in attempts were spent learning a property that was visible
+> from the first one.
+
+The one thing that would change the answer is a long-lived credential, `CODEBUDDY_API_KEY`, which is
+the WorkBuddy counterpart of the `CMD_API_KEY` that makes the DSH route work unattended. That is a
+**different bill** (API billing, not the subscription credits), so it is a decision, not a fix.
+
+Two consequences worth keeping:
+
+* **Spend the subscription credits in the desktop app**, where the user is already signed in and no
+  ACP is involved. The credits are monthly, non-accumulating and expire at month end.
+* **When a notification carries the sign-in URL, log it.** WorkBuddy sends `_codebuddy.ai/authUrl`
+  about a second after `authenticate`, and the SDK used to discard it because `await_response/5`
+  drops non-response messages when no collector is supplied. With the collector in place the URL
+  lands in the host's log, which is what makes an expired session recoverable at all -- and it is
+  also what finally made this diagnosable.
+
+## Do not hand-write ticket files
+
+The two-ticket experiment was set up by writing `SYM-41.md` and `SYM-42.md` directly. The janitor
+then mirrored the *other* direction, published both as GitHub issues #32 and #33, wrote the issue
+numbers back into the front matter, and the `ready` state that came back from the open issue
+overrode the `cancelled` that had just been written. Nothing was broken -- bidirectional mirroring is
+what it is for -- but the tickets were never mine to author. **Tickets come from issues; the janitor
+allocates the ids.** Hand-writing one is a way to be surprised.
