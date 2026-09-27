@@ -257,6 +257,14 @@ defmodule SymphonyElixir.Config.Schema do
       field(:command, {:array, :string}, default: [])
       field(:cli_path, :string)
       field(:model, :string)
+      # Which auth method to present during the handshake, by the id the agent advertised
+      # (`session/new` may be refused until the client authenticates; WorkBuddy does that when its
+      # session has expired). `nil` -- the default -- keeps the previous behaviour exactly: offer
+      # nothing, and let `session/new` complain if it cares.
+      field(:authenticate, :string)
+      # Interactive: the agent opens a browser and waits for a person. Measured at 8.5 minutes for
+      # one WeChat login, so the SDK's 5-minute default is not enough.
+      field(:authenticate_timeout_ms, :integer, default: 900_000)
       field(:init_timeout_ms, :integer, default: 60_000)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       # Off by default: with this on the agent is handed Symphony's tracker tools (as an MCP server it
@@ -273,10 +281,21 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:adapter, :command, :cli_path, :model, :init_timeout_ms, :turn_timeout_ms, :tracker_tools],
+        [
+          :adapter,
+          :command,
+          :cli_path,
+          :model,
+          :authenticate,
+          :authenticate_timeout_ms,
+          :init_timeout_ms,
+          :turn_timeout_ms,
+          :tracker_tools
+        ],
         empty_values: []
       )
       |> validate_inclusion(:adapter, @adapters)
+      |> validate_number(:authenticate_timeout_ms, greater_than: 0)
       |> validate_number(:init_timeout_ms, greater_than: 0)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
     end

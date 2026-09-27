@@ -38,6 +38,20 @@ workspace:
 server:
   host: 127.0.0.1
   port: 4001
+janitor:
+  # Host-side caretaker, supervised by this application: keeps the ticket repository in step with
+  # GitHub, regenerates the boards, and publishes work the agent has finished.
+  #
+  # Off by default -- nothing starts unless a workflow asks for it. When on, one round runs every
+  # interval_ms; see SymphonyElixir.Janitor.Server.
+  enabled: true
+  interval_ms: 30000
+  tickets_path: C:/Users/lhl20/code/symphony-tickets
+  workspace_root: C:/Users/lhl20/code/symphony-file-workspaces
+  # Tickets are data in their own repository; issues are the human surface in the code repository.
+  tickets_repo: lanhaolong20161111/beekeeper-tickets
+  issues_repo: lanhaolong20161111/beekeeper
+  state_file: C:/Users/lhl20/code/symphony-janitor-state.json
 hooks:
   timeout_ms: 600000
   after_create: |

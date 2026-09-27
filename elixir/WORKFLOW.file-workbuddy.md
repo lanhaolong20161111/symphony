@@ -96,19 +96,32 @@ hooks:
         echo "after_run: pr create failed (already open, or no gh auth)"
     fi
 agent:
-  # ACP backend: DSH speaks the agent protocol; the model route comes from acp.model.
+  # ACP backend via WorkBuddy (codebuddy-headless). The model must be one WorkBuddy
+  # advertises; hy3 is not among its ten (hy3 lives on CommandCode, reachable through DSH).
   backend: acp
   max_concurrent_agents: 1
   max_turns: 5
 acp:
-  adapter: dsh
-  command: ["dsh", "--profile", "acp"]
-  # DSH's session/new accepts only cwd + mcpServers, so the model has to go through
-  # session/set_config_option, whose value is a JSON STRING ["<provider>","<model>"]
-  # (see AcpSdk.Adapters.DSH). The value must match one of the entries that session/new
-  # returns in configOptions, or the switch is rejected with -32602.
-  model: '["commandcode","deepseek/deepseek-v4.1-flash"]'
-  init_timeout_ms: 120000
+  adapter: workbuddy
+  # The headless entry is packed inside the app; the path is per-machine.
+  cli_path: F:/workbuddy/resources/app.asar.unpacked/cli/dist/codebuddy-headless.js
+  model: glm-5.1
+  # Authenticate during the handshake: WorkBuddy refuses session/new once its session expires,
+  # ATTENDED USE ONLY unless CODEBUDDY_API_KEY is set (see below).
+  #
+  # WorkBuddy's login is per-connection and `authenticate` *consumes* the cached credential:
+  # measured today -- one call returned the real account in 13 seconds with no scan, and the very
+  # next call hung for 300 seconds opening browser windows until someone scanned. A fresh
+  # connection is never authenticated by itself, so a run either applies a fresh cache here or
+  # waits for a human.
+  #
+  # For unattended runs the CLI supports CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN in the
+  # environment; that is the only path that does not involve a person per run.
+  authenticate: internal
+  # Interactive -- one measured WeChat login took 8.5 minutes, hence 15 and not the 5 default.
+  authenticate_timeout_ms: 900000
+  # 19.8MB packed JS: cold start is slow.
+  init_timeout_ms: 150000
   turn_timeout_ms: 3600000
 ---
 

@@ -393,11 +393,31 @@ defmodule SymphonyElixir.ACP.AppServer do
         config_options: acp_config_options(acp),
         mcp_servers: acp_mcp_servers(acp)
       ]
+      |> put_authenticate(acp)
       |> put_transport(Keyword.get(opts, :transport))
 
     case AcpSdk.start_client(client_opts) do
       {:ok, client} -> {:ok, client}
       {:error, reason} -> {:error, {:acp_start_failed, reason}}
+    end
+  end
+
+  # `authenticate` belongs to the handshake, before `session/new`: WorkBuddy refuses `session/new`
+  # when its session has expired, so "connect, then authenticate" cannot work -- there is no client
+  # to authenticate with until a session exists. Only set when the workflow asks for it, so a
+  # workflow that does not is unaffected.
+  defp put_authenticate(client_opts, acp) do
+    case Map.get(acp, :authenticate) do
+      nil ->
+        client_opts
+
+      "" ->
+        client_opts
+
+      method_id ->
+        client_opts
+        |> Keyword.put(:authenticate, method_id)
+        |> Keyword.put(:authenticate_timeout, Map.get(acp, :authenticate_timeout_ms, 900_000))
     end
   end
 
