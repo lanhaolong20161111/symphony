@@ -105,18 +105,20 @@ acp:
   adapter: workbuddy
   # The headless entry is packed inside the app; the path is per-machine.
   cli_path: F:/workbuddy/resources/app.asar.unpacked/cli/dist/codebuddy-headless.js
-  model: glm-5.1
-  # Authenticate during the handshake: WorkBuddy refuses session/new once its session expires,
-  # ATTENDED USE ONLY unless CODEBUDDY_API_KEY is set (see below).
+  # `auto` rather than a named model on purpose. WorkBuddy bills the *account's* subscription
+  # credits (no CODEBUDDY_API_KEY on this machine), and the credits are monthly, non-accumulating
+  # and expire at month end -- so the goal is to spend them deliberately. A named high-coefficient
+  # model burns them several times faster than the router default for work of the same size.
+  model: auto
+  # Authenticate during the handshake, on the SAME client that then runs the turns. Measured:
+  # that recipe completes a turn (`stop_reason: end_turn`, body "OK"), while a *fresh* connection
+  # straight afterwards is refused -- WorkBuddy's authentication is per connection, so
+  # "connect, then authenticate later" cannot work.
   #
-  # WorkBuddy's login is per-connection and `authenticate` *consumes* the cached credential:
-  # measured today -- one call returned the real account in 13 seconds with no scan, and the very
-  # next call hung for 300 seconds opening browser windows until someone scanned. A fresh
-  # connection is never authenticated by itself, so a run either applies a fresh cache here or
-  # waits for a human.
-  #
-  # For unattended runs the CLI supports CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN in the
-  # environment; that is the only path that does not involve a person per run.
+  # When the cached login is gone, the agent asks for a human: it sends `_codebuddy.ai/authUrl`
+  # with the sign-in URL, and the client now logs it, so the URL shows up in this host's log and
+  # an operator can simply open it. Before that fix the notification was discarded and the URL was
+  # invisible to everyone.
   authenticate: internal
   # Interactive -- one measured WeChat login took 8.5 minutes, hence 15 and not the 5 default.
   authenticate_timeout_ms: 900000
