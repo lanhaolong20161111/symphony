@@ -3,6 +3,26 @@ defmodule SymphonyElixir.GitWorktree do
   A thin binding to `git worktree` -- shaped after herdr (`list` / `create` / `open` / `remove`),
   but bound to **git itself**.
 
+  ## Coverage: every subcommand git 2.55.0 has
+
+  Checked line by line against `git worktree -h`, not from memory:
+
+  | `git worktree` | here | notes |
+  |---|---|---|
+  | `add` | `create/3` | `-b` `:branch` · `-B` `:reset_branch` · `<base>` `:base` · `--detach` · `--force` · `--orphan` · `--no-checkout` · `--lock [--reason]` |
+  | `list` | `list/2` | `--porcelain`, and `-z` with `:nul` |
+  | `lock` | `lock/3` | `--reason` |
+  | `unlock` | `unlock/2` | |
+  | `move` | `move/4` | reads the result back out of `list/2` |
+  | `prune` | `prune/2` | `-n` with `:dry_run`, `-v` with `:verbose`, `--expire` with `:expire` |
+  | `remove` | `remove/3` | `-f` with `:force` |
+  | `repair` | `repair/3` | no paths repairs the current worktree, paths repair those |
+
+  `open` is deliberately absent: git has no such verb (it is herdr's, and it opens a pane), and a
+  caller already holds the path from `list/2` or `create/3`. Nothing else is absent -- but if git
+  adds a subcommand, this table is the thing to update, and `git worktree -h` is the thing to check
+  it against.
+
   ## Why not call herdr (three reasons, all checked)
 
   1. `herdr worktree create` reads "Create **and open** a Git worktree" -- it opens a pane. An
@@ -18,7 +38,7 @@ defmodule SymphonyElixir.GitWorktree do
   * **No invented state.** The state is git's: normal / `detached` / `bare` / `locked` / `prunable`.
   * **No renamed concepts.** `path` / `head` / `branch`, not "workspace id".
   * **No translated errors.** If git says `already checked out`, that is what comes back.
-  * **Nothing git does not have.** herdr's `open`, `--label` and `--workspace` do not appear here.
+  * **Nothing git does not have**, in verbs or in flags.
 
   ## Why this deserves its own module
 
@@ -28,6 +48,11 @@ defmodule SymphonyElixir.GitWorktree do
   worktree workspace would leave its ticket in `in-review` forever with nothing saying why.
 
   So the judgement is `inside_work_tree?/1`: **ask git, not the filesystem.**
+
+  `repair/3` is the other half of that story: a plain `mv` of a worktree -- or of the main checkout
+  a whole directory of worktrees hangs off -- leaves the `gitdir` links pointing at the old place
+  and every one of them stops working. `move/4` is the way to relocate one; `repair/3` is the way
+  back if something already moved it the wrong way.
   """
 
   alias SymphonyElixir.Shell
@@ -51,14 +76,20 @@ defmodule SymphonyElixir.GitWorktree do
   Porcelain rather than the padded human output: porcelain is documented as stable, the column
   alignment of the human output is not.
 
+  `:nul` adds `-z`, which separates fields with NUL instead of newline -- the difference that matters
+  for a path containing a newline, which a line-based parse cannot represent. The structure is the
+  same either way (fields, then an empty record separator), so it is one parser with two separators.
+
   `path` is **git's spelling** of the path, which can differ from the one you passed (separators,
   and case on Windows). Compare like paths, not like strings -- `create/3` does exactly that when it
   reads its result back.
   """
   @spec list(Path.t(), keyword()) :: {:ok, [worktree()]} | {:error, term()}
   def list(repo, opts \\ []) do
-    case git(repo, ["worktree", "list", "--porcelain"], opts) do
-      {:ok, output, 0} -> {:ok, parse_list(output)}
+    args = ["worktree", "list", "--porcelain"] ++ if(Keyword.get(opts, :nul, false), do: ["-z"], else: [])
+
+    case git(repo, args, opts) do
+      {:ok, output, 0} -> {:ok, parse_list(output, separator(opts))}
       {:ok, output, status} -> {:error, {:git_exit, status, output}}
       {:error, reason} -> {:error, reason}
     end
@@ -67,8 +98,9 @@ defmodule SymphonyElixir.GitWorktree do
   @doc """
   `git worktree add` -- creates a checkout of `repo` at `path`.
 
-  Options mirror the command: `:branch` (`-b`), `:base` (the commit-ish), `:detach`, `:force`,
-  `:timeout`.
+  Options mirror the command: `:branch` (`-b`, create), `:reset_branch` (`-B`, create or reset),
+  `:base` (the commit-ish), `:detach`, `:force`, `:orphan`, `:checkout` (`false` for
+  `--no-checkout`), `:lock` with `:lock_reason`, `:timeout`.
 
   The result is read back out of `list/2` rather than assembled from the arguments, so what comes
   back is what git says exists, not what was asked for.
@@ -89,6 +121,41 @@ defmodule SymphonyElixir.GitWorktree do
   end
 
   @doc """
+  `git worktree lock` -- protects the worktree from `prune`.
+
+  `:reason` is passed as `--reason`. This is the write half of the `locked` field `list/2` reads;
+  without it a locked worktree could be observed but not created.
+  """
+  @spec lock(Path.t(), Path.t(), keyword()) :: :ok | {:error, term()}
+  def lock(repo, path, opts \\ []) do
+    action(repo, ["worktree", "lock"] ++ reason_flag(Keyword.get(opts, :reason)) ++ [path], opts)
+  end
+
+  @doc "`git worktree unlock`."
+  @spec unlock(Path.t(), Path.t(), keyword()) :: :ok | {:error, term()}
+  def unlock(repo, path, opts \\ []), do: action(repo, ["worktree", "unlock", path], opts)
+
+  @doc """
+  `git worktree move` -- relocates a worktree **and** its administrative files.
+
+  This is the way to move one. `mv` leaves the `gitdir` link pointing at the old location and the
+  worktree stops working, which is what `repair/3` then exists to fix.
+
+  The result is read back out of `list/2`, so the returned `path` is git's, not the argument's.
+  """
+  @spec move(Path.t(), Path.t(), Path.t(), keyword()) :: {:ok, worktree()} | {:error, term()}
+  def move(repo, path, new_path, opts \\ []) do
+    with :ok <- action(repo, ["worktree", "move", path, new_path], opts),
+         {:ok, worktrees} <- list(repo, opts),
+         %{} = moved <- Enum.find(worktrees, &same_path?(&1.path, new_path)) do
+      {:ok, moved}
+    else
+      {:error, reason} -> {:error, reason}
+      nil -> {:error, {:not_in_list, new_path}}
+    end
+  end
+
+  @doc """
   `git worktree remove` -- removes the checkout at `path`.
 
   `:force` is passed through and git's refusal without it is left intact (a worktree with
@@ -97,25 +164,42 @@ defmodule SymphonyElixir.GitWorktree do
   """
   @spec remove(Path.t(), Path.t(), keyword()) :: :ok | {:error, term()}
   def remove(repo, path, opts \\ []) do
+    args = ["worktree", "remove"] ++ force_flag(opts) ++ [path]
+    action(repo, args, opts)
+  end
+
+  @doc """
+  `git worktree prune` -- drops administrative entries whose checkout is already gone.
+
+  Returns `{:ok, output}`, not `:ok`: the dry run's entire value is git's answer about what would
+  go, and git writes that to stdout. A normal run usually returns `""`.
+
+  Options: `:dry_run` (`-n`), `:verbose` (`-v`), `:expire` (`--expire <expire>`).
+  """
+  @spec prune(Path.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def prune(repo, opts \\ []) do
     args =
-      ["worktree", "remove"] ++ if(Keyword.get(opts, :force, false), do: ["--force"], else: []) ++ [path]
+      ["worktree", "prune"] ++
+        if(Keyword.get(opts, :dry_run, false), do: ["-n"], else: []) ++
+        if(Keyword.get(opts, :verbose, false), do: ["-v"], else: []) ++
+        expire_flag(Keyword.get(opts, :expire))
 
     case git(repo, args, opts) do
-      {:ok, _output, 0} -> :ok
+      {:ok, output, 0} -> {:ok, output}
       {:ok, output, status} -> {:error, {:git_exit, status, output}}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  @doc "`git worktree prune` -- drop administrative entries whose checkout is already gone."
-  @spec prune(Path.t(), keyword()) :: :ok | {:error, term()}
-  def prune(repo, opts \\ []) do
-    case git(repo, ["worktree", "prune"], opts) do
-      {:ok, _output, 0} -> :ok
-      {:ok, output, status} -> {:error, {:git_exit, status, output}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  @doc """
+  `git worktree repair` -- re-links a worktree and its repository after one of them moved.
+
+  With no paths it repairs the current worktree's links; with paths, those. This is the way back
+  from a plain `mv` of a worktree, or of the directory the main checkouts live in -- every worktree
+  underneath stops working, and nothing else in git fixes it.
+  """
+  @spec repair(Path.t(), [Path.t()], keyword()) :: :ok | {:error, term()}
+  def repair(repo, paths \\ [], opts \\ []), do: action(repo, ["worktree", "repair"] ++ paths, opts)
 
   @doc """
   Whether `path` is inside a git work tree -- **asked of git**, not of the filesystem.
@@ -132,22 +216,28 @@ defmodule SymphonyElixir.GitWorktree do
   end
 
   @doc """
-  Parses `git worktree list --porcelain`.
+  Parses `git worktree list --porcelain`, with `separator` as the field terminator (`"\\n"` by
+  default, `"\\0"` for `-z`).
 
-  Blocks are separated by a blank line. Each line is `key value`, except the flags `detached` /
-  `bare` / `locked` / `prunable`, which stand alone or carry a reason. A `locked` or `prunable` with
-  no reason is `""`; `nil` means the flag was absent -- the two are different facts.
+  Fields are `key value`, except the flags `detached` / `bare` / `locked` / `prunable`, which stand
+  alone or carry a reason. A `locked` or `prunable` with no reason is `""`; `nil` means the flag was
+  absent -- the two are different facts.
+
+  Records are separated by an empty field (`\\n\\n`, or `\\0\\0` with `-z`) -- measured, not assumed:
+  `-z` terminates every field with NUL and leaves the same empty separator between records.
 
   Unknown keys are ignored rather than rejected, so a newer git that adds a field does not make this
-  raise. That is also why every field here is one git already has: there is nothing else to parse.
+  raise.
   """
-  @spec parse_list(String.t()) :: [worktree()]
-  def parse_list(output) when is_binary(output) do
-    output
-    |> String.split(~r/\r?\n\r?\n/, trim: true)
-    |> Enum.flat_map(fn block ->
-      block
-      |> String.split(~r/\r?\n/, trim: true)
+  @spec parse_list(String.t(), String.t()) :: [worktree()]
+  def parse_list(output, separator \\ "\n") when is_binary(output) do
+    normalized = if separator == "\n", do: String.replace(output, "\r\n", "\n"), else: output
+
+    normalized
+    |> String.split(separator <> separator, trim: true)
+    |> Enum.flat_map(fn record ->
+      record
+      |> String.split(separator, trim: true)
       |> Enum.reduce(blank(), &apply_line/2)
       |> case do
         %{path: nil} -> []
@@ -155,6 +245,8 @@ defmodule SymphonyElixir.GitWorktree do
       end
     end)
   end
+
+  defp separator(opts), do: if(Keyword.get(opts, :nul, false), do: "\0", else: "\n")
 
   defp blank do
     %{path: nil, head: nil, branch: nil, detached?: false, bare?: false, locked: nil, prunable: nil}
@@ -181,18 +273,40 @@ defmodule SymphonyElixir.GitWorktree do
   defp flag_reason([]), do: ""
   defp flag_reason([reason]), do: reason
 
+  # One flag per option, in the order `git worktree add -h` lists them.
   defp add_flags(opts) do
-    branch = if(branch = Keyword.get(opts, :branch), do: ["-b", branch], else: [])
-    detach = if(Keyword.get(opts, :detach, false), do: ["--detach"], else: [])
-    force = if(Keyword.get(opts, :force, false), do: ["--force"], else: [])
-
-    branch ++ detach ++ force
+    if(branch = Keyword.get(opts, :branch), do: ["-b", branch], else: []) ++
+      if(branch = Keyword.get(opts, :reset_branch), do: ["-B", branch], else: []) ++
+      if(Keyword.get(opts, :detach, false), do: ["--detach"], else: []) ++
+      force_flag(opts) ++
+      if(Keyword.get(opts, :orphan, false), do: ["--orphan"], else: []) ++
+      if(Keyword.get(opts, :checkout, true), do: [], else: ["--no-checkout"]) ++
+      if(Keyword.get(opts, :lock, false),
+        do: ["--lock"] ++ reason_flag(Keyword.get(opts, :lock_reason)),
+        else: []
+      )
   end
+
+  defp force_flag(opts), do: if(Keyword.get(opts, :force, false), do: ["--force"], else: [])
+
+  defp reason_flag(nil), do: []
+  defp reason_flag(reason), do: ["--reason", reason]
+
+  defp expire_flag(nil), do: []
+  defp expire_flag(expire), do: ["--expire", to_string(expire)]
 
   defp base_args(opts) do
     case Keyword.get(opts, :base) do
       nil -> []
       base -> [base]
+    end
+  end
+
+  defp action(repo, args, opts) do
+    case git(repo, args, opts) do
+      {:ok, _output, 0} -> :ok
+      {:ok, output, status} -> {:error, {:git_exit, status, output}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
