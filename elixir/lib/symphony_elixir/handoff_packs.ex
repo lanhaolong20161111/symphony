@@ -29,13 +29,11 @@ defmodule SymphonyElixir.HandoffPacks do
 
   require Logger
 
-  alias SymphonyElixir.{Config, TaskComposer}
+  alias SymphonyElixir.{Config, RecorderClient, TaskComposer}
 
   @section_heading "续接上下文"
   @begin_marker "<!-- symphony:handoff -->"
   @end_marker "<!-- /symphony:handoff -->"
-  @default_recorder_url "http://127.0.0.1:4010"
-  @http_timeout_ms 8_000
   # A `ready` ticket has not run yet, so it has no context to carry; these are the states where
   # work has actually happened.
   @in_flight_states ~w(in-progress in-review)
@@ -176,14 +174,12 @@ defmodule SymphonyElixir.HandoffPacks do
 
   # ── recorder ─────────────────────────────────────────────────────────────────
 
-  @doc "The recorder's base URL. `config :symphony_elixir, :recorder_upstream` to move it."
+  @doc "The recorder's base URL. Kept as a delegate so callers of this module need not know."
   @spec recorder_url() :: String.t()
-  def recorder_url do
-    Application.get_env(:symphony_elixir, :recorder_upstream, @default_recorder_url)
-  end
+  def recorder_url, do: RecorderClient.base_url()
 
   defp newest_session(ticket_id) do
-    with {:ok, sessions} <- fetch_sessions() do
+    with {:ok, sessions} <- RecorderClient.sessions() do
       sessions
       |> Enum.filter(&workspace_of?(&1["cwd"], ticket_id))
       |> Enum.sort_by(&(&1["lastTime"] || 0), :desc)
@@ -195,33 +191,7 @@ defmodule SymphonyElixir.HandoffPacks do
     end
   end
 
-  defp fetch_sessions do
-    case Req.get(recorder_url() <> "/api/sessions", receive_timeout: @http_timeout_ms) do
-      {:ok, %{status: 200, body: %{"sessions" => sessions}}} when is_list(sessions) ->
-        {:ok, sessions}
-
-      {:ok, %{status: status}} ->
-        {:error, {:recorder_http, status}}
-
-      {:error, reason} ->
-        {:error, {:recorder_unreachable, reason}}
-    end
-  rescue
-    error -> {:error, {:recorder_unreachable, Exception.message(error)}}
-  end
-
-  defp fetch_pack(session_key) do
-    url = recorder_url() <> "/api/sessions/" <> URI.encode_www_form(session_key) <> "/handoff"
-
-    case Req.get(url, receive_timeout: @http_timeout_ms) do
-      {:ok, %{status: 200, body: body}} when is_binary(body) and body != "" -> {:ok, body}
-      {:ok, %{status: 200}} -> {:error, :empty_pack}
-      {:ok, %{status: status}} -> {:error, {:recorder_http, status}}
-      {:error, reason} -> {:error, {:recorder_unreachable, reason}}
-    end
-  rescue
-    error -> {:error, {:recorder_unreachable, Exception.message(error)}}
-  end
+  defp fetch_pack(session_key), do: RecorderClient.handoff_pack(session_key)
 
   # ── ticket file ──────────────────────────────────────────────────────────────
 

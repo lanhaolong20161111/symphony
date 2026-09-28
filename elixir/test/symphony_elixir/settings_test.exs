@@ -3,6 +3,7 @@ defmodule SymphonyElixir.SettingsTest do
   # application-global (and makes the running WorkflowStore reload).
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{Settings, Workflow}
 
   @workflow """
@@ -99,7 +100,7 @@ defmodule SymphonyElixir.SettingsTest do
 
   describe "update/2" do
     test "writes a valid value, and keeps the original beside it" do
-      assert {:ok, path} = Settings.update(["janitor", "issues_repo"], "owner/other")
+      assert {:ok, path, _written} = Settings.update(["janitor", "issues_repo"], "owner/other")
 
       assert File.read!(path) =~ "issues_repo: owner/other"
       assert File.read!(path <> ".bak") =~ "issues_repo: lanhaolong20161111/beekeeper"
@@ -122,7 +123,7 @@ defmodule SymphonyElixir.SettingsTest do
 
     test "refuses a non-boolean for a boolean key" do
       assert {:error, {:not_a_boolean, "maybe"}} = Settings.update(["janitor", "enabled"], "maybe")
-      assert {:ok, _} = Settings.update(["janitor", "enabled"], "false")
+      assert {:ok, _path, _written} = Settings.update(["janitor", "enabled"], "false")
     end
 
     test "refuses a key outside the curated list" do
@@ -133,6 +134,86 @@ defmodule SymphonyElixir.SettingsTest do
     test "refuses to write a section as a scalar" do
       assert {:error, _reason} = Settings.update(["janitor"], "oops")
     end
+  end
+
+  describe "linked paths (the same thing declared twice)" do
+    test "linked_paths/1 returns both halves whichever half you name, and just the key otherwise" do
+      pair = [["tracker", "provider", "path"], ["janitor", "tickets_path"]]
+
+      assert Settings.linked_paths(["tracker", "provider", "path"]) == pair
+      assert Settings.linked_paths(["janitor", "tickets_path"]) == pair
+      assert Settings.linked_paths(["janitor", "issues_repo"]) == [["janitor", "issues_repo"]]
+    end
+
+    # Asserted through the real parser rather than the raw text: what matters is that both keys
+    # *carry* the value once the workflow is loaded, not how the YAML happened to be quoted.
+    test "saving the mirror half also writes the queue half" do
+      queue = existing_dir!("new-queue")
+
+      assert {:ok, path, written} = Settings.update(["janitor", "tickets_path"], queue)
+
+      assert written == [["tracker", "provider", "path"], ["janitor", "tickets_path"]]
+
+      settings = effective!(path)
+      assert settings.janitor.tickets_path == queue
+      assert settings.tracker.provider["path"] == queue
+    end
+
+    test "saving the queue half also writes the mirror half" do
+      queue = existing_dir!("q2")
+
+      assert {:ok, path, written} = Settings.update(["tracker", "provider", "path"], queue)
+
+      assert written == [["tracker", "provider", "path"], ["janitor", "tickets_path"]]
+
+      settings = effective!(path)
+      assert settings.tracker.provider["path"] == queue
+      assert settings.janitor.tickets_path == queue
+    end
+
+    test "the workspace pair is linked too" do
+      root = existing_dir!("new-ws")
+
+      assert {:ok, path, written} = Settings.update(["workspace", "root"], root)
+
+      assert written == [["workspace", "root"], ["janitor", "workspace_root"]]
+
+      settings = effective!(path)
+      assert settings.workspace.root == root
+      assert settings.janitor.workspace_root == root
+    end
+
+    test "an unlinked key writes only itself" do
+      assert {:ok, _path, written} = Settings.update(["janitor", "issues_repo"], "o/r")
+      assert written == [["janitor", "issues_repo"]]
+    end
+
+    test "a queue directory that does not exist is refused, and nothing is written" do
+      # The file tracker would have nothing to poll, so this is a real mistake rather than a
+      # preference -- and the page has to say so, not just fail.
+      missing = Path.join(System.tmp_dir!(), "definitely-not-here-#{System.unique_integer([:positive])}")
+
+      assert {:error, {:file_tracker_path_not_found, _path}} =
+               Settings.update(["janitor", "tickets_path"], missing)
+    end
+  end
+
+  defp existing_dir!(name) do
+    dir =
+      Path.join(System.tmp_dir!(), "settings-#{name}-#{System.unique_integer([:positive])}")
+      |> Path.expand()
+
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  # The same load-then-parse pair `Settings.validate/1` uses, so the test asserts on what the system
+  # would actually run with rather than on how the YAML happened to be quoted.
+  defp effective!(workflow_path) do
+    {:ok, loaded} = Workflow.load(workflow_path)
+    {:ok, settings} = Schema.parse(loaded.config)
+    settings
   end
 
   describe "loopback_peer?/1 (the whole guard on the write path)" do

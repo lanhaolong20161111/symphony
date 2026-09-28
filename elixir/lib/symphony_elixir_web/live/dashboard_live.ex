@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Settings, TaskComposer}
+  alias SymphonyElixir.{RecorderClient, Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -16,6 +16,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:payload, load_payload())
       |> assign(:site, site_info())
       |> assign(:tickets, load_tickets())
+      |> assign(:usage, load_usage())
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -77,6 +78,45 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% end %>
 
       <Layouts.ticket_discussions tickets={@tickets} title="票据状态与讨论（不用去 GitHub）" />
+
+      <section class="section-card">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">各 agent 的用量（来自 recorder）</h2>
+            <p class="section-copy">
+              为什么看 recorder 而不是上面的 token 卡：<strong>ACP 协议的 <code>usage_update</code>
+              只给上下文窗口的 used/size，不送 token 总数</strong> ⇒ Symphony 自己的 token 统计对
+              <code>backend: acp</code>（dsh / workbuddy）**恒为 0**。
+              recorder 读的是各 agent 自己的落盘记录，所以那里有真数。
+            </p>
+          </div>
+        </div>
+
+        <%= if @usage == [] do %>
+          <p class="empty-state">读不到 recorder（4010 没起，或 <code>:recorder_upstream</code> 不对）。</p>
+        <% else %>
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 520px;">
+              <thead>
+                <tr>
+                  <th>agent</th>
+                  <th>会话数</th>
+                  <th>tokensUsed 合计</th>
+                  <th>最大上下文窗口</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={row <- @usage}>
+                  <td><span class="mono"><%= row.agent %></span></td>
+                  <td class="numeric"><%= row.sessions %></td>
+                  <td class="numeric"><%= format_int(row.tokens) %></td>
+                  <td class="numeric"><%= format_int(row.context) %></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </section>
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -352,6 +392,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp load_tickets do
     case TaskComposer.list_tickets() do
       {:ok, tickets} -> tickets
+      {:error, _reason} -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  # From the recorder, because ACP does not report token totals (see the card's own text). No
+  # caching on purpose: this page already re-reads the ticket files on every mount, and a stale
+  # usage number is worse than a slightly slower page.
+  defp load_usage do
+    case RecorderClient.usage() do
+      {:ok, rows} -> rows
       {:error, _reason} -> []
     end
   rescue

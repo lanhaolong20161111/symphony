@@ -49,15 +49,20 @@ defmodule SymphonyElixirWeb.SettingsLive do
     # cached answer is one bad assign away from being no guard at all.
     if socket.assigns.can_write and loopback?(socket) do
       case Settings.update(path, value) do
-        {:ok, workflow_path} ->
+        {:ok, workflow_path, written} ->
           {:noreply,
            socket
            |> refresh()
            |> assign(:error, nil)
            |> assign(
              :info,
-             "已写入 #{Enum.join(path, ".")}（#{workflow_path}）。Symphony 约 1 秒内重载生效；" <>
-               "改坏的话它保留上一份好配置，原文件备份在 #{Path.basename(workflow_path)}.bak。" <>
+             "已写入 #{Enum.map_join(written, " + ", &Enum.join(&1, "."))}（#{workflow_path}）。" <>
+               "Symphony 约 1 秒内重载生效；改坏的话它保留上一份好配置，" <>
+               "原文件备份在 #{Path.basename(workflow_path)}.bak。" <>
+               if(length(written) > 1,
+                 do: "\n（这两处是同一个目录的两种声明，所以一起写了 —— 只写一处会让实例继续盯着另一个）",
+                 else: ""
+               ) <>
                handoff_note(path)
            )}
 
@@ -378,6 +383,12 @@ defmodule SymphonyElixirWeb.SettingsLive do
   defp describe({:not_an_integer, raw}), do: "#{inspect(raw)} 不是整数"
   defp describe({:not_a_boolean, raw}), do: "#{inspect(raw)} 不是 true/false"
   defp describe({:would_overwrite_section, key}), do: "#{key} 是一个小节，不能改成单个值"
+
+  defp describe({:linked_write_failed, path, reason}),
+    do: "成对的键 #{Enum.join(path, ".")} 没写成（#{inspect(reason)}）—— 所以两个都没写"
+
+  defp describe({:file_tracker_path_not_found, path}),
+    do: "目录不存在：#{path}\n编排器要从这个目录找活，所以先建好目录再来改这里。"
   defp describe({:error, {:invalid_workflow_config, message}}), do: "改完的 workflow 过不了校验：#{message}"
   defp describe(:missing_front_matter), do: "workflow 文件没有 front matter"
   defp describe(other), do: inspect(other)

@@ -49,20 +49,35 @@ defmodule SymphonyElixir.Settings do
   # "any key in the file": each entry here has been checked to be a scalar whose change cannot
   # restructure the document, and the page shows exactly these.
   @editable [
+    %{path: ["tracker", "provider", "path"], label: "票据队列目录（编排器读它）", type: :string,
+      hint: "★ 编排器从哪找活。与下面的 janitor.tickets_path 是**同一个目录**，改动会同时写两处"},
+    %{path: ["janitor", "tickets_path"], label: "票据目录（janitor 镜像用）", type: :string,
+      hint: "★ 与 tracker.provider.path 成对，改动会同时写两处"},
+    %{path: ["workspace", "root"], label: "工作区根目录", type: :string,
+      hint: "★ 每个工单一个子目录。与 janitor.workspace_root 成对，改动会同时写两处"},
+    %{path: ["janitor", "workspace_root"], label: "工作区根目录（janitor 用）", type: :string,
+      hint: "★ 与 workspace.root 成对，改动会同时写两处"},
     %{path: ["janitor", "issues_repo"], label: "issues 仓库（owner/name）", type: :string,
       hint: "任务页建出来的 GitHub issue 进这个仓库"},
     %{path: ["janitor", "tickets_repo"], label: "票据仓库（owner/name）", type: :string,
       hint: "票据文件所在的仓库，issue 正文会链回它"},
-    %{path: ["janitor", "tickets_path"], label: "票据目录（本机路径）", type: :string,
-      hint: "编排器轮询的队列；每个工单一个 .md"},
-    %{path: ["janitor", "workspace_root"], label: "工作区根目录", type: :string,
-      hint: "每个工单一个子目录"},
     %{path: ["janitor", "interval_ms"], label: "janitor 间隔（毫秒）", type: :integer},
     %{path: ["janitor", "enabled"], label: "启用 janitor", type: :boolean},
     %{path: ["agent", "max_concurrent_agents"], label: "并发 agent 数", type: :integer},
     %{path: ["agent", "max_turns"], label: "每单最大回合", type: :integer},
     %{path: ["acp", "adapter"], label: "ACP adapter", type: :string, hint: "dsh 或 workbuddy"},
     %{path: ["acp", "model"], label: "ACP model", type: :string, hint: "留空即用 agent 自报的默认"}
+  ]
+
+  # Keys that must always carry the same value, because they are the same thing declared twice.
+  #
+  # Measured, the hard way: an instance whose `janitor.tickets_path` pointed at a scratch directory
+  # but whose `tracker.provider.path` still pointed at the real one **polled the real directory and
+  # never saw the new ticket** -- with no error anywhere, because from each key's point of view
+  # nothing was wrong. Saving either half of a pair writes both.
+  @linked [
+    {["tracker", "provider", "path"], ["janitor", "tickets_path"]},
+    {["workspace", "root"], ["janitor", "workspace_root"]}
   ]
 
   @doc """
@@ -337,25 +352,58 @@ defmodule SymphonyElixir.Settings do
   @doc """
   Writes one curated key into the workflow file, **after** proving the result still parses.
 
-  Returns `{:ok, workflow_path}` or `{:error, reason}`. The original file is copied beside itself
-  before the write, so a wrong value is one rename away from being undone -- and the validation
-  step means a wrong value should never get that far.
+  A key that belongs to a linked pair writes **both** halves: they are one thing declared twice, and
+  updating one leaves the instance reading the other (measured: a ticket queue that the orchestrator
+  never polled, silently).
+
+  Returns `{:ok, workflow_path, written_paths}` or `{:error, reason}`. The original file is copied
+  beside itself before the write, so a wrong value is one rename away from being undone -- and the
+  validation step means a wrong value should never get that far.
   """
-  @spec update([String.t()], String.t()) :: {:ok, String.t()} | {:error, term()}
+  @spec update([String.t()], String.t()) :: {:ok, String.t(), [[String.t()]]} | {:error, term()}
   def update(path, raw_value) do
     with {:ok, entry} <- find_editable(path),
          {:ok, value} <- coerce(entry, raw_value),
          workflow_path = Workflow.workflow_file_path(),
          {:ok, text} <- File.read(workflow_path),
-         {:ok, updated} <- WorkflowEditor.put_scalar(text, path, value),
+         written = linked_paths(path),
+         {:ok, updated} <- write_all(text, written, value),
          :ok <- validate(updated) do
       backup_path = workflow_path <> ".bak"
       File.write!(backup_path, text)
       File.write!(workflow_path, updated)
 
-      Logger.info("settings: #{Enum.join(path, ".")} -> #{inspect(value)} (#{workflow_path})")
-      {:ok, workflow_path}
+      Logger.info(
+        "settings: #{Enum.map_join(written, " + ", &Enum.join(&1, "."))} -> #{inspect(value)}"
+      )
+
+      {:ok, workflow_path, written}
     end
+  end
+
+  @doc """
+  Every path that must carry the same value as `path`, including `path` itself.
+
+  Public so the page can say which keys a save will touch, instead of leaving a person to discover
+  it in the file.
+  """
+  @spec linked_paths([String.t()]) :: [[String.t()]]
+  def linked_paths(path) do
+    case Enum.find(@linked, fn {a, b} -> a == path or b == path end) do
+      nil -> [path]
+      {a, b} -> [a, b]
+    end
+  end
+
+  # Both halves or neither: a half-applied pair is the failure this exists to prevent, so a failure
+  # on the second key returns the error rather than the partially written text.
+  defp write_all(text, paths, value) do
+    Enum.reduce_while(paths, {:ok, text}, fn path, {:ok, acc} ->
+      case WorkflowEditor.put_scalar(acc, path, value) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, {:linked_write_failed, path, reason}}}
+      end
+    end)
   end
 
   defp find_editable(path) do
