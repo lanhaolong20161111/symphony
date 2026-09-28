@@ -23,17 +23,18 @@ defmodule SymphonyElixirWeb.SettingsLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Settings, TaskComposer}
+  alias SymphonyElixir.Settings
   alias SymphonyElixirWeb.Layouts
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> assign(:site, safe(&TaskComposer.site_info/0))
+     |> assign(:site, safe(&Settings.site/0))
      |> assign(:sections, load_sections())
      |> assign(:credentials, safe(&Settings.credentials/0) || [])
      |> assign(:editable, safe(&Settings.editable/0) || [])
+     |> assign(:repos, load_repos())
      |> assign(:can_write, connected?(socket) and loopback?(socket))
      |> assign(:error, nil)
      |> assign(:info, nil)}
@@ -72,10 +73,25 @@ defmodule SymphonyElixirWeb.SettingsLive do
 
   defp refresh(socket) do
     socket
-    |> assign(:site, safe(&TaskComposer.site_info/0))
+    |> assign(:site, safe(&Settings.site/0))
     |> assign(:sections, load_sections())
     |> assign(:credentials, safe(&Settings.credentials/0) || [])
     |> assign(:editable, safe(&Settings.editable/0) || [])
+    |> assign(:repos, load_repos())
+  end
+
+  # Best effort: `gh repo list` for what this machine can see. An empty list just means the picker
+  # has nothing to suggest -- the field stays a plain text input, so a repo `gh` cannot see can
+  # still be typed. A picker that could only offer what `gh` returned would be a new way to be stuck.
+  defp load_repos do
+    case Settings.github_repos() do
+      {:ok, repos} -> repos
+      {:error, _reason} -> []
+    end
+  end
+
+  defp repo_field?(%{path: path}) do
+    path in [["janitor", "issues_repo"], ["janitor", "tickets_repo"]]
   end
 
   @impl true
@@ -110,46 +126,51 @@ defmodule SymphonyElixirWeb.SettingsLive do
         </section>
       <% end %>
 
+      <%= if @site do %>
+        <Layouts.site_card site={@site} title="GitHub 仓库与本地代码" />
+      <% end %>
+
       <section class="section-card">
         <div class="section-header">
           <div>
-            <h2 class="section-title">GitHub 仓库</h2>
-            <p class="section-copy">任务页建出来的 issue 进这里；票据文件在另一个仓库。</p>
+            <h2 class="section-title">仓库与工作副本（两条常被问到的）</h2>
+            <p class="section-copy">答案写在这里，免得每次都要去读代码。</p>
           </div>
         </div>
 
-        <%= if @site do %>
-          <div class="dep-graph">
-            <div class="dep-node">
-              <span class="issue-id">issues</span>
-              <a href={@site.issues_url} target="_blank" rel="noopener noreferrer" class="issue-link">
-                <%= @site.issues_repo %>
-              </a>
-              <span class="dep-arrow">·</span>
-              <a href={"#{@site.issues_url}/issues"} target="_blank" rel="noopener noreferrer" class="issue-link">
-                打开 issue 列表 ↗
-              </a>
-            </div>
-            <div class="dep-node">
-              <span class="issue-id">tickets</span>
-              <%= if @site.tickets_url do %>
-                <a href={@site.tickets_url} target="_blank" rel="noopener noreferrer" class="issue-link">
-                  <%= @site.tickets_repo %>
-                </a>
-              <% else %>
-                <span class="muted">未配置</span>
-              <% end %>
-              <span class="dep-arrow">· 本机目录</span>
-              <span class="dep-list"><%= @site.tickets_path %></span>
-            </div>
-            <div class="dep-node">
-              <span class="issue-id">workspace</span>
-              <span class="dep-list"><%= @site.workspace_root %></span>
-            </div>
+        <div class="dep-graph">
+          <div class="dep-node" style="justify-content: flex-start; align-items: flex-start;">
+            <span class="issue-id">worktree？</span>
+            <span class="dep-list">
+              <strong>不用。</strong>
+              每个工单是 <code>hooks.after_create</code> 里的一次 <code>git clone --depth 1</code>，
+              落在 workspace 根目录下的 <code>&lt;工单号&gt;</code>（见上面那张卡的"本地代码"行）。
+              把某一种 git 方案写死在模块里<b>已经退休过一回</b>：Rust 那代的
+              <code>isolation: :worktree</code> 生产从未启用。方向是<strong>环境准备由任务声明</strong>，
+              本机已有的 <code>herdr</code> 是这一层可能的承接方（它的 API 就是
+              <code>worktree.create/list/open/remove</code>）—— 但那是要单独做的事，不是现在。
+            </span>
           </div>
-        <% else %>
-          <p class="empty-state">读不到站点信息（workflow 可能没加载）。</p>
-        <% end %>
+
+          <div class="dep-node" style="justify-content: flex-start; align-items: flex-start;">
+            <span class="issue-id">两个仓库必须分开？</span>
+            <span class="dep-list">
+              <strong>不必，但分开是有原因的。</strong>
+              janitor 每一轮会对<strong>票据仓库</strong>做
+              <code>git add -A &amp;&amp; commit &amp;&amp; push</code> ⇒ 两个仓库合并 =
+              <strong>每次票据状态变更都变成代码仓库默认分支上的一次提交</strong>
+              （噪声大，而且会和 agent 那条 <code>symphony/&lt;工单&gt;</code> 分支的 PR 抢同一个仓库）。
+              次要原因：票据是"数据"、issue 是"给人看的表面"，合并之后权限与可见性也混在一起。
+              <br />
+              <span class="muted">
+                现在本机就是**三个**不同的仓库：issues = <code>beekeeper</code>、
+                tickets = <code>beekeeper-tickets</code>、本地代码也来自 <code>beekeeper</code>。
+                想把 tickets 并进去：改 <code>janitor.tickets_repo</code> 与
+                <code>janitor.tickets_path</code> 即可，但先接受上面那条噪声。
+              </span>
+            </span>
+          </div>
+        </div>
       </section>
 
       <section class="section-card">
@@ -252,6 +273,7 @@ defmodule SymphonyElixirWeb.SettingsLive do
                       name="value"
                       class="form-input"
                       value={input_value(Map.get(entry, :value))}
+                      list={repo_field?(entry) && "gh-repos"}
                       disabled={not @can_write}
                     />
                     <button type="submit" class="subtle-button" disabled={not @can_write}>写入</button>
@@ -261,6 +283,20 @@ defmodule SymphonyElixirWeb.SettingsLive do
             </tbody>
           </table>
         </div>
+
+        <p class="section-copy" style="margin-top: 0.6rem;">
+          <%= if @repos == [] do %>
+            仓库名的下拉建议没取到（<code>gh repo list</code> 没成功）—— 直接手输 <code>owner/name</code> 也行。
+          <% else %>
+            仓库名两行有下拉建议：已从 GitHub 拉到 <strong><%= length(@repos) %></strong> 个仓库
+            （<code>gh repo list</code>，本机身份 <code>lanhaolong20161111</code>）。
+            也<strong>可以手输</strong> —— 刚建、或 <code>gh</code> 看不到的仓库照样填得进去。
+          <% end %>
+        </p>
+
+        <datalist id="gh-repos">
+          <option :for={repo <- @repos} value={repo}></option>
+        </datalist>
       </section>
 
       <section class="section-card">

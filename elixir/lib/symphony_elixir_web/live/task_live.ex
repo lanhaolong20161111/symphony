@@ -11,6 +11,7 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.Settings
   alias SymphonyElixir.TaskComposer
   alias SymphonyElixirWeb.Layouts
 
@@ -108,41 +109,7 @@ defmodule SymphonyElixirWeb.TaskLive do
       </header>
 
       <%= if @site do %>
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">这些任务会去哪个仓库</h2>
-              <p class="section-copy">
-                建出来的 GitHub issue 进 <strong>issues</strong> 仓库；票据文件在
-                <strong>tickets</strong> 仓库（issue 正文会链回去）。
-              </p>
-            </div>
-          </div>
-          <div class="dep-graph">
-            <div class="dep-node">
-              <span class="issue-id">issues 仓库</span>
-              <a href={@site.issues_url} target="_blank" rel="noopener noreferrer" class="issue-link">
-                <%= @site.issues_repo %> ↗
-              </a>
-              <span class="dep-arrow">·</span>
-              <a href={"#{@site.issues_url}/issues?q=label%3Aagent-task"} target="_blank" rel="noopener noreferrer" class="issue-link">
-                看全部任务 issue ↗
-              </a>
-            </div>
-            <div class="dep-node">
-              <span class="issue-id">tickets 仓库</span>
-              <%= if @site.tickets_url do %>
-                <a href={@site.tickets_url} target="_blank" rel="noopener noreferrer" class="issue-link">
-                  <%= @site.tickets_repo %> ↗
-                </a>
-              <% else %>
-                <span class="muted">未配置</span>
-              <% end %>
-              <span class="dep-arrow">· 本机</span>
-              <span class="dep-list"><%= @site.tickets_path %></span>
-            </div>
-          </div>
-        </section>
+        <Layouts.site_card site={@site} title="这些任务会去哪个仓库" />
       <% end %>
 
       <%= if @error do %>
@@ -318,7 +285,7 @@ defmodule SymphonyElixirWeb.TaskLive do
   end
 
   defp site_info do
-    TaskComposer.site_info()
+    Settings.site()
   rescue
     _error -> nil
   end

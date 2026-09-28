@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.Settings
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -13,6 +14,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:payload, load_payload())
+      |> assign(:site, site_info())
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -68,6 +70,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </div>
       </header>
+
+      <%= if @site do %>
+        <Layouts.site_card site={@site} title="这套系统连着哪些仓库" />
+      <% end %>
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -332,6 +338,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+  end
+
+  defp site_info do
+    Settings.site()
+  rescue
+    _error -> nil
   end
 
   defp orchestrator do

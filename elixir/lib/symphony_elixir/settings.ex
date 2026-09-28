@@ -66,6 +66,107 @@ defmodule SymphonyElixir.Settings do
   ]
 
   @doc """
+  The site this instance serves: which GitHub repositories its work touches, and where the agent's
+  local copy of the code comes from.
+
+  ## The code source is read out of the hook, not derived
+
+  `hooks.after_create` is what actually clones the code (`git clone … <workspace>`), so that string
+  is the only place the code repository is declared. It is **not** derived from
+  `janitor.issues_repo`, and on this machine both point at `beekeeper` today purely because someone
+  wrote the same name twice. Change one and the other silently keeps cloning the old repository --
+  which is why `matches_issues_repo?` is reported instead of assumed.
+  """
+  @spec site() :: map()
+  def site do
+    settings = Config.settings!()
+    issues = settings.janitor.issues_repo
+    tickets = settings.janitor.tickets_repo
+    code = code_source(settings)
+
+    %{
+      issues_repo: issues,
+      issues_url: github_url(issues),
+      tickets_repo: tickets,
+      tickets_url: github_url(tickets),
+      tickets_path: settings.janitor.tickets_path,
+      workspace_root: settings.workspace.root,
+      code: code
+    }
+  rescue
+    error -> %{error: Exception.message(error)}
+  end
+
+  defp code_source(settings) do
+    hook = settings.hooks.after_create || ""
+    url = clone_url(hook)
+    repo = url && repo_from_url(url)
+    issues = settings.janitor.issues_repo
+
+    %{
+      repo: repo,
+      url: url,
+      declared_in: "hooks.after_create",
+      path: Path.join(settings.workspace.root || "…", "<工单号>"),
+      matches_issues_repo?: is_binary(repo) and is_binary(issues) and repo == issues
+    }
+  end
+
+  defp clone_url(text) do
+    case Regex.run(~r{git clone[^\n]*?(https://github\.com/[\w.\-]+/[\w.\-]+)}, text) do
+      [_, url] -> url
+      _ -> nil
+    end
+  end
+
+  defp repo_from_url(url) do
+    case Regex.run(~r{https://github\.com/([\w.\-]+/[\w.\-]+)}, url) do
+      [_, repo] -> String.replace_suffix(repo, ".git", "")
+      _ -> nil
+    end
+  end
+
+  defp github_url(repo) when is_binary(repo) and repo != "", do: "https://github.com/#{repo}"
+  defp github_url(_repo), do: nil
+
+  @doc """
+  The repositories this machine's `gh` can see, for the settings form's picker.
+
+  Best effort and read-only: the form stays a plain text input (a `datalist` of these), so a repo
+  that is not listed -- a brand new one, or one `gh` is not authenticated for -- can still be typed.
+  A picker that could only offer what `gh` returned would be a new way to be stuck.
+  """
+  @spec github_repos() :: {:ok, [String.t()]} | {:error, term()}
+  def github_repos do
+    args = ["repo", "list", "--limit", "100", "--json", "nameWithOwner"]
+
+    case Shell.run("gh", args, timeout: 15_000) do
+      {:ok, output, 0} ->
+        case JSON.decode(output) do
+          {:ok, list} when is_list(list) ->
+            repos =
+              list
+              |> Enum.map(& &1["nameWithOwner"])
+              |> Enum.reject(&(is_nil(&1) or &1 == ""))
+              |> Enum.sort()
+
+            {:ok, repos}
+
+          _ ->
+            {:error, :unexpected_gh_payload}
+        end
+
+      {:ok, output, status} ->
+        {:error, {:gh_exit, status, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
+  @doc """
   The effective configuration, as the running system resolved it.
 
   Returns `{:ok, sections}` where `sections` is a list of `%{title, rows}`, so the page can render

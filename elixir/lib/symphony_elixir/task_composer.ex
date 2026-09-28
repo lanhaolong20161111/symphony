@@ -480,37 +480,6 @@ defmodule SymphonyElixir.TaskComposer do
 
   # ── Config resolution ─────────────────────────────────────────────────────────
 
-  @doc """
-  Where this instance's work goes: the GitHub repositories and the ticket queue.
-
-  Exposed so the task and settings pages can name the repository a task will land in
-  rather than making a person go and read the workflow file for it.
-  """
-  @spec site_info() :: %{
-          issues_repo: String.t(),
-          issues_url: String.t(),
-          tickets_repo: String.t() | nil,
-          tickets_url: String.t() | nil,
-          tickets_path: String.t(),
-          workspace_root: String.t() | nil
-        }
-  def site_info do
-    issues = issues_repo()
-    tickets = tickets_repo()
-
-    %{
-      issues_repo: issues,
-      issues_url: github_url(issues),
-      tickets_repo: tickets,
-      tickets_url: tickets && github_url(tickets),
-      tickets_path: tickets_path(),
-      workspace_root: workspace_root()
-    }
-  end
-
-  defp github_url(repo) when is_binary(repo), do: "https://github.com/#{repo}"
-  defp github_url(_repo), do: nil
-
   # The workflow's janitor block carries the paths; `Janitor.config/0` carries
   # this machine's defaults. Both are needed: a workflow that omits the janitor
   # block still needs a tickets directory.
@@ -522,16 +491,6 @@ defmodule SymphonyElixir.TaskComposer do
   defp issues_repo do
     settings = Config.settings!().janitor
     present(settings.issues_repo) || Janitor.config().repo
-  end
-
-  defp tickets_repo do
-    settings = Config.settings!().janitor
-    present(settings.tickets_repo) || Janitor.config().tickets_repo
-  end
-
-  defp workspace_root do
-    settings = Config.settings!().janitor
-    present(settings.workspace_root) || Janitor.config().workspace_root
   end
 
   defp present(nil), do: nil
