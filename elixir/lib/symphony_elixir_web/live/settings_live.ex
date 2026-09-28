@@ -24,6 +24,7 @@ defmodule SymphonyElixirWeb.SettingsLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.{Settings, TaskComposer}
+  alias SymphonyElixirWeb.Layouts
 
   @impl true
   def mount(_params, _session, socket) do
@@ -91,20 +92,8 @@ defmodule SymphonyElixirWeb.SettingsLive do
               改的是 workflow 文件，<strong>约 1 秒自动生效</strong>；改坏时它保留上一份好配置。
             </p>
           </div>
-          <div class="status-stack">
-            <a href="/tasks" class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              ← 任务管理
-            </a>
-            <a href="/" class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              仪表盘
-            </a>
-            <button type="button" class="status-badge status-badge-live subtle-button" phx-click="refresh">
-              <span class="status-badge-dot"></span>
-              刷新
-            </button>
-          </div>
+          <Layouts.page_nav current={:settings} />
+          <button type="button" class="subtle-button" phx-click="refresh">刷新</button>
         </div>
       </header>
 

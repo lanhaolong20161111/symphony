@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
+  alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -56,10 +56,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
 
           <div class="status-stack">
-            <a href="/tasks" class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              任务管理
-            </a>
+            <Layouts.page_nav current={:dashboard} />
             <span class="status-badge status-badge-live">
               <span class="status-badge-dot"></span>
               Live

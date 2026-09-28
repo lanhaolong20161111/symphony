@@ -62,4 +62,41 @@ defmodule SymphonyElixirWeb.Layouts do
     </main>
     """
   end
+
+  @doc """
+  Navigation between the console's pages.
+
+  One definition on purpose: three pages each writing their own list is how a page ends up
+  stranding whoever is on it (the first version of this used `.status-badge-offline`, which is the
+  "disconnected" indicator and hides itself once the LiveView connects, so every link vanished in a
+  browser while looking fine in a plain HTTP fetch).
+  """
+  attr(:current, :atom, required: true)
+
+  @spec page_nav(map()) :: Phoenix.LiveView.Rendered.t()
+  def page_nav(assigns) do
+    ~H"""
+    <nav class="status-stack" aria-label="页面导航">
+      <.nav_link href="/" label="仪表盘" current={@current == :dashboard} />
+      <.nav_link href="/tasks" label="任务管理" current={@current == :tasks} />
+      <.nav_link href="/settings" label="设置" current={@current == :settings} />
+    </nav>
+    """
+  end
+
+  attr(:href, :string, required: true)
+  attr(:label, :string, required: true)
+  attr(:current, :boolean, default: false)
+
+  defp nav_link(assigns) do
+    ~H"""
+    <a
+      href={@href}
+      class={["top-nav-link", @current && "is-current"]}
+      aria-current={@current && "page"}
+    >
+      {@label}
+    </a>
+    """
+  end
 end

@@ -12,6 +12,7 @@ defmodule SymphonyElixirWeb.TaskLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.TaskComposer
+  alias SymphonyElixirWeb.Layouts
 
   @states ["ready", "in-progress", "in-review", "paused", "done", "cancelled"]
 
@@ -101,20 +102,8 @@ defmodule SymphonyElixirWeb.TaskLive do
               填表创建任务 → 中间件自动建 GitHub issue + 票据文件。依赖关系写入票据 <code>blocked_by</code>，编排器会据此拦截。
             </p>
           </div>
-          <div class="status-stack">
-            <a href="/settings" class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              设置
-            </a>
-            <a href="/" class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              ← 仪表盘
-            </a>
-            <button type="button" class="status-badge status-badge-live subtle-button" phx-click="refresh">
-              <span class="status-badge-dot"></span>
-              刷新
-            </button>
-          </div>
+          <Layouts.page_nav current={:tasks} />
+          <button type="button" class="subtle-button" phx-click="refresh">刷新</button>
         </div>
       </header>
 

@@ -227,6 +227,42 @@ pre,
   color: var(--muted);
 }
 
+/* Page-to-page navigation in the hero card.
+   Do NOT style these with `.status-badge-offline`: that class means "show this only while the
+   LiveView is DISCONNECTED" (see the `.phx-connected` rules below), so it hides the link the
+   instant the page finishes connecting -- which in a browser is always. That is exactly how the
+   nav links were invisible while looking correct in a plain HTTP fetch. */
+.top-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.78rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.top-nav-link:hover {
+  background: white;
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.top-nav-link.is-current {
+  background: var(--accent-soft);
+  border-color: rgba(16, 163, 127, 0.18);
+  color: var(--accent-ink);
+}
+
 [data-phx-main].phx-connected .status-badge-live {
   display: inline-flex;
 }
