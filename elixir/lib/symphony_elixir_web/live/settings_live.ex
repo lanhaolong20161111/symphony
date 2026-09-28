@@ -23,7 +23,7 @@ defmodule SymphonyElixirWeb.SettingsLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.Settings
+  alias SymphonyElixir.{HandoffPacks, Settings}
   alias SymphonyElixirWeb.Layouts
 
   @impl true
@@ -57,7 +57,8 @@ defmodule SymphonyElixirWeb.SettingsLive do
            |> assign(
              :info,
              "已写入 #{Enum.join(path, ".")}（#{workflow_path}）。Symphony 约 1 秒内重载生效；" <>
-               "改坏的话它保留上一份好配置，原文件备份在 #{Path.basename(workflow_path)}.bak。"
+               "改坏的话它保留上一份好配置，原文件备份在 #{Path.basename(workflow_path)}.bak。" <>
+               handoff_note(path)
            )}
 
         {:error, reason} ->
@@ -93,6 +94,45 @@ defmodule SymphonyElixirWeb.SettingsLive do
   defp repo_field?(%{path: path}) do
     path in [["janitor", "issues_repo"], ["janitor", "tickets_repo"]]
   end
+
+  # Switching *who* does the work should not lose what the previous one knew. The pack goes into the
+  # ticket body, which is what the prompt renders as the issue description, so it needs no change to
+  # prompt building and it is there whenever that ticket next runs.
+  #
+  # Reported in full, including the failures: the point of the action is that the next agent really
+  # does see the context, so a quiet partial success would be the one unacceptable outcome.
+  defp handoff_note(path) do
+    if path in HandoffPacks.vendor_keys() do
+      handoff_summary(HandoffPacks.attach_in_flight())
+    else
+      ""
+    end
+  end
+
+  defp handoff_summary(%{attached: attached, skipped: skipped, failed: failed}) do
+    lines =
+      []
+      |> add_line(
+        attached != [],
+        "续接上下文已写入：" <> Enum.map_join(attached, "、", &"#{&1.id}（#{&1.bytes} 字节）")
+      )
+      |> add_line(
+        skipped != [],
+        "跳过（recorder 里没有它们的会话）：" <> Enum.map_join(skipped, "、", & &1.id)
+      )
+      |> add_line(
+        failed != [],
+        "⚠️ 续接上下文失败：" <> Enum.map_join(failed, "、", &"#{&1.id}（#{&1.reason}）")
+      )
+
+    case lines do
+      [] -> "\n\n换的是谁来干 —— 但没有在飞的票，所以没有上下文要带。"
+      present -> "\n\n" <> Enum.join(present, "\n")
+    end
+  end
+
+  defp add_line(lines, true, line), do: lines ++ [line]
+  defp add_line(lines, false, _line), do: lines
 
   @impl true
   def render(assigns) do
