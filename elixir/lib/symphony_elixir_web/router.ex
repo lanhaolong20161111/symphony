@@ -27,6 +27,7 @@ defmodule SymphonyElixirWeb.Router do
 
     live("/", DashboardLive, :index)
     live("/tasks", TaskLive, :index)
+    live("/settings", SettingsLive, :index)
   end
 
   scope "/", SymphonyElixirWeb do

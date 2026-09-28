@@ -70,8 +70,12 @@ defmodule SymphonyElixir.TaskComposer do
 
   Uses the same `### <label>` headings the janitor's `form_answer/2` parses, so
   a re-receive (if the ticket file is ever lost) still extracts the right
-  sections. The dependency note is human-readable text, because GitHub has no
-  native task-dependency field.
+  sections.
+
+  The dependency block is a **convenience**, not the mechanism: the real link is
+  GitHub's own `blocked by` relationship, applied by `link_dependencies/3`. It stays
+  because an issue body that names what blocks it reads better than a bare list of
+  linked issues, and because it survives if the relationship is dropped by hand.
   """
   @spec build_issue_body(task_input()) :: String.t()
   def build_issue_body(attrs) do
@@ -166,17 +170,37 @@ defmodule SymphonyElixir.TaskComposer do
   # ── Side-effecting: creating a task ───────────────────────────────────────────
 
   @doc """
-  Creates a GitHub issue and writes the matching ticket file.
+  Creates a GitHub issue, writes the matching ticket file, and links the declared
+  dependencies as **GitHub's own** `blocked by` relationships.
 
   Order matters: the issue is created first so the ticket file can carry the
   issue number from the start. If the ticket were written first (with no issue
   number), the janitor's `adopt_issue` would race and create a second issue.
 
-  Returns `{:ok, %{id, issue_number, issue_url}}` on success, or
-  `{:error, reason}`.
+  Dependencies land in **two** places, on purpose:
+
+    * the ticket file's `blocked_by` front matter -- the file tracker reads it and
+      derives `dispatchable: blockers == []`, so this is what actually holds work
+      back;
+    * GitHub's `blocked by` relationship -- `gh issue edit --add-blocked-by`, which
+      is what a person sees on the issue itself.
+
+  A dependency that cannot be resolved (no such ticket, or a ticket with no issue
+  number) is reported in `dependency_warnings` rather than dropped: the caller
+  asked for that link, so silence would be the one unacceptable outcome.
+
+  Returns
+  `{:ok, %{id, issue_number, issue_url, linked_dependencies, dependency_warnings}}`.
   """
   @spec create_task(task_input()) ::
-          {:ok, %{id: String.t(), issue_number: String.t(), issue_url: String.t()}}
+          {:ok,
+           %{
+             id: String.t(),
+             issue_number: String.t(),
+             issue_url: String.t(),
+             linked_dependencies: [String.t()],
+             dependency_warnings: [String.t()]
+           }}
           | {:error, term()}
   def create_task(attrs) do
     title = Map.get(attrs, :title)
@@ -194,7 +218,17 @@ defmodule SymphonyElixir.TaskComposer do
     with {:ok, issue_number, issue_url} <- create_github_issue(attrs, issues_repo),
          {:ok, ticket_id} <- write_ticket(attrs, issue_number) do
       Logger.info("task_composer: created #{ticket_id} from issue ##{issue_number}")
-      {:ok, %{id: ticket_id, issue_number: issue_number, issue_url: issue_url}}
+
+      {linked, warnings} = link_dependencies(attrs, issue_number, issues_repo)
+
+      {:ok,
+       %{
+         id: ticket_id,
+         issue_number: issue_number,
+         issue_url: issue_url,
+         linked_dependencies: linked,
+         dependency_warnings: warnings
+       }}
     end
   end
 
@@ -248,6 +282,101 @@ defmodule SymphonyElixir.TaskComposer do
       :ok -> {:ok, ticket_id}
       {:error, reason} -> {:error, {:write_failed, path, reason}}
     end
+  end
+
+  # ── GitHub-native dependencies ───────────────────────────────────────────────
+
+  # `gh issue edit <new> --add-blocked-by <dep>`.
+  #
+  # Verified available rather than assumed: the CLI on this machine is 2.96.0, whose
+  # `gh issue edit --help` documents `--add-blocked-by` / `--add-blocking` / `--add-sub-issue`
+  # (issue dependencies shipped in 2.94.0). An earlier version of this module asserted that
+  # GitHub had no native task-dependency field and wrote only a note into the issue body --
+  # that was simply wrong, so the note is now a convenience and this is the mechanism.
+  @spec link_dependencies(task_input(), String.t(), String.t()) :: {[String.t()], [String.t()]}
+  defp link_dependencies(attrs, issue_number, repo) do
+    {linked, warnings} =
+      attrs
+      |> Map.get(:blocked_by, [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.reduce({[], []}, fn dep, {linked, warnings} ->
+        case add_blocked_by(issue_number, dep, repo) do
+          :ok -> {[dep | linked], warnings}
+          {:error, reason} -> {linked, [dependency_warning(dep, reason) | warnings]}
+        end
+      end)
+
+    {Enum.reverse(linked), Enum.reverse(warnings)}
+  end
+
+  defp add_blocked_by(issue_number, dep_ticket_id, repo) do
+    with {:ok, dep_issue_number} <- dependency_issue_number(dep_ticket_id) do
+      args = [
+        "issue",
+        "edit",
+        issue_number,
+        "--repo",
+        repo,
+        "--add-blocked-by",
+        dep_issue_number
+      ]
+
+      case Shell.run("gh", args, timeout: @command_timeout) do
+        {:ok, _output, 0} ->
+          Logger.info(
+            "task_composer: ##{issue_number} blocked by ##{dep_issue_number} (#{dep_ticket_id})"
+          )
+
+          :ok
+
+        {:ok, output, status} ->
+          {:error, {:gh_exit, status, output}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # The form collects ticket ids (`SYM-1`); GitHub wants issue numbers. The ticket file's
+  # `issue:` front-matter key is the only link between the two, so it is read from there
+  # rather than guessed from the id (assuming `SYM-7` means issue 7 would be silently wrong
+  # the moment a ticket is adopted or hand-written).
+  defp dependency_issue_number(ticket_id) do
+    path = Path.join(tickets_path(), "#{ticket_id}.md")
+
+    case File.read(path) do
+      {:ok, text} -> issue_number_in(text)
+      {:error, :enoent} -> {:error, :no_such_ticket}
+      {:error, reason} -> {:error, {:ticket_unreadable, reason}}
+    end
+  end
+
+  defp issue_number_in(text) do
+    case Ticket.split(text) do
+      {:ok, %{front_matter: fm}} ->
+        case presence(Ticket.get(fm, "issue")) do
+          nil -> {:error, :ticket_has_no_issue_number}
+          number -> {:ok, number}
+        end
+
+      :skip ->
+        {:error, :ticket_has_no_front_matter}
+    end
+  end
+
+  defp dependency_warning(dep, reason) do
+    detail =
+      case reason do
+        :no_such_ticket -> "找不到这张票"
+        :ticket_has_no_issue_number -> "这张票上没有 issue 号"
+        :ticket_has_no_front_matter -> "这张票的文件没有 front matter"
+        {:gh_exit, status, output} -> "gh 退出 #{status}：#{String.trim(output)}"
+        other -> inspect(other)
+      end
+
+    "#{dep}：GitHub 依赖没连上（#{detail}）"
   end
 
   # ── Side-effecting: listing tickets ───────────────────────────────────────────
@@ -351,6 +480,37 @@ defmodule SymphonyElixir.TaskComposer do
 
   # ── Config resolution ─────────────────────────────────────────────────────────
 
+  @doc """
+  Where this instance's work goes: the GitHub repositories and the ticket queue.
+
+  Exposed so the task and settings pages can name the repository a task will land in
+  rather than making a person go and read the workflow file for it.
+  """
+  @spec site_info() :: %{
+          issues_repo: String.t(),
+          issues_url: String.t(),
+          tickets_repo: String.t() | nil,
+          tickets_url: String.t() | nil,
+          tickets_path: String.t(),
+          workspace_root: String.t() | nil
+        }
+  def site_info do
+    issues = issues_repo()
+    tickets = tickets_repo()
+
+    %{
+      issues_repo: issues,
+      issues_url: github_url(issues),
+      tickets_repo: tickets,
+      tickets_url: tickets && github_url(tickets),
+      tickets_path: tickets_path(),
+      workspace_root: workspace_root()
+    }
+  end
+
+  defp github_url(repo) when is_binary(repo), do: "https://github.com/#{repo}"
+  defp github_url(_repo), do: nil
+
   # The workflow's janitor block carries the paths; `Janitor.config/0` carries
   # this machine's defaults. Both are needed: a workflow that omits the janitor
   # block still needs a tickets directory.
@@ -362,6 +522,16 @@ defmodule SymphonyElixir.TaskComposer do
   defp issues_repo do
     settings = Config.settings!().janitor
     present(settings.issues_repo) || Janitor.config().repo
+  end
+
+  defp tickets_repo do
+    settings = Config.settings!().janitor
+    present(settings.tickets_repo) || Janitor.config().tickets_repo
+  end
+
+  defp workspace_root do
+    settings = Config.settings!().janitor
+    present(settings.workspace_root) || Janitor.config().workspace_root
   end
 
   defp present(nil), do: nil

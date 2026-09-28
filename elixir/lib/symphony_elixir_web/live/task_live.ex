@@ -19,12 +19,14 @@ defmodule SymphonyElixirWeb.TaskLive do
   def mount(_params, _session, socket) do
     socket =
       socket
+      |> assign(:site, site_info())
       |> assign(:tickets, load_tickets())
       |> assign(:states, @states)
       |> assign(:form, empty_form())
       |> assign(:creating, false)
       |> assign(:error, nil)
       |> assign(:info, nil)
+      |> assign(:warnings, [])
 
     {:ok, socket}
   end
@@ -49,7 +51,8 @@ defmodule SymphonyElixirWeb.TaskLive do
          |> assign(:tickets, load_tickets())
          |> assign(:form, empty_form())
          |> assign(:error, nil)
-         |> assign(:info, "已创建 #{result.id} → #{result.issue_url}")}
+         |> assign(:warnings, Map.get(result, :dependency_warnings, []))
+         |> assign(:info, creation_summary(result))}
 
       {:error, :missing_title} ->
         {:noreply,
@@ -99,6 +102,10 @@ defmodule SymphonyElixirWeb.TaskLive do
             </p>
           </div>
           <div class="status-stack">
+            <a href="/settings" class="status-badge status-badge-offline">
+              <span class="status-badge-dot"></span>
+              设置
+            </a>
             <a href="/" class="status-badge status-badge-offline">
               <span class="status-badge-dot"></span>
               ← 仪表盘
@@ -111,6 +118,44 @@ defmodule SymphonyElixirWeb.TaskLive do
         </div>
       </header>
 
+      <%= if @site do %>
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">这些任务会去哪个仓库</h2>
+              <p class="section-copy">
+                建出来的 GitHub issue 进 <strong>issues</strong> 仓库；票据文件在
+                <strong>tickets</strong> 仓库（issue 正文会链回去）。
+              </p>
+            </div>
+          </div>
+          <div class="dep-graph">
+            <div class="dep-node">
+              <span class="issue-id">issues 仓库</span>
+              <a href={@site.issues_url} target="_blank" rel="noopener noreferrer" class="issue-link">
+                <%= @site.issues_repo %> ↗
+              </a>
+              <span class="dep-arrow">·</span>
+              <a href={"#{@site.issues_url}/issues?q=label%3Aagent-task"} target="_blank" rel="noopener noreferrer" class="issue-link">
+                看全部任务 issue ↗
+              </a>
+            </div>
+            <div class="dep-node">
+              <span class="issue-id">tickets 仓库</span>
+              <%= if @site.tickets_url do %>
+                <a href={@site.tickets_url} target="_blank" rel="noopener noreferrer" class="issue-link">
+                  <%= @site.tickets_repo %> ↗
+                </a>
+              <% else %>
+                <span class="muted">未配置</span>
+              <% end %>
+              <span class="dep-arrow">· 本机</span>
+              <span class="dep-list"><%= @site.tickets_path %></span>
+            </div>
+          </div>
+        </section>
+      <% end %>
+
       <%= if @error do %>
         <section class="error-card">
           <h2 class="error-title">错误</h2>
@@ -121,6 +166,19 @@ defmodule SymphonyElixirWeb.TaskLive do
       <%= if @info do %>
         <section class="section-card">
           <p class="section-copy"><%= @info %></p>
+        </section>
+      <% end %>
+
+      <%= if @warnings != [] do %>
+        <section class="error-card">
+          <h2 class="error-title">依赖没连上（这部分没做成）</h2>
+          <div class="error-copy">
+            <p :for={warning <- @warnings}><%= warning %></p>
+            <p style="margin-top: 0.5rem;">
+              票据本身建好了，<strong>没有</strong>假装它也建好了依赖 ——
+              去「设置」确认 issues 仓库，或核对依赖票据 ID 再补一次。
+            </p>
+          </div>
         </section>
       <% end %>
 
@@ -267,6 +325,28 @@ defmodule SymphonyElixirWeb.TaskLive do
     case TaskComposer.list_tickets() do
       {:ok, tickets} -> tickets
       {:error, _} -> []
+    end
+  end
+
+  defp site_info do
+    TaskComposer.site_info()
+  rescue
+    _error -> nil
+  end
+
+  # Says what actually happened, including the part that did not. A created task whose dependency
+  # links failed must not read as an unqualified success -- the caller asked for the link.
+  defp creation_summary(result) do
+    base = "已创建 #{result.id} → #{result.issue_url}"
+
+    case Map.get(result, :linked_dependencies, []) do
+      [] ->
+        base
+
+      linked ->
+        base <>
+          "；依赖已连到 GitHub（#{Enum.join(linked, ", ")}），" <>
+          "同时写进了票据的 blocked_by（编排器据此拦截派发）"
     end
   end
 

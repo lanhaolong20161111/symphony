@@ -1,0 +1,300 @@
+defmodule SymphonyElixir.Settings do
+  @moduledoc """
+  What this instance is *actually* running: the effective configuration, where its credentials
+  come from, and which of them this process can see.
+
+  ## Effective, not "as written"
+
+  The workflow file is not the answer to "what is in effect". Missing keys are filled from schema
+  defaults (`agent.backend` is `codex` when nothing says otherwise), `$VAR` references are resolved
+  from the environment, and -- the case that matters most -- when the file currently fails to parse,
+  `WorkflowStore` keeps serving the last known good configuration. So the file and the running
+  configuration can disagree, and this module reports the running one.
+
+  ## Credentials: presence, never value
+
+  Two facts are reported per credential, and the difference between them is the useful signal:
+
+    * `user_scope?` -- set in the Windows **User** environment (read from the registry);
+    * `process?` -- visible to *this* process.
+
+  A credential that is `user_scope?` but not `process?` means this service was started from a shell
+  whose environment predates the variable, so it inherits an empty value and the agent will fail to
+  authenticate while every status display says the key is set. Values are never read out to the page
+  -- not even masked, since a mask is still a value to attack.
+
+  ## Writing is validated before it lands
+
+  Every edit is applied to the text, then the result is parsed and schema-checked **before** the
+  real file is touched. `WorkflowStore` would reject a bad file and keep running the old config, but
+  then the only feedback would be a log line -- and the next restart would read the broken file.
+  """
+
+  require Logger
+
+  alias SymphonyElixir.{Config, Workflow, WorkflowEditor}
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Janitor.Shell
+
+  @typedoc "One credential this system may need, and what to do about it."
+  @type credential :: %{
+          name: String.t(),
+          used_by: String.t(),
+          process?: boolean(),
+          user_scope?: boolean() | :unknown,
+          length: non_neg_integer() | nil
+        }
+
+  # Keys the settings page may write, and nothing else. Deliberately a curated list rather than
+  # "any key in the file": each entry here has been checked to be a scalar whose change cannot
+  # restructure the document, and the page shows exactly these.
+  @editable [
+    %{path: ["janitor", "issues_repo"], label: "issues 仓库（owner/name）", type: :string,
+      hint: "任务页建出来的 GitHub issue 进这个仓库"},
+    %{path: ["janitor", "tickets_repo"], label: "票据仓库（owner/name）", type: :string,
+      hint: "票据文件所在的仓库，issue 正文会链回它"},
+    %{path: ["janitor", "tickets_path"], label: "票据目录（本机路径）", type: :string,
+      hint: "编排器轮询的队列；每个工单一个 .md"},
+    %{path: ["janitor", "workspace_root"], label: "工作区根目录", type: :string,
+      hint: "每个工单一个子目录"},
+    %{path: ["janitor", "interval_ms"], label: "janitor 间隔（毫秒）", type: :integer},
+    %{path: ["janitor", "enabled"], label: "启用 janitor", type: :boolean},
+    %{path: ["agent", "max_concurrent_agents"], label: "并发 agent 数", type: :integer},
+    %{path: ["agent", "max_turns"], label: "每单最大回合", type: :integer},
+    %{path: ["acp", "adapter"], label: "ACP adapter", type: :string, hint: "dsh 或 workbuddy"},
+    %{path: ["acp", "model"], label: "ACP model", type: :string, hint: "留空即用 agent 自报的默认"}
+  ]
+
+  @doc """
+  The effective configuration, as the running system resolved it.
+
+  Returns `{:ok, sections}` where `sections` is a list of `%{title, rows}`, so the page can render
+  it without knowing the schema's shape.
+  """
+  @spec effective() :: {:ok, [map()]} | {:error, term()}
+  def effective do
+    settings = Config.settings!()
+
+    {:ok,
+     [
+       %{
+         title: "GitHub",
+         rows: [
+           {"issues 仓库", settings.janitor.issues_repo},
+           {"票据仓库", settings.janitor.tickets_repo}
+         ]
+       },
+       %{
+         title: "tracker",
+         rows: [
+           {"kind", settings.tracker.kind},
+           {"active states", inspect(settings.tracker.active_states)},
+           {"terminal states", inspect(settings.tracker.terminal_states)},
+           {"provider path", provider_value(settings.tracker.provider, "path")}
+         ]
+       },
+       %{
+         title: "janitor",
+         rows: [
+           {"enabled", settings.janitor.enabled},
+           {"interval_ms", settings.janitor.interval_ms},
+           {"tickets_path", settings.janitor.tickets_path},
+           {"workspace_root", settings.janitor.workspace_root},
+           {"state_file", settings.janitor.state_file}
+         ]
+       },
+       %{
+         title: "agent",
+         rows: [
+           {"backend", settings.agent.backend},
+           {"max_concurrent_agents", settings.agent.max_concurrent_agents},
+           {"max_turns", settings.agent.max_turns},
+           {"max_retry_backoff_ms", settings.agent.max_retry_backoff_ms}
+         ]
+       },
+       %{
+         title: "acp / codex",
+         rows: [
+           {"acp.adapter", settings.acp.adapter},
+           {"acp.model", settings.acp.model},
+           {"acp.cli_path", settings.acp.cli_path},
+           {"acp.authenticate", settings.acp.authenticate},
+           {"acp.turn_timeout_ms", settings.acp.turn_timeout_ms},
+           {"codex.command", settings.codex.command}
+         ]
+       },
+       %{
+         title: "workspace / server / polling",
+         rows: [
+           {"workspace.root", settings.workspace.root},
+           {"server", "#{settings.server.host}:#{settings.server.port}"},
+           {"polling.interval_ms", settings.polling.interval_ms},
+           {"server.tracker_tools", settings.server.tracker_tools}
+         ]
+       }
+     ]}
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp provider_value(provider, key) when is_map(provider), do: Map.get(provider, key)
+  defp provider_value(_provider, _key), do: nil
+
+  @doc """
+  The credentials this system may need, with **presence only** -- never a value.
+
+  `user_scope?` is `:unknown` where the registry cannot be read (not Windows, or `reg` is absent),
+  which is reported rather than guessed.
+  """
+  @spec credentials() :: [credential()]
+  def credentials do
+    user_scope = user_scope_environment()
+
+    [
+      %{name: "CMD_API_KEY", used_by: "dsh（ACP 后端）", note: "dsh 那条无人值守线的凭据"},
+      %{name: "CODEBUDDY_AUTH_TOKEN", used_by: "workbuddy（ACP 后端）", note: "一次性铸造，约 55 天到期"},
+      %{name: "CODEBUDDY_API_KEY", used_by: "workbuddy（走 API 计费那条）", note: "与订阅额度是两笔账"},
+      %{name: "GITHUB_TOKEN", used_by: "github tracker / janitor / gh", note: "建 issue、镜像状态都用它"},
+      %{name: "LINEAR_API_KEY", used_by: "linear tracker", note: ""},
+      %{name: "JIRA_API_TOKEN", used_by: "jira tracker", note: ""},
+      %{name: "ASANA_PAT", used_by: "asana tracker", note: ""},
+      %{name: "GITLAB_PAT", used_by: "gitlab tracker", note: ""},
+      %{name: "DEEPSEEK_API_KEY", used_by: "DeepSeek 官方 key", note: "与 CommandCode 网关是两笔账"}
+    ]
+    |> Enum.map(fn credential ->
+      process_value = System.get_env(credential.name)
+
+      scope_value =
+        case user_scope do
+          :unknown -> :unknown
+          map -> Map.get(map, credential.name)
+        end
+
+      credential
+      |> Map.put(:process?, process_value != nil)
+      |> Map.put(:user_scope?, scope_value == :unknown or scope_value != nil)
+      |> Map.put(:length, presence_length(process_value || scope_value))
+    end)
+  end
+
+  defp presence_length(nil), do: nil
+  defp presence_length(value) when is_binary(value), do: String.length(value)
+
+  @doc """
+  True when a peer address is loopback.
+
+  Public so the rule can be tested directly instead of only through a socket: it is the whole
+  guard on the write path (see the settings LiveView), and a guard nobody can exercise is a guard
+  nobody knows still works.
+  """
+  @spec loopback_peer?(term()) :: boolean()
+  def loopback_peer?(%{address: {127, _b, _c, _d}}), do: true
+  def loopback_peer?(%{address: {0, 0, 0, 0, 0, 0, 0, 1}}), do: true
+  def loopback_peer?(_peer), do: false
+
+  # `reg query` rather than a .NET call: this is the User environment as Windows itself stores it,
+  # and it is one subprocess for every variable instead of one per name. Non-Windows, or a machine
+  # where `reg` is missing, degrades to `:unknown` -- which the page states instead of implying
+  # "not set".
+  defp user_scope_environment do
+    case Shell.run("reg", ["query", "HKCU\\Environment"], timeout: 5_000) do
+      {:ok, output, 0} -> parse_reg_query(output)
+      _ -> :unknown
+    end
+  rescue
+    _error -> :unknown
+  end
+
+  defp parse_reg_query(output) do
+    output
+    |> String.split(~r/\R/)
+    |> Enum.flat_map(fn line ->
+      case Regex.run(~r/^\s{4}(\S+)\s+REG_\w+\s*(.*)$/, line) do
+        [_, name, value] -> [{name, String.trim(value)}]
+        _ -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  @doc "The keys the settings page is allowed to write, with their current effective values."
+  @spec editable() :: [map()]
+  def editable do
+    settings = Config.settings!()
+
+    Enum.map(@editable, fn entry ->
+      Map.put(entry, :value, read_path(settings, entry.path))
+    end)
+  rescue
+    _error -> @editable
+  end
+
+  defp read_path(settings, [section, key]) do
+    settings |> Map.get(String.to_existing_atom(section)) |> Map.get(String.to_existing_atom(key))
+  end
+
+  @doc """
+  Writes one curated key into the workflow file, **after** proving the result still parses.
+
+  Returns `{:ok, workflow_path}` or `{:error, reason}`. The original file is copied beside itself
+  before the write, so a wrong value is one rename away from being undone -- and the validation
+  step means a wrong value should never get that far.
+  """
+  @spec update([String.t()], String.t()) :: {:ok, String.t()} | {:error, term()}
+  def update(path, raw_value) do
+    with {:ok, entry} <- find_editable(path),
+         {:ok, value} <- coerce(entry, raw_value),
+         workflow_path = Workflow.workflow_file_path(),
+         {:ok, text} <- File.read(workflow_path),
+         {:ok, updated} <- WorkflowEditor.put_scalar(text, path, value),
+         :ok <- validate(updated) do
+      backup_path = workflow_path <> ".bak"
+      File.write!(backup_path, text)
+      File.write!(workflow_path, updated)
+
+      Logger.info("settings: #{Enum.join(path, ".")} -> #{inspect(value)} (#{workflow_path})")
+      {:ok, workflow_path}
+    end
+  end
+
+  defp find_editable(path) do
+    case Enum.find(@editable, &(&1.path == path)) do
+      nil -> {:error, {:not_editable, path}}
+      entry -> {:ok, entry}
+    end
+  end
+
+  defp coerce(%{type: :integer}, raw) do
+    case Integer.parse(String.trim(to_string(raw))) do
+      {value, ""} -> {:ok, value}
+      _ -> {:error, {:not_an_integer, raw}}
+    end
+  end
+
+  defp coerce(%{type: :boolean}, raw) do
+    case String.trim(to_string(raw)) |> String.downcase() do
+      "true" -> {:ok, true}
+      "false" -> {:ok, false}
+      other -> {:error, {:not_a_boolean, other}}
+    end
+  end
+
+  defp coerce(%{type: :string}, raw) when is_binary(raw), do: {:ok, String.trim(raw)}
+  defp coerce(%{type: :string}, raw), do: {:ok, to_string(raw)}
+
+  # The safety net. `WorkflowStore` would refuse a bad file and keep the old config, but it would
+  # only say so in the log -- and the broken file would still be there for the next restart.
+  defp validate(text) do
+    path = Path.join(System.tmp_dir!(), "settings-check-#{System.unique_integer([:positive])}.md")
+    File.write!(path, text)
+
+    try do
+      with {:ok, loaded} <- Workflow.load(path),
+           {:ok, settings} <- Schema.parse(loaded.config) do
+        Config.validate_settings(settings)
+      end
+    after
+      File.rm(path)
+    end
+  end
+end
