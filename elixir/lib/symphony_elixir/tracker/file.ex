@@ -282,7 +282,11 @@ defmodule SymphonyElixir.Tracker.File do
       created_at: to_datetime(ticket["created_at"]),
       updated_at: to_datetime(ticket["updated_at"]),
       blocked_by: blockers,
-      dispatchable: blockers == []
+      dispatchable: blockers == [],
+      # Per-task agent route. Read here because the ticket file is where a person's choice is
+      # written; `AgentIdentity.for_issue/2` decides how far it is allowed to go.
+      adapter: to_string_value(ticket["adapter"]),
+      model: to_string_value(ticket["model"])
     }
   end
 

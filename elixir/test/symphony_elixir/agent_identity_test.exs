@@ -81,4 +81,77 @@ defmodule SymphonyElixir.AgentIdentityTest do
       assert AgentIdentity.current(settings("codex", command: nil)).model == nil
     end
   end
+
+  # A ticket may name its own agent route. `resolve/2` is the one place that decides how far the
+  # request goes, and it is shared by the runner, the prompt, the dashboard and the task page's
+  # preview -- so what the page promises and what runs cannot disagree.
+  describe "resolve/2 -- what a ticket is allowed to override" do
+    test "a ticket that asks for nothing gets exactly the base" do
+      base = %{backend: "acp", adapter: "dsh", model: "auto"}
+
+      assert AgentIdentity.resolve(base, nil) == base
+      assert AgentIdentity.resolve(base, %{}) == base
+      assert AgentIdentity.resolve(base, %{adapter: nil, model: nil}) == base
+    end
+
+    test "blank is not a request" do
+      base = %{backend: "acp", adapter: "dsh", model: "auto"}
+
+      assert AgentIdentity.resolve(base, %{adapter: "", model: "   "}) == base
+    end
+
+    test "on ACP a ticket may pick the adapter, the model, or both" do
+      base = %{backend: "acp", adapter: "dsh", model: "auto"}
+
+      assert AgentIdentity.resolve(base, %{adapter: "workbuddy", model: "gpt-5"}) ==
+               %{backend: "acp", adapter: "workbuddy", model: "gpt-5"}
+
+      assert AgentIdentity.resolve(base, %{model: "gpt-5"}) ==
+               %{backend: "acp", adapter: "dsh", model: "gpt-5"}
+
+      assert AgentIdentity.resolve(base, %{adapter: "workbuddy"}) ==
+               %{backend: "acp", adapter: "workbuddy", model: "auto"}
+    end
+
+    test "on codex neither is honoured -- the base is reported, not the request" do
+      # The model lives inside `codex.command` and there is no adapter concept, so what comes back is
+      # what will actually run. Saying otherwise would be the panel lying.
+      base = %{backend: "codex", adapter: nil, model: "gpt-5-codex"}
+
+      assert AgentIdentity.resolve(base, %{adapter: "workbuddy", model: "something-else"}) == base
+    end
+
+    test "on CommandCode a model is honoured, an adapter is not" do
+      base = %{backend: "commandcode", adapter: nil, model: "default-model"}
+
+      assert AgentIdentity.resolve(base, %{model: "other-model"}) ==
+               %{backend: "commandcode", adapter: nil, model: "other-model"}
+
+      assert AgentIdentity.resolve(base, %{adapter: "workbuddy"}).adapter == nil
+    end
+
+    test "the backend itself is never taken from the ticket" do
+      # A per-ticket backend would mean two session mechanisms inside one project. Ignored, not
+      # half-honoured.
+      base = %{backend: "codex", adapter: nil, model: nil}
+
+      assert AgentIdentity.resolve(base, %{backend: "acp", model: "x"}).backend == "codex"
+    end
+  end
+
+  describe "for_issue/2 -- the same rule, on the configured base" do
+    test "applies the ticket's request to the project's route" do
+      settings = settings("acp", adapter: "dsh", model: "auto")
+
+      assert AgentIdentity.for_issue(%{adapter: "workbuddy", model: "gpt-5"}, settings) ==
+               %{backend: "acp", adapter: "workbuddy", model: "gpt-5"}
+    end
+
+    test "a ticket with no request is exactly the configuration" do
+      settings = settings("acp", adapter: "dsh", model: "auto")
+
+      assert AgentIdentity.for_issue(%{}, settings) == AgentIdentity.current(settings)
+      assert AgentIdentity.for_issue(nil, settings) == AgentIdentity.current(settings)
+    end
+  end
 end

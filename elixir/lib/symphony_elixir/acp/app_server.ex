@@ -108,10 +108,10 @@ defmodule SymphonyElixir.ACP.AppServer do
 
     case validate_workspace_cwd(workspace, worker_host) do
       {:ok, expanded_workspace} ->
-        with {:ok, adapter} <- adapter_module(),
+        with {:ok, adapter} <- requested_adapter(opts),
              {:ok, command} <- adapter_command(adapter),
              {:ok, client} <-
-               start_client(adapter, command, expanded_workspace, Config.settings!().acp, opts) do
+               start_client(adapter, command, expanded_workspace, acp_settings(opts), opts) do
           session_id = acp_session_id(client)
 
           Logger.info("ACP session started adapter=#{inspect(adapter)} session_id=#{inspect(session_id)} workspace=#{expanded_workspace}")
@@ -291,6 +291,26 @@ defmodule SymphonyElixir.ACP.AppServer do
 
   defp adapter_module do
     adapter_module(Config.settings!().acp.adapter)
+  end
+
+  # A ticket may name its own adapter. `AgentIdentity.for_issue/2` only passes one through when the
+  # project's backend is ACP, so this is reached exactly when an adapter is the right concept.
+  defp requested_adapter(opts) do
+    case Keyword.get(opts, :adapter) do
+      nil -> adapter_module()
+      adapter -> adapter_module(adapter)
+    end
+  end
+
+  # The rest of the ACP route lives in the settings struct, so a per-ticket model is applied to a
+  # copy of it rather than by reaching back into global configuration.
+  defp acp_settings(opts) do
+    settings = Config.settings!().acp
+
+    case Keyword.get(opts, :model) do
+      nil -> settings
+      model -> %{settings | model: model}
+    end
   end
 
   defp adapter_module(adapter) when adapter in ["dsh", :dsh], do: {:ok, DSH}

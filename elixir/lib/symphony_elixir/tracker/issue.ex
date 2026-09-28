@@ -24,7 +24,9 @@ defmodule SymphonyElixir.Tracker.Issue do
     labels: [],
     dispatchable: false,
     created_at: nil,
-    updated_at: nil
+    updated_at: nil,
+    adapter: nil,
+    model: nil
   ]
 
   @type t :: %__MODULE__{
@@ -42,7 +44,13 @@ defmodule SymphonyElixir.Tracker.Issue do
           blocked_by: [map()],
           dispatchable: boolean(),
           created_at: DateTime.t() | nil,
-          updated_at: DateTime.t() | nil
+          updated_at: DateTime.t() | nil,
+          # Per-task overrides of the project's agent route. `nil` means "whatever the workflow
+          # pinned", which is what every ticket did before these existed -- so a ticket without them
+          # behaves exactly as before. See `SymphonyElixir.AgentIdentity.for_issue/2` for where they
+          # are allowed to take effect, and why that is not everywhere.
+          adapter: String.t() | nil,
+          model: String.t() | nil
         }
 
   @spec label_names(t()) :: [String.t()]

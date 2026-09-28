@@ -47,7 +47,10 @@ defmodule SymphonyElixir.TaskComposer do
           optional(:description) => String.t(),
           optional(:validation) => String.t(),
           optional(:blocked_by) => [String.t()],
-          optional(:priority) => String.t() | integer()
+          optional(:priority) => String.t() | integer(),
+          # Per-task agent route. Optional, and only written to the ticket when given.
+          optional(:adapter) => String.t() | nil,
+          optional(:model) => String.t() | nil
         }
 
   @typedoc "One ticket, as the management page reads it."
@@ -61,7 +64,9 @@ defmodule SymphonyElixir.TaskComposer do
           priority: String.t() | nil,
           blocked_by: [String.t()],
           body: String.t(),
-          path: String.t()
+          path: String.t(),
+          adapter: String.t() | nil,
+          model: String.t() | nil
         }
 
   # ── Pure: building the issue body ────────────────────────────────────────────
@@ -139,7 +144,20 @@ defmodule SymphonyElixir.TaskComposer do
     else
       text
     end
+    |> put_agent_keys(attrs)
   end
+
+  # The ticket's own agent route, written only when a person chose one. A ticket without these keys
+  # is byte-for-byte what it was before they existed, and `AgentIdentity.resolve/2` decides how far
+  # each may go -- the file records the request, the resolver says what happens.
+  defp put_agent_keys(text, attrs) do
+    text
+    |> put_optional_key("adapter", Map.get(attrs, :adapter))
+    |> put_optional_key("model", Map.get(attrs, :model))
+  end
+
+  defp put_optional_key(text, _key, value) when value in [nil, ""], do: text
+  defp put_optional_key(text, key, value), do: Ticket.set_key(text, key, String.trim(to_string(value)))
 
   @doc """
   Formats a list of ticket IDs as a YAML flow sequence for the `blocked_by`
@@ -449,6 +467,8 @@ defmodule SymphonyElixir.TaskComposer do
           assignee: presence(Ticket.get(fm, "assignee_id")),
           priority: presence(Ticket.get(fm, "priority")),
           blocked_by: parse_blocked_by(Ticket.get(fm, "blocked_by")),
+          adapter: presence(Ticket.get(fm, "adapter")),
+          model: presence(Ticket.get(fm, "model")),
           discussion: parse_discussion(body),
           body: body,
           path: path

@@ -1442,13 +1442,14 @@ defmodule SymphonyElixir.Orchestrator do
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
 
-    # Which agent these runs are on. Config-derived, and deliberately the same function the prompt
-    # builder uses, so what the dashboard shows and what the agent is told cannot disagree.
-    identity = AgentIdentity.current()
-
     running =
       state.running
       |> Enum.map(fn {issue_id, metadata} ->
+        # Per run, not once for the whole snapshot: a ticket may pin its own model or adapter, and
+        # `for_issue/2` is the same resolution the prompt builder and the runner use -- so what this
+        # row says and what the agent is told cannot disagree.
+        identity = AgentIdentity.for_issue(Map.get(metadata, :issue))
+
         %{
           issue_id: issue_id,
           identifier: metadata.identifier,

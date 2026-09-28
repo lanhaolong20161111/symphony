@@ -43,6 +43,67 @@ defmodule SymphonyElixir.AgentIdentity do
     }
   end
 
+  @doc """
+  The identity for one ticket: the project's route, with the ticket's own choices applied **where the
+  runtime can honour them**.
+
+  ## Why this is the same function, not a second one
+
+  `current/1` exists because the prompt, the dashboard and the actual run must not be able to
+  disagree about who is working. Nothing about that changes here -- this is the same resolution,
+  given the ticket, and all three callers already hold the ticket.
+
+  ## Where a ticket may override, and where it may not
+
+  * **`:model`** -- honoured on the ACP and CommandCode backends, whose model is a setting. On the
+    codex backend the model lives inside `codex.command`, a shell string, so only that command knows
+    it; a per-ticket model cannot be honoured there, and the project's answer is reported instead of
+    the request being silently dropped.
+  * **`:adapter`** -- honoured when the backend is ACP, because an adapter is what ACP has. A ticket
+    asking for `workbuddy` inside a `codex` project gets the project's answer: a per-ticket backend
+    would mean two session mechanisms inside one project, which is a different change with a
+    different blast radius. Saying what will actually run matters more than accepting the value.
+
+  A ticket naming neither gets exactly the configuration, so every ticket that exists today behaves
+  exactly as it did.
+  """
+  @spec for_issue(map() | nil, map() | nil) :: t()
+  def for_issue(issue, settings \\ nil) do
+    resolve(current(settings || Config.settings!()), issue)
+  end
+
+  @doc """
+  Applies a ticket's own choices to a base identity -- **the one place that rule lives**.
+
+  Two callers provide the base from different places: the runner, the prompt and the dashboard from
+  the running configuration, and the task page from the *selected project's* parsed workflow (which
+  is not this instance's). Both then use this function, so the preview cannot promise a route the
+  runner would not take.
+  """
+  @spec resolve(t(), map() | nil) :: t()
+  def resolve(base, nil), do: base
+
+  def resolve(base, issue) do
+    %{
+      backend: base.backend,
+      adapter: override(base.adapter, Map.get(issue, :adapter), base.backend == "acp"),
+      model: override(base.model, Map.get(issue, :model), base.backend in ["acp", "commandcode"])
+    }
+  end
+
+  # A blank value is not a request -- including a value that is only whitespace, which is what a form
+  # field left half-touched produces. A request the runtime cannot honour leaves the project's answer
+  # in place, so what is reported is what will run.
+  defp override(base, requested, allowed) do
+    requested = if is_binary(requested), do: requested |> String.trim() |> blank_to_nil(), else: requested
+
+    cond do
+      requested == nil -> base
+      not allowed -> base
+      true -> requested
+    end
+  end
+
   # Only the ACP backend has an adapter; for the others the field would be a lie.
   defp adapter(%{agent: %{backend: "acp"}, acp: acp}), do: blank_to_nil(acp.adapter)
   defp adapter(_settings), do: nil

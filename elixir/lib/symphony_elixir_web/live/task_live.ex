@@ -11,6 +11,7 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.AgentIdentity
   alias SymphonyElixir.Projects
   alias SymphonyElixir.Settings
   alias SymphonyElixir.TaskComposer
@@ -28,6 +29,7 @@ defmodule SymphonyElixirWeb.TaskLive do
       |> assign(:tickets, load_tickets())
       |> assign(:projects, projects)
       |> assign_project(default_project_name(projects))
+      |> assign_route(%{adapter: nil, model: nil})
       |> assign(:states, @states)
       |> assign(:form, empty_form())
       |> assign(:creating, false)
@@ -39,8 +41,11 @@ defmodule SymphonyElixirWeb.TaskLive do
   end
 
   @impl true
-  def handle_event("select_project", %{"task" => %{"project" => name}}, socket) do
-    {:noreply, assign_project(socket, name)}
+  def handle_event("select_project", %{"task" => params}, socket) do
+    name = params["project"] || socket.assigns.selected
+    overrides = %{adapter: params["adapter"], model: params["model"]}
+
+    {:noreply, socket |> assign_project(name) |> assign_route(overrides)}
   end
 
   @impl true
@@ -50,7 +55,11 @@ defmodule SymphonyElixirWeb.TaskLive do
       description: task_params["description"],
       validation: task_params["validation"],
       blocked_by: parse_blocked_by(task_params["blocked_by"]),
-      priority: task_params["priority"]
+      priority: task_params["priority"],
+      # Written to the ticket as its own route. `AgentIdentity.resolve/2` decides how far each goes;
+      # the panel above the form says which, so this cannot promise more than it delivers.
+      adapter: task_params["adapter"],
+      model: task_params["model"]
     }
 
     socket = assign(socket, :creating, true)
@@ -181,6 +190,15 @@ defmodule SymphonyElixirWeb.TaskLive do
                 <div><span class="mono muted">issues　</span> <%= @project[:issues_repo] || "（没声明 ✗）" %></div>
                 <div><span class="mono muted">tickets　</span> <%= @project[:tickets_repo] || "（没声明 ✗）" %></div>
                 <div><span class="mono muted">agent　　</span> <%= agent_text(@project) %></div>
+                <%= if @route do %>
+                  <div>
+                    <span class="mono muted">本任务用　</span>
+                    <strong><%= route_text(@route) %></strong>
+                    <%= if @route != project_identity(@project) do %>
+                      <span class="muted">（覆盖了项目默认）</span>
+                    <% end %>
+                  </div>
+                <% end %>
                 <div><span class="mono muted">工作区　</span> <%= @project[:workspace_root] || "（没声明）" %></div>
                 <div><span class="mono muted">代码　　　</span> <%= repos_text(@project) %></div>
                 <div>
@@ -189,7 +207,7 @@ defmodule SymphonyElixirWeb.TaskLive do
                   <%= if @project[:reachable?], do: "✓ 在跑", else: "✗ 没在跑" %>
                 </div>
               </div>
-              <%= for warning <- project_warnings(@project) do %>
+              <%= for warning <- project_warnings(@project) ++ @override_notes do %>
                 <div class="event-meta" style="color: #a15c00;"><%= warning %></div>
               <% end %>
             </div>
@@ -225,6 +243,38 @@ defmodule SymphonyElixirWeb.TaskLive do
             <span class="form-label">优先级</span>
             <input type="text" name="task[priority]" class="form-input" placeholder="可以不填" />
           </label>
+
+          <div style="display: flex; gap: 0.8rem; flex-wrap: wrap;">
+            <label class="form-field" style="flex: 1 1 12rem;">
+              <span class="form-label">coding agent（留空 = 跟项目）</span>
+              <input
+                type="text"
+                name="task[adapter]"
+                class="form-input"
+                list="known-adapters"
+                placeholder={@project && @project[:adapter] || "如 dsh / workbuddy"}
+              />
+            </label>
+            <label class="form-field" style="flex: 1 1 12rem;">
+              <span class="form-label">模型（留空 = 跟项目）</span>
+              <input
+                type="text"
+                name="task[model]"
+                class="form-input"
+                placeholder={@project && @project[:model] || "如 auto"}
+              />
+            </label>
+          </div>
+          <span class="form-hint">
+            这两项**只对 ACP 后端生效**（adapter ✓、model ✓）；codex 后端把模型写在
+            <code>codex.command</code> 里 ⇒ 填了也不会生效，上面会直接说 ✗。
+            留空就跟项目走 —— 一张不填的票和以前完全一样。
+          </span>
+
+          <datalist id="known-adapters">
+            <option value="dsh"></option>
+            <option value="workbuddy"></option>
+          </datalist>
 
           <button type="submit" class="task-submit" disabled={@creating}>
             <%= if @creating, do: "创建中…", else: "创建任务" %>
@@ -390,6 +440,45 @@ defmodule SymphonyElixirWeb.TaskLive do
     end
   end
 
+  # What this task will actually run on: the project's route, with the form's own choices applied by
+  # **the same function the runner and the prompt use**. That is the point -- a preview computed any
+  # other way could promise a route the run would not take.
+  defp assign_route(socket, overrides) do
+    case socket.assigns.project do
+      nil ->
+        assign(socket, :route, nil) |> assign(:override_notes, [])
+
+      project ->
+        route = AgentIdentity.resolve(project_identity(project), overrides)
+
+        socket
+        |> assign(:route, route)
+        |> assign(:override_notes, override_notes(project, route, overrides))
+    end
+  end
+
+  defp project_identity(project) do
+    %{backend: project[:backend], adapter: project[:adapter], model: project[:model]}
+  end
+
+  # A request the runtime cannot honour is said out loud. The alternative -- accepting the value and
+  # running something else -- is the failure this whole panel exists to prevent.
+  defp override_notes(project, route, overrides) do
+    []
+    |> add_warning(
+      present?(overrides[:adapter]) and project[:backend] != "acp",
+      "⚠️ 你填了 adapter=#{overrides[:adapter]}，但项目的后端是 #{project[:backend]} ✗" <>
+        "　adapter 是 ACP 后端的选型 ⇒ 这个任务仍按项目的路由跑（#{route.backend}）"
+    )
+    |> add_warning(
+      present?(overrides[:model]) and project[:backend] == "codex",
+      "⚠️ 你填了 model=#{overrides[:model]}，但 codex 的后端把模型写在 codex.command 里 ✗" <>
+        "　⇒ 每任务覆盖在 codex 上不生效，实际用的是项目的那份"
+    )
+  end
+
+  defp present?(value), do: is_binary(value) and String.trim(value) != ""
+
   # What the picker must state rather than hide. Every one of these is a way a task can be created
   # successfully and then not run, which is the failure mode this page exists to prevent.
   #
@@ -464,6 +553,12 @@ defmodule SymphonyElixirWeb.TaskLive do
       [] -> "（没声明）"
       parts -> Enum.join(parts, " / ")
     end
+  end
+
+  defp route_text(route) do
+    [route.backend, route.adapter, route.model]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" / ")
   end
 
   defp repos_text(project) do

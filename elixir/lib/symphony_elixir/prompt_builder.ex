@@ -28,7 +28,7 @@ defmodule SymphonyElixir.PromptBuilder do
       %{
         "attempt" => Keyword.get(opts, :attempt),
         "issue" => issue |> Map.from_struct() |> to_solid_map(),
-        "agent" => agent_context(),
+        "agent" => agent_context(issue),
         "run" => run_context(Keyword.get(opts, :run, %{}))
       },
       @render_opts
@@ -36,9 +36,12 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  # Names are stable and documented; `model` may be nil on the codex backend (see AgentIdentity).
-  defp agent_context do
-    identity = AgentIdentity.current()
+  # What the agent is told about itself. `for_issue/2`, the same resolution the dashboard and the
+  # runner use, given the ticket -- so a per-ticket model or adapter is named here exactly when it
+  # will actually be used. Names are stable and documented; `model` may be nil on the codex backend
+  # (see AgentIdentity).
+  defp agent_context(issue) do
+    identity = AgentIdentity.for_issue(issue)
 
     %{
       "backend" => identity.backend,

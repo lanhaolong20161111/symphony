@@ -200,4 +200,44 @@ defmodule SymphonyElixir.TaskComposerTest do
       assert TaskComposer.create_task(%{title: ""}) == {:error, :missing_title}
     end
   end
+
+  # The per-task agent route. The keys are written only when a person chose one, which is what makes
+  # "every ticket that exists today is untouched" a fact rather than a hope.
+  describe "per-task agent route" do
+    test "is not written when nothing was chosen" do
+      without = TaskComposer.build_ticket_text("SYM-1", %{title: "T"}, "1")
+      with_blanks = TaskComposer.build_ticket_text("SYM-1", %{title: "T", adapter: "", model: nil}, "1")
+
+      assert without == with_blanks
+      refute without =~ "adapter:"
+      refute without =~ "model:"
+    end
+
+    test "is written verbatim when chosen" do
+      text =
+        TaskComposer.build_ticket_text(
+          "SYM-1",
+          %{title: "T", adapter: "workbuddy", model: " gpt-5 "},
+          "1"
+        )
+
+      assert text =~ "adapter: workbuddy"
+      # Trimmed: a form field with a stray space is not a different model.
+      assert text =~ "model: gpt-5"
+    end
+
+    test "a ticket carrying them is read back with them" do
+      text =
+        TaskComposer.build_ticket_text(
+          "SYM-9",
+          %{title: "T", adapter: "dsh", model: "auto"},
+          "9"
+        )
+
+      # The round trip the file tracker performs: the front matter is what it reads.
+      assert {:ok, %{front_matter: fm}} = Ticket.split(text)
+      assert Ticket.get(fm, "adapter") == "dsh"
+      assert Ticket.get(fm, "model") == "auto"
+    end
+  end
 end

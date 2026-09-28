@@ -5,9 +5,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.ACP.AppServer, as: AcpAppServer
+  alias SymphonyElixir.{AgentIdentity, Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.CommandCode.AppServer, as: CommandCodeAppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -92,7 +92,17 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
     backend = agent_backend()
 
-    with {:ok, session} <- backend.start_session(workspace, worker_host: worker_host) do
+    # The ticket's own route, resolved by the same function the prompt builder and the dashboard
+    # use. Only the adapter and the model can come from here: the backend module itself is the
+    # project's, and `for_issue/2` says so rather than letting a ticket ask for a different one.
+    identity = AgentIdentity.for_issue(issue)
+
+    with {:ok, session} <-
+           backend.start_session(workspace,
+             worker_host: worker_host,
+             adapter: identity.adapter,
+             model: identity.model
+           ) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
