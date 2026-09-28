@@ -406,23 +406,27 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
-    task =
-      Task.async(fn ->
-        # Resolve the shell explicitly: a bare `"sh"` is not on the Windows PATH, and the `bash`
-        # that *is* on it is WSL's, which cannot run these hook scripts.
-        System.cmd(Shell.find_sh() || "sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-      end)
+    # Through `Shell.run/3` -- not `Task.async` + `System.cmd` + `Task.yield`. That version's
+    # timeout killed the Elixir task and left the operating-system process tree (the shell and
+    # whatever it had started) alive, and its `case` had no clause for a task that exits abnormally,
+    # so a spawn failure surfaced as a `CaseClauseError` rather than an error. This is the same
+    # runner the janitor uses, so the system has one timeout behaviour instead of two.
+    #
+    # The shell is resolved explicitly: a bare `"sh"` is not on the Windows PATH, and the `bash`
+    # that *is* on it is WSL's, which cannot run these hook scripts.
+    case Shell.run(Shell.find_sh() || "sh", ["-lc", command], cd: workspace, timeout: timeout_ms) do
+      {:ok, output, status} ->
+        handle_hook_command_result({output, status}, workspace, issue_context, hook_name)
 
-    case Task.yield(task, timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
-
-      nil ->
-        Task.shutdown(task, :brutal_kill)
-
+      {:error, :timeout} ->
         Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
 
         {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+
+      {:error, {:not_found, tool}} ->
+        Logger.error("Workspace hook could not run hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} shell=#{tool}")
+
+        {:error, {:hook_shell_not_found, hook_name, tool}}
     end
   end
 
@@ -567,6 +571,13 @@ defmodule SymphonyElixir.Workspace do
       nil ->
         Task.shutdown(task, :brutal_kill)
         {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+
+      # Without this clause an abnormal task exit is a `CaseClauseError` -- the same crash the local
+      # runner used to have. `SSH.run/3` opens its own port and takes no timeout, so this path still
+      # cannot kill a hung ssh tree; it is only reached for remote workers, and it now says so
+      # rather than dying.
+      {:exit, reason} ->
+        {:error, {:remote_command_failed, reason}}
     end
   end
 

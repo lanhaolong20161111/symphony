@@ -1,26 +1,44 @@
 defmodule SymphonyElixir.Shell do
   @moduledoc """
-  Locating the POSIX shell that launch commands (`bash -lc`) and workspace hooks (`sh -lc`)
-  run in.
+  External commands: which shell to use, and how to run one so it cannot hang.
 
-  ## Why this module exists (Windows)
+  Two concerns in one module on purpose. They were two (`Shell` located shells, `Janitor.Shell` ran
+  them), and the one caller that mattered -- the workspace hook runner -- used neither: it built its
+  own `Task.async` + `System.cmd` + `Task.yield`, whose timeout kills the *Elixir task* and leaves
+  the operating-system process tree alive. Keeping "find the shell" and "run it with a real deadline"
+  together is what stops that from happening a third time.
 
-  On Windows `System.find_executable("bash")` walks `PATH` and reaches
-  `C:\\Windows\\System32\\bash.exe` — **WSL's** bash — before any Git installation. That shell
-  runs in a Linux namespace: a Windows path such as `C:/Users/.../fake-codex` is not something it
-  can execute, and a Windows executable loses its `.exe` suffix, so `bash -lc "<command>"` exits
-  **127** immediately. The port then dies and the caller only sees `{:port_exit, 127}` or
-  `:epipe` — which is how dozens of agent-runner and workspace tests failed on a machine where
-  bash, Git and codex were all installed and working.
+  ## Why not `System.cmd/3`
 
-  `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\bash.exe` (the App Execution Alias) is the same WSL
-  launcher under a different name and is rejected too.
+  `System.cmd/3` has no timeout. On 2026-09-26 a PowerShell janitor hung for **62 minutes** with
+  no child process left alive and a flat CPU: the classic shape of a native command whose process
+  exited but whose stdout pipe stayed open, after which the caller waits forever. A whole-round
+  watchdog contained it, but that costs a process per round and loses the round.
 
-  Git for Windows ships a POSIX shell that *does* understand Windows paths and `.exe` resolution,
-  so it is preferred here; a WSL launcher is rejected outright rather than handed back so the
-  failure surfaces as `:bash_not_found` instead of a mystery exit code.
+  `run/3` opens the command as a port instead, so it can read `:os_pid` and **kill the process
+  tree** when the deadline passes. One hung call costs one call.
 
-  Nothing changes on non-Windows hosts.
+  ## Windows pitfalls (all measured, all in one place so they are not rediscovered)
+
+  * **`bash` on `PATH` is WSL's.** `System.find_executable("bash")` finds
+    `C:\\Windows\\System32\\bash.exe` before any Git installation; that shell cannot execute a
+    Windows path or resolve `.exe`, and `bash -lc "<command>"` exits **127** immediately. Git's own
+    shell is preferred and a WSL launcher is rejected outright, so the failure is `:bash_not_found`
+    instead of a mystery exit code.
+  * **A backslash is an escape character in `bash -lc`.** `C:\\Users\\me\\tool` becomes
+    `C:Usersmetool` and the child dies with 127. `normalize_paths/1` forwards-slashes them.
+  * **A killed process is not a killed tree.** There is no `kill -9` equivalent that reaches
+    children; `taskkill /PID <pid> /T /F` is the one that does. A survivor holds the stdout pipe
+    open, which is the hang described above.
+  * **`:hide` is required.** Without it a `cmd.exe` shim's grandchild (the real program) has its
+    stdout dropped entirely and the caller sees silence -- measured while building `AcpSdk`.
+  * **An absolute path is required** by `:spawn_executable`, so every call resolves first and a
+    missing tool is a clean `{:error, {:not_found, _}}` rather than an `:enoent` crash.
+  * **`.git` is a file in a git worktree**, not a directory. Anything testing `-d .git` (hooks) or
+    `File.dir?(.git)` (this codebase) silently decides a worktree is not a checkout -- see
+    `SymphonyElixir.GitWorktree`, and ask git instead of the filesystem.
+
+  Nothing here changes on non-Windows hosts.
   """
 
   @doc """
@@ -76,6 +94,133 @@ defmodule SymphonyElixir.Shell do
   """
   @spec windows?() :: boolean()
   def windows?, do: match?({:win32, _}, :os.type())
+
+  # ─── running commands ────────────────────────────────────────────────────────
+
+  @default_timeout 60_000
+
+  @typedoc "Command outcome: stdout plus exit status, or a timeout / lookup failure."
+  @type outcome :: {:ok, String.t(), non_neg_integer()} | {:error, :timeout | {:not_found, String.t()}}
+
+  @doc """
+  Runs `executable` with an argument **list** and returns `{:ok, stdout, exit_status}`.
+
+  Options: `:timeout` (ms, total, default #{@default_timeout}) and `:cd` (working directory).
+
+  Arguments are a list on purpose. A shell-built string is how a multi-line ticket body once got
+  split on whitespace and its fragments were read as command-line flags by `gh`.
+
+  The timeout is a **total deadline**, not an inactivity gap: a command that keeps printing would
+  otherwise reset the clock on every chunk and never time out. What the caller asked for is "this
+  may take at most N ms", and that is what it gets.
+  """
+  @spec run(String.t(), [String.t()], keyword()) :: outcome()
+  def run(executable, args, opts \\ []) when is_binary(executable) and is_list(args) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+
+    case resolve(executable) do
+      nil -> {:error, {:not_found, executable}}
+      path -> path |> open_port(args, opts) |> collect([], timeout)
+    end
+  end
+
+  @doc """
+  Runs a command and decodes its stdout as JSON.
+
+  Returns `{:ok, term}` when the command exits 0 and its stdout parses, otherwise
+  `{:error, {:exit, status, output}}` or `{:error, {:bad_json, output}}`. `gh` writes a useful
+  error message to stdout, so the output is kept in the error.
+  """
+  @spec run_json(String.t(), [String.t()], keyword()) :: {:ok, term()} | {:error, term()}
+  def run_json(executable, args, opts \\ []) do
+    case run(executable, args, opts) do
+      {:ok, output, 0} ->
+        case JSON.decode(output) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, _} -> {:error, {:bad_json, output}}
+        end
+
+      {:ok, output, status} ->
+        {:error, {:exit, status, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc "True when `executable` resolves on `PATH` (or is an existing absolute path)."
+  @spec available?(String.t()) :: boolean()
+  def available?(executable), do: resolve(executable) != nil
+
+  # `find_sh/0` and `find_bash/0` return absolute paths, which `System.find_executable/1` is not
+  # guaranteed to hand back -- so an existing path is accepted as-is. That keeps one runner for both
+  # "a tool on PATH" (`gh`, `git`) and "a shell we located ourselves".
+  defp resolve(executable) do
+    System.find_executable(executable) ||
+      if(String.contains?(executable, ["/", "\\"]) and File.regular?(executable), do: executable)
+  end
+
+  defp open_port(path, args, opts) do
+    port_opts = [:binary, :exit_status, :stderr_to_stdout, :hide, args: args]
+
+    port_opts =
+      case Keyword.get(opts, :cd) do
+        nil -> port_opts
+        dir -> [{:cd, String.to_charlist(dir)} | port_opts]
+      end
+
+    Port.open({:spawn_executable, String.to_charlist(path)}, port_opts)
+  end
+
+  defp collect(port, acc, timeout) do
+    collect_until(port, acc, System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp collect_until(port, acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} -> collect_until(port, [data | acc], deadline)
+      {^port, {:exit_status, status}} -> {:ok, IO.iodata_to_binary(Enum.reverse(acc)), status}
+    after
+      remaining ->
+        kill(port)
+        {:error, :timeout}
+    end
+  end
+
+  # Kill the whole tree, the way each platform can. `gh` and `git` spawn helpers, and closing the
+  # port only reaps the direct child -- a survivor holds the pipe open, which is exactly the failure
+  # this module exists to prevent.
+  defp kill(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} -> kill_tree(pid)
+      _ -> :ok
+    end
+  catch
+    _, _ -> :ok
+  after
+    safe_close(port)
+  end
+
+  defp kill_tree(pid) do
+    if windows?() do
+      System.cmd("taskkill", ["/PID", Integer.to_string(pid), "/T", "/F"], stderr_to_stdout: true)
+    else
+      # Closing the port terminates the direct child; this collects the descendants a shell-based
+      # command leaves behind. Both are best effort -- a missing `pkill` must not turn a timeout
+      # into a crash.
+      System.cmd("pkill", ["-TERM", "-P", Integer.to_string(pid)], stderr_to_stdout: true)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp safe_close(port) do
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  end
 
   @doc """
   Rewrite Windows path separators in a command string so a POSIX shell cannot eat them.

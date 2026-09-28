@@ -36,7 +36,9 @@ defmodule SymphonyElixir.Janitor do
 
   require Logger
 
-  alias SymphonyElixir.Janitor.{Board, Labels, Shell, Ticket}
+  alias SymphonyElixir.GitWorktree
+  alias SymphonyElixir.Janitor.{Board, Labels, Ticket}
+  alias SymphonyElixir.Shell
 
   @task_label "agent-task"
   @managed_label "symphony"
@@ -506,7 +508,10 @@ defmodule SymphonyElixir.Janitor do
     workspace = Path.join(cfg.workspace_root, id)
     ticket_path = Path.join(cfg.tickets, "#{id}.md")
 
-    with true <- File.dir?(Path.join(workspace, ".git")),
+    # `GitWorktree.inside_work_tree?/1`, not `File.dir?(Path.join(workspace, ".git"))`: in a git
+    # worktree `.git` is a *file*, so the filesystem test answered "no" and this function returned
+    # `:ok` -- the ticket sat in `in-review` forever and nothing anywhere said why. Ask git.
+    with true <- GitWorktree.inside_work_tree?(workspace),
          true <- File.exists?(ticket_path),
          true <- File.read!(ticket_path) =~ ~r/^state:\s*in-review\s*$/m,
          branch = "symphony/#{id}",
@@ -514,7 +519,14 @@ defmodule SymphonyElixir.Janitor do
          true <- dirty != {:ok, "", 0} or not has_pull_request?(branch, cfg) do
       publish(id, workspace, ticket_path, branch, cfg)
     else
-      _ -> :ok
+      # Every guard above is a boolean, so `false` is the only other outcome -- the compiler says so
+      # when that stops being true.
+      #
+      # Debug, not warning: the common case is "nothing to publish", and this runs every round for
+      # every in-review ticket. It exists so a judgement that goes wrong again is findable.
+      false ->
+        Logger.debug("janitor: #{id} not published (workspace=#{workspace})")
+        :ok
     end
   end
 
@@ -751,7 +763,7 @@ defmodule SymphonyElixir.Janitor do
 
   # ── gh / git ──────────────────────────────────────────────────────────────────
 
-  defp gh_json(args), do: Shell.json("gh", args, timeout: @command_timeout)
+  defp gh_json(args), do: Shell.run_json("gh", args, timeout: @command_timeout)
   defp gh(args), do: Shell.run("gh", args, timeout: @command_timeout)
   defp git(cfg_or_dir, args)
 

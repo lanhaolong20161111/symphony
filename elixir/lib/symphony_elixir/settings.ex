@@ -32,9 +32,8 @@ defmodule SymphonyElixir.Settings do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Workflow, WorkflowEditor}
+  alias SymphonyElixir.{Config, Shell, Workflow, WorkflowEditor}
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Janitor.Shell
 
   @typedoc "One credential this system may need, and what to do about it."
   @type credential :: %{

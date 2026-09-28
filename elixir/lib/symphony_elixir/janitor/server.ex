@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Janitor.Server do
 
   `handle_info/2` runs a whole round before returning. That is deliberate, and the interesting
   question is what bounds a round: **every external command already carries its own killable
-  timeout** (`SymphonyElixir.Janitor.Shell.run/3`), so a round cannot hang -- it can only be slow,
+  timeout** (`SymphonyElixir.Shell.run/3`), so a round cannot hang -- it can only be slow,
   in proportion to the number of tickets and the number of `gh` calls they need. Running the round
   in a task would add a second deadline that duplicates the first, and a linked task that dies
   would take the server with it. Keep the deadline where the blocking actually happens.

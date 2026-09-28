@@ -55,7 +55,9 @@ janitor:
 hooks:
   timeout_ms: 600000
   after_create: |
-    if [ ! -d .git ]; then git clone --depth 1 https://github.com/lanhaolong20161111/beekeeper .; fi
+    # 问 git，不问文件系统：git worktree 里 `.git` 是【文件】，`[ ! -d .git ]` 会判真 ⇒ 往已有
+    # worktree 上再 clone 一次。`rev-parse` 才是 git 自己的判据。
+    if ! git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then git clone --depth 1 https://github.com/lanhaolong20161111/beekeeper .; fi
     mix deps.get
   # Publishing lives HERE, not in the agent -- measured, not a preference.
   #

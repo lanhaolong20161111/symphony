@@ -34,7 +34,8 @@ defmodule SymphonyElixir.TaskComposer do
   require Logger
 
   alias SymphonyElixir.{Config, Janitor}
-  alias SymphonyElixir.Janitor.{Labels, Shell, Ticket}
+  alias SymphonyElixir.Janitor.{Labels, Ticket}
+  alias SymphonyElixir.Shell
 
   @task_label "agent-task"
   @managed_label "symphony"
