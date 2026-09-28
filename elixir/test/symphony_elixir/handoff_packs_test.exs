@@ -137,6 +137,54 @@ defmodule SymphonyElixir.HandoffPacksTest do
     end
   end
 
+  describe "summary/1" do
+    test "says what was written" do
+      text =
+        HandoffPacks.summary(%{
+          attached: [%{id: "SYM-1", session: "s", bytes: 775}],
+          skipped: [],
+          failed: []
+        })
+
+      assert text =~ "续接上下文已写入"
+      assert text =~ "SYM-1"
+      assert text =~ "775"
+    end
+
+    test "names the skipped ones and why they were skipped" do
+      text =
+        HandoffPacks.summary(%{
+          attached: [],
+          skipped: [%{id: "SYM-2", reason: "recorder 里没有它的会话"}],
+          failed: []
+        })
+
+      assert text =~ "跳过"
+      assert text =~ "SYM-2"
+    end
+
+    test "reports failures rather than a quiet partial success" do
+      text =
+        HandoffPacks.summary(%{
+          attached: [%{id: "SYM-1", session: "s", bytes: 10}],
+          skipped: [],
+          failed: [%{id: "SYM-3", reason: "recorder 连不上"}]
+        })
+
+      # Both halves are present: the success does not hide the failure.
+      assert text =~ "SYM-1"
+      assert text =~ "⚠️ 续接上下文失败"
+      assert text =~ "SYM-3"
+      assert text =~ "recorder 连不上"
+    end
+
+    test "says plainly when there was nothing to carry" do
+      text = HandoffPacks.summary(%{attached: [], skipped: [], failed: []})
+
+      assert text =~ "没有在飞的票"
+    end
+  end
+
   describe "workspace_of?/2" do
     test "matches a Windows path and a POSIX path for the same ticket" do
       assert HandoffPacks.workspace_of?(

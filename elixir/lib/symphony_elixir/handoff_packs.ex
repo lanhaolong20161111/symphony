@@ -97,6 +97,45 @@ defmodule SymphonyElixir.HandoffPacks do
   def vendor_keys, do: [["acp", "adapter"], ["acp", "model"], ["agent", "backend"]]
 
   @doc """
+  The sentence a caller shows after a vendor switch, including everything that did not work.
+
+  Here rather than in the LiveView so it can be asserted: this text is the only place a person
+  learns that a ticket was skipped or a fetch failed, and "the next agent really does see the
+  context" is the whole point of the action.
+  """
+  @spec summary(map()) :: String.t()
+  def summary(%{attached: attached, skipped: skipped, failed: failed}) do
+    # `fn entry -> "…" end`, not `&"#{&1.id} …"`: the capture-with-interpolation form makes credo's
+    # `Credo.Check.Readability.StringSigils` raise inside `parse_string_literal/4`, and the whole
+    # lint run then exits 1 with a stack trace instead of a finding. Reported as a credo bug rather
+    # than worked around silently -- but the workaround is free, so the text stays identical.
+    lines =
+      []
+      |> add_line(
+        attached != [],
+        "续接上下文已写入：" <>
+          Enum.map_join(attached, "、", fn entry -> "#{entry.id} — #{entry.bytes} 字节" end)
+      )
+      |> add_line(
+        skipped != [],
+        "跳过（recorder 里没有它们的会话）：" <> Enum.map_join(skipped, "、", & &1.id)
+      )
+      |> add_line(
+        failed != [],
+        "⚠️ 续接上下文失败：" <>
+          Enum.map_join(failed, "、", fn entry -> "#{entry.id} — #{entry.reason}" end)
+      )
+
+    case lines do
+      [] -> "\n\n换的是谁来干 —— 但没有在飞的票，所以没有上下文要带。"
+      present -> "\n\n" <> Enum.join(present, "\n")
+    end
+  end
+
+  defp add_line(lines, true, line), do: lines ++ [line]
+  defp add_line(lines, false, _line), do: lines
+
+  @doc """
   Sets the marked handoff section in a document, replacing an existing one.
 
   ## Why markers instead of "up to the next `##`"
