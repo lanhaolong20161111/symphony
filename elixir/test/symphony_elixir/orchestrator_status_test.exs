@@ -275,6 +275,168 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert completed_state.codex_totals.total_tokens == 16
   end
 
+  test "orchestrator counts the ACP backend's flat token usage" do
+    # `Acp.AppServer.token_usage/1` normalizes whatever spelling an ACP agent uses into a flat map
+    # and emits it as `:token_usage`. `extract_token_usage/1` only walked codex's nested paths, so
+    # those events arrived here and were discarded -- a backend that reports its tokens still showed
+    # zero. This is exactly the payload that used to disappear.
+    issue_id = "issue-acp-flat-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-210",
+      title: "ACP flat usage",
+      description: "The ACP backend reports token counts as a flat map",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-210"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :AcpFlatUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :token_usage,
+         usage: %{"input_tokens" => 100, "output_tokens" => 20, "total_tokens" => 120},
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 100
+    assert snapshot_entry.codex_output_tokens == 20
+    assert snapshot_entry.codex_total_tokens == 120
+  end
+
+  test "orchestrator records the ACP context window, and ignores updates that carry none" do
+    issue_id = "issue-acp-context"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-211",
+      title: "ACP context window",
+      description: "usage_update carries used/size",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-211"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :AcpContextOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :acp_usage_update,
+         session_id: "acp-session",
+         used: 45_000,
+         size: 200_000,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    assert %{running: [entry]} = GenServer.call(pid, :snapshot)
+    assert entry.context == %{used: 45_000, size: 200_000, percent: 23}
+
+    # The *latest* value wins: unlike the token counters this is a level, not a total.
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :acp_usage_update,
+         session_id: "acp-session",
+         used: 150_000,
+         size: 200_000,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    assert %{running: [entry]} = GenServer.call(pid, :snapshot)
+    assert entry.context == %{used: 150_000, size: 200_000, percent: 75}
+
+    # A window of unknown size would make the percentage a lie, so it is not recorded at all, and
+    # the previous real value stands.
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :acp_usage_update,
+         session_id: "acp-session",
+         used: 1,
+         size: 0,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    assert %{running: [entry]} = GenServer.call(pid, :snapshot)
+    assert entry.context == %{used: 150_000, size: 200_000, percent: 75}
+  end
+
   test "orchestrator snapshot tracks codex token-count cumulative usage payloads" do
     issue_id = "issue-token-count-snapshot"
 

@@ -1464,6 +1464,9 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
+          # This map is a whitelist, so a field the run tracks is invisible here until it is named.
+          # `context` is the ACP context window (`used`/`size`); nil for agents that do not report it.
+          context: Map.get(metadata, :context),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1578,11 +1581,27 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        context: context_for_update(Map.get(running_entry, :context), update)
       }),
       token_delta
     }
   end
+
+  # ACP's `usage_update` is the only place a running agent's context use is visible: `used` of `size`.
+  #
+  # Unlike the token counters -- which are cumulative and therefore need a delta against what was last
+  # reported -- the *latest* context value is the useful one, so this overwrites rather than
+  # accumulates. `percent` is computed here so every reader agrees on how it rounds.
+  #
+  # This event used to be produced by `Acp.AppServer` and dropped on the floor: nothing in the
+  # orchestrator matched it, so a run's context use was invisible even though the protocol sends it.
+  defp context_for_update(_existing, %{event: :acp_usage_update, used: used, size: size})
+       when is_integer(used) and is_integer(size) and size > 0 do
+    %{used: used, size: size, percent: round(used * 100 / size)}
+  end
+
+  defp context_for_update(existing, _update), do: existing
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
@@ -1800,8 +1819,20 @@ defmodule SymphonyElixir.Orchestrator do
 
     Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
       Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
+      Enum.find_value(payloads, &flat_token_usage_from_payload/1) ||
       %{}
   end
+
+  # The ACP backend already normalizes its agents' usage into a flat map before emitting
+  # `:token_usage` (`Acp.AppServer.token_usage/1` reads every spelling the agents use and returns
+  # `%{"input_tokens" => .., "output_tokens" => .., "total_tokens" => ..}`). There is simply no
+  # nested path to walk -- so without this clause those events arrived here and were discarded,
+  # which is why a backend that reports its tokens still showed zero.
+  defp flat_token_usage_from_payload(payload) when is_map(payload) do
+    if integer_token_map?(payload), do: payload
+  end
+
+  defp flat_token_usage_from_payload(_payload), do: nil
 
   defp extract_rate_limits(update) do
     rate_limits_from_payload(update[:rate_limits]) ||

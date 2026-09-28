@@ -123,7 +123,11 @@ defmodule SymphonyElixirWeb.Presenter do
         input_tokens: entry.codex_input_tokens,
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
-      }
+      },
+      # Context-window use, when the agent reports it. ACP sends `used`/`size` on every session
+      # update; an agent that reports neither leaves this nil, and the dashboard then says nothing
+      # rather than showing a zero it cannot vouch for.
+      context: Map.get(entry, :context)
     }
   end
 

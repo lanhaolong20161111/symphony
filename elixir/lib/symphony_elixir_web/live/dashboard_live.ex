@@ -201,7 +201,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Session</th>
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
-                    <th>Tokens</th>
+                    <th>Tokens / context</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -253,6 +253,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="token-stack numeric">
                         <span>Total: <%= format_int(entry.tokens.total_tokens) %></span>
                         <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
+                        <%= if entry.context do %>
+                          <span class="muted">
+                            上下文 <%= format_int(entry.context.used) %>/<%= format_int(entry.context.size) %>
+                            （<%= entry.context.percent %>%）
+                          </span>
+                        <% end %>
                       </div>
                     </td>
                   </tr>
