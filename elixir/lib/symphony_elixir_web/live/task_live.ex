@@ -211,7 +211,7 @@ defmodule SymphonyElixirWeb.TaskLive do
                   </td>
                   <td><%= truncate(ticket.title, 40) %></td>
                   <td>
-                    <span class={state_badge_class(ticket.state)}>
+                    <span class={Layouts.state_badge_class(ticket.state)}>
                       <%= ticket.state %>
                     </span>
                   </td>
@@ -247,6 +247,8 @@ defmodule SymphonyElixirWeb.TaskLive do
           </div>
         <% end %>
       </section>
+
+      <Layouts.ticket_discussions tickets={@tickets} title="票据状态与讨论（不用去 GitHub）" />
 
       <section class="section-card">
         <div class="section-header">
@@ -335,18 +337,6 @@ defmodule SymphonyElixirWeb.TaskLive do
       String.slice(text, 0, len) <> "…"
     else
       text
-    end
-  end
-
-  defp state_badge_class(state) do
-    base = "state-badge"
-    normalized = state |> to_string() |> String.downcase()
-
-    cond do
-      String.contains?(normalized, ["progress", "running", "active"]) -> "#{base} state-badge-active"
-      String.contains?(normalized, ["blocked", "error", "failed", "paused"]) -> "#{base} state-badge-danger"
-      String.contains?(normalized, ["todo", "queued", "pending", "retry", "ready"]) -> "#{base} state-badge-warning"
-      true -> base
     end
   end
 end

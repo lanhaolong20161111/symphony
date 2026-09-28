@@ -101,6 +101,125 @@ defmodule SymphonyElixirWeb.Layouts do
   end
 
   @doc """
+  The badge class for a ticket state.
+
+  Here rather than in each page: two pages showing the same state in different colours is a page
+  that lies about the state.
+  """
+  @spec state_badge_class(String.t() | nil) :: String.t()
+  def state_badge_class(state) do
+    base = "state-badge"
+    normalized = state |> to_string() |> String.downcase()
+
+    cond do
+      String.contains?(normalized, ["progress", "running", "active"]) ->
+        "#{base} state-badge-active"
+
+      String.contains?(normalized, ["blocked", "error", "failed", "paused"]) ->
+        "#{base} state-badge-danger"
+
+      String.contains?(normalized, ["todo", "queued", "pending", "retry", "ready"]) ->
+        "#{base} state-badge-warning"
+
+      true ->
+        base
+    end
+  end
+
+  @doc """
+  Ticket states with the issue comments the janitor pulled down.
+
+  Exists so the discussion can be read without opening GitHub. The comments are already in the
+  ticket file -- `Janitor.append_discussion/3` appends them every round and tracks the last comment
+  id it has seen -- so this is a display of something already on disk, not a new fetch.
+
+  Only the newest `per_ticket` comments are shown per ticket: the point is "what happened last", and
+  a ticket with thirty comments would otherwise bury the other tickets.
+  """
+  attr(:tickets, :list, required: true)
+  attr(:title, :string, default: "票据状态与讨论")
+  attr(:per_ticket, :integer, default: 3)
+
+  @spec ticket_discussions(map()) :: Phoenix.LiveView.Rendered.t()
+  def ticket_discussions(assigns) do
+    ~H"""
+    <section class="section-card">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">{@title}</h2>
+          <p class="section-copy">
+            票据状态 + 从 issue 拉回来的评论（janitor 每轮同步）——
+            只有点 issue 号追原帖才需要去 GitHub。
+          </p>
+        </div>
+      </div>
+
+      <%= if @tickets == [] do %>
+        <p class="empty-state">暂无票据（或票据目录读不到）。</p>
+      <% else %>
+        <div class="dep-graph">
+          <div
+            :for={ticket <- @tickets}
+            class="dep-node"
+            style="flex-direction: column; align-items: stretch; gap: 0.4rem;"
+          >
+            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <span class="issue-id">{ticket.id}</span>
+              <span class={state_badge_class(ticket.state)}>{ticket.state}</span>
+              <span>{ticket.title}</span>
+              <%= if ticket.issue_url do %>
+                <a
+                  href={ticket.issue_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="issue-link"
+                >#{ticket.issue} ↗</a>
+              <% end %>
+              <span class="muted">
+                {length(ticket.discussion)} 条评论
+                <%= if ticket.blocked_by != [] do %>
+                  · 依赖 {Enum.join(ticket.blocked_by, ", ")}
+                <% end %>
+              </span>
+            </div>
+
+            <div
+              :for={comment <- newest(comment_list(ticket), @per_ticket)}
+              class="event-meta"
+              style="padding-left: 0.6rem; border-left: 2px solid var(--line);"
+            >
+              <div>
+                <span class="mono muted">{comment.author}</span>
+                <span class="muted"> · {short_time(comment.at)}</span>
+              </div>
+              <div>{comment.text}</div>
+            </div>
+
+            <%= if ticket.discussion == [] do %>
+              <span class="muted event-meta">还没有评论。</span>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </section>
+    """
+  end
+
+  defp comment_list(ticket), do: Map.get(ticket, :discussion) || []
+
+  defp newest(comments, n), do: comments |> Enum.take(-n)
+
+  # `2026-09-26T11:57:49Z` -> `09-26 11:57`. The year is noise on a board and the seconds always are.
+  defp short_time(at) when is_binary(at) do
+    case Regex.run(~r/^\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})/, at) do
+      [_, date, time] -> "#{date} #{time}"
+      _ -> at
+    end
+  end
+
+  defp short_time(at), do: to_string(at)
+
+  @doc """
   The three places a task's work lives: the issue (human surface), the ticket queue (what the
   orchestrator polls), and the local clone (what the agent actually edits).
 

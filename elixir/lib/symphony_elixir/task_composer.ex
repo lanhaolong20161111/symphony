@@ -430,6 +430,7 @@ defmodule SymphonyElixir.TaskComposer do
           assignee: presence(Ticket.get(fm, "assignee_id")),
           priority: presence(Ticket.get(fm, "priority")),
           blocked_by: parse_blocked_by(Ticket.get(fm, "blocked_by")),
+          discussion: parse_discussion(body),
           body: body,
           path: path
         }
@@ -448,6 +449,33 @@ defmodule SymphonyElixir.TaskComposer do
   end
 
   defp parse_blocked_by(_), do: []
+
+  @doc """
+  The issue comments the janitor pulled down, as structured entries.
+
+  `## Discussion` is written by `Janitor.append_discussion/3` as one line per comment --
+  `- **author** (timestamp): text`, with newlines in the body collapsed to spaces. This only reads
+  that shape; it never writes it, because the janitor owns the round trip with GitHub and a second
+  writer would be a second format.
+
+  Read here so the pages can show the discussion without sending anyone to GitHub.
+  """
+  @spec parse_discussion(String.t()) :: [%{author: String.t(), at: String.t(), text: String.t()}]
+  def parse_discussion(body) when is_binary(body) do
+    case Regex.run(~r/^##\s*Discussion\s*$\n(.*?)(?=^##\s|\z)/ms, body) do
+      [_, section] -> section |> String.split("\n") |> Enum.flat_map(&parse_comment_line/1)
+      _ -> []
+    end
+  end
+
+  def parse_discussion(_body), do: []
+
+  defp parse_comment_line(line) do
+    case Regex.run(~r/^-\s+\*\*(.+?)\*\*\s+\((.+?)\):\s*(.*)$/, line) do
+      [_, author, at, text] -> [%{author: author, at: at, text: String.trim(text)}]
+      _ -> []
+    end
+  end
 
   defp issue_url(nil), do: nil
   defp issue_url(""), do: nil

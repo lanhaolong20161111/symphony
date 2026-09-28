@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.Settings
+  alias SymphonyElixir.{Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -15,6 +15,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:site, site_info())
+      |> assign(:tickets, load_tickets())
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -74,6 +75,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <%= if @site do %>
         <Layouts.site_card site={@site} title="这套系统连着哪些仓库" />
       <% end %>
+
+      <Layouts.ticket_discussions tickets={@tickets} title="票据状态与讨论（不用去 GitHub）" />
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -344,6 +347,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
     Settings.site()
   rescue
     _error -> nil
+  end
+
+  defp load_tickets do
+    case TaskComposer.list_tickets() do
+      {:ok, tickets} -> tickets
+      {:error, _reason} -> []
+    end
+  rescue
+    _error -> []
   end
 
   defp orchestrator do

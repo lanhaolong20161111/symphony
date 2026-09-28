@@ -136,6 +136,64 @@ defmodule SymphonyElixir.TaskComposerTest do
     end
   end
 
+  describe "parse_discussion/1" do
+    # The shape `Janitor.append_discussion/3` writes, taken from a real ticket.
+    @with_discussion """
+    Do the thing.
+
+    ## Validation
+
+    - [ ] `mix test` is green
+
+    ## Discussion
+    - **lanhaolong20161111** (2026-09-26T11:57:49Z): 干完了，改动在这里：https://github.com/x/y/pull/21
+    - **lanhaolong20161111** (2026-09-26T13:15:47Z): 验收通过，收工
+
+    ## 续接上下文
+
+    <!-- symphony:handoff -->
+    包内容里也有 ## 小标题
+    <!-- /symphony:handoff -->
+    """
+
+    test "reads the comments with their author, time and text" do
+      comments = TaskComposer.parse_discussion(@with_discussion)
+
+      assert length(comments) == 2
+      assert [first, second] = comments
+      assert first.author == "lanhaolong20161111"
+      assert first.at == "2026-09-26T11:57:49Z"
+      assert first.text =~ "干完了"
+      assert second.text == "验收通过，收工"
+    end
+
+    test "stops at the next section -- a later heading is not a comment" do
+      comments = TaskComposer.parse_discussion(@with_discussion)
+
+      refute Enum.any?(comments, &String.contains?(&1.text, "包内容里也有"))
+      refute Enum.any?(comments, &String.contains?(&1.author, "symphony"))
+    end
+
+    test "a ticket with no Discussion section has no comments" do
+      assert TaskComposer.parse_discussion("Just a body.\n\n## Validation\n\n- [ ] x\n") == []
+      assert TaskComposer.parse_discussion("") == []
+      assert TaskComposer.parse_discussion(nil) == []
+    end
+
+    test "an empty Discussion section is empty, not an error" do
+      assert TaskComposer.parse_discussion("Body.\n\n## Discussion\n") == []
+    end
+
+    test "a line that is not the janitor's shape is skipped rather than guessed at" do
+      comments =
+        TaskComposer.parse_discussion(
+          "## Discussion\n随便写的一行\n- 没有作者\n- **只有作者**\n"
+        )
+
+      assert comments == []
+    end
+  end
+
   describe "create_task/1" do
     test "rejects a missing title" do
       assert TaskComposer.create_task(%{title: nil}) == {:error, :missing_title}
