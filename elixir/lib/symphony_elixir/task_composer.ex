@@ -203,24 +203,41 @@ defmodule SymphonyElixir.TaskComposer do
              dependency_warnings: [String.t()]
            }}
           | {:error, term()}
-  def create_task(attrs) do
+  @spec create_task(task_input(), map() | nil) :: {:ok, map()} | {:error, term()}
+  def create_task(attrs, project \\ nil) do
     title = Map.get(attrs, :title)
 
     if title in [nil, ""] do
       {:error, :missing_title}
     else
-      do_create_task(attrs)
+      do_create_task(attrs, target(project))
     end
   end
 
-  defp do_create_task(attrs) do
-    issues_repo = issues_repo()
+  # Where a task lands: the chosen project's **queue** and **repository**, or this instance's own
+  # when no project is named.
+  #
+  # The queue (`tracker.provider.path`) rather than the mirror directory (`janitor.tickets_path`),
+  # because the queue is what an orchestrator polls -- a ticket written to a directory nobody reads
+  # is a task that silently never runs. When the two disagree the project view says so.
+  #
+  # Nothing here decides who *does* the work: the project does, by owning the queue. Its instance
+  # picks the ticket up and its own workspace, hooks and agent apply.
+  defp target(nil), do: %{issues_repo: issues_repo(), tickets_path: tickets_path()}
 
-    with {:ok, issue_number, issue_url} <- create_github_issue(attrs, issues_repo),
-         {:ok, ticket_id} <- write_ticket(attrs, issue_number) do
+  defp target(project) do
+    %{
+      issues_repo: present(project[:issues_repo]) || issues_repo(),
+      tickets_path: present(project[:queue]) || tickets_path()
+    }
+  end
+
+  defp do_create_task(attrs, target) do
+    with {:ok, issue_number, issue_url} <- create_github_issue(attrs, target.issues_repo),
+         {:ok, ticket_id} <- write_ticket(attrs, issue_number, target) do
       Logger.info("task_composer: created #{ticket_id} from issue ##{issue_number}")
 
-      {linked, warnings} = link_dependencies(attrs, issue_number, issues_repo)
+      {linked, warnings} = link_dependencies(attrs, issue_number, target)
 
       {:ok,
        %{
@@ -274,10 +291,10 @@ defmodule SymphonyElixir.TaskComposer do
     end
   end
 
-  defp write_ticket(attrs, issue_number) do
+  defp write_ticket(attrs, issue_number, target) do
     ticket_id = "SYM-#{issue_number}"
     text = build_ticket_text(ticket_id, attrs, issue_number)
-    path = Path.join(tickets_path(), "#{ticket_id}.md")
+    path = Path.join(target.tickets_path, "#{ticket_id}.md")
 
     case File.write(path, text) do
       :ok -> {:ok, ticket_id}
@@ -294,15 +311,15 @@ defmodule SymphonyElixir.TaskComposer do
   # (issue dependencies shipped in 2.94.0). An earlier version of this module asserted that
   # GitHub had no native task-dependency field and wrote only a note into the issue body --
   # that was simply wrong, so the note is now a convenience and this is the mechanism.
-  @spec link_dependencies(task_input(), String.t(), String.t()) :: {[String.t()], [String.t()]}
-  defp link_dependencies(attrs, issue_number, repo) do
+  @spec link_dependencies(task_input(), String.t(), map()) :: {[String.t()], [String.t()]}
+  defp link_dependencies(attrs, issue_number, target) do
     {linked, warnings} =
       attrs
       |> Map.get(:blocked_by, [])
       |> List.wrap()
       |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.reduce({[], []}, fn dep, {linked, warnings} ->
-        case add_blocked_by(issue_number, dep, repo) do
+        case add_blocked_by(issue_number, dep, target) do
           :ok -> {[dep | linked], warnings}
           {:error, reason} -> {linked, [dependency_warning(dep, reason) | warnings]}
         end
@@ -311,14 +328,14 @@ defmodule SymphonyElixir.TaskComposer do
     {Enum.reverse(linked), Enum.reverse(warnings)}
   end
 
-  defp add_blocked_by(issue_number, dep_ticket_id, repo) do
-    with {:ok, dep_issue_number} <- dependency_issue_number(dep_ticket_id) do
+  defp add_blocked_by(issue_number, dep_ticket_id, target) do
+    with {:ok, dep_issue_number} <- dependency_issue_number(dep_ticket_id, target.tickets_path) do
       args = [
         "issue",
         "edit",
         issue_number,
         "--repo",
-        repo,
+        target.issues_repo,
         "--add-blocked-by",
         dep_issue_number
       ]
@@ -344,8 +361,8 @@ defmodule SymphonyElixir.TaskComposer do
   # `issue:` front-matter key is the only link between the two, so it is read from there
   # rather than guessed from the id (assuming `SYM-7` means issue 7 would be silently wrong
   # the moment a ticket is adopted or hand-written).
-  defp dependency_issue_number(ticket_id) do
-    path = Path.join(tickets_path(), "#{ticket_id}.md")
+  defp dependency_issue_number(ticket_id, tickets_path) do
+    path = Path.join(tickets_path, "#{ticket_id}.md")
 
     case File.read(path) do
       {:ok, text} -> issue_number_in(text)
@@ -389,16 +406,17 @@ defmodule SymphonyElixir.TaskComposer do
   `Ticket.get/2`, so the management page and the janitor cannot disagree on what
   a ticket looks like.
   """
-  @spec list_tickets() :: {:ok, [ticket()]} | {:error, term()}
-  def list_tickets do
-    path = tickets_path()
+  @spec list_tickets(keyword()) :: {:ok, [ticket()]} | {:error, term()}
+  def list_tickets(opts \\ []) do
+    path = Keyword.get(opts, :tickets_path) || tickets_path()
+    repo = Keyword.get(opts, :issues_repo) || issues_repo()
 
     case File.ls(path) do
       {:ok, entries} ->
         tickets =
           entries
           |> Enum.filter(&ticket_file?/1)
-          |> Enum.map(&read_ticket(Path.join(path, &1)))
+          |> Enum.map(&read_ticket(Path.join(path, &1), repo))
           |> Enum.reject(&is_nil/1)
           |> Enum.sort_by(& &1.id)
 
@@ -415,7 +433,7 @@ defmodule SymphonyElixir.TaskComposer do
       not String.starts_with?(name, "BOARD-")
   end
 
-  defp read_ticket(path) do
+  defp read_ticket(path, repo \\ nil) do
     text = File.read!(path)
 
     case Ticket.split(text) do
@@ -427,7 +445,7 @@ defmodule SymphonyElixir.TaskComposer do
           title: presence(Ticket.get(fm, "title")) || id,
           state: presence(Ticket.get(fm, "state")) || "open",
           issue: presence(Ticket.get(fm, "issue")),
-          issue_url: issue_url(presence(Ticket.get(fm, "issue"))),
+          issue_url: issue_url(presence(Ticket.get(fm, "issue")), repo),
           assignee: presence(Ticket.get(fm, "assignee_id")),
           priority: presence(Ticket.get(fm, "priority")),
           blocked_by: parse_blocked_by(Ticket.get(fm, "blocked_by")),
@@ -478,11 +496,11 @@ defmodule SymphonyElixir.TaskComposer do
     end
   end
 
-  defp issue_url(nil), do: nil
-  defp issue_url(""), do: nil
+  defp issue_url(nil, _repo), do: nil
+  defp issue_url("", _repo), do: nil
 
-  defp issue_url(issue_number) do
-    "https://github.com/#{issues_repo()}/issues/#{issue_number}"
+  defp issue_url(issue_number, repo) do
+    "https://github.com/#{repo || issues_repo()}/issues/#{issue_number}"
   end
 
   # ── Side-effecting: updating state ────────────────────────────────────────────

@@ -113,25 +113,41 @@ defmodule SymphonyElixir.Settings do
 
   defp code_source(settings) do
     hook = settings.hooks.after_create || ""
-    url = clone_url(hook)
+    urls = clone_urls(hook)
+    url = List.first(urls)
     repo = url && repo_from_url(url)
     issues = settings.janitor.issues_repo
 
     %{
       repo: repo,
       url: url,
+      urls: urls,
+      # A project with several repositories is the normal case (backend, frontend,
+      # infrastructure), so the count is reported rather than the first one being presented as
+      # "the" repository.
+      count: length(urls),
       declared_in: "hooks.after_create",
       path: Path.join(settings.workspace.root || "…", "<工单号>"),
       matches_issues_repo?: is_binary(repo) and is_binary(issues) and repo == issues
     }
   end
 
-  defp clone_url(text) do
-    case Regex.run(~r{git clone[^\n]*?(https://github\.com/[\w.\-]+/[\w.\-]+)}, text) do
-      [_, url] -> url
-      _ -> nil
-    end
+  @doc """
+  Every repository the environment prep clones, in the order the hook clones them.
+
+  Read out of `hooks.after_create`, because that shell string is the only place the repositories are
+  written -- they are not configuration keys. A project may have several, which is why this is a
+  list; the settings page shows the count rather than pretending the first one is all of them.
+  """
+  @spec clone_urls(String.t()) :: [String.t()]
+  def clone_urls(text) when is_binary(text) do
+    ~r/git clone[^\n]*?(https?:\/\/\S+?)(?:\.git)?(?:\s|$)/
+    |> Regex.scan(text, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.uniq()
   end
+
+  def clone_urls(_text), do: []
 
   defp repo_from_url(url) do
     case Regex.run(~r{https://github\.com/([\w.\-]+/[\w.\-]+)}, url) do

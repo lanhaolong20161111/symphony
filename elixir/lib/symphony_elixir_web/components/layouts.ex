@@ -127,6 +127,118 @@ defmodule SymphonyElixirWeb.Layouts do
   end
 
   @doc """
+  One row per project in the registry.
+
+  This is the whole point of the registry being a directory: N rows, not 400. Each row is one
+  project -- one workflow, one queue, one instance -- and the detail a person needs to answer "is it
+  running, what does it run, and where does its work go" without opening N dashboards.
+
+  A project declared but not running is shown as exactly that. That state is the reason the
+  reachability probe exists: a task written into a queue nobody reads is a task that silently never
+  happens.
+  """
+  attr(:projects, :list, required: true)
+  attr(:conflicts, :map, default: %{})
+
+  @spec project_overview(map()) :: Phoenix.LiveView.Rendered.t()
+  def project_overview(assigns) do
+    ~H"""
+    <section class="section-card">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">项目总览</h2>
+          <p class="section-copy">
+            注册表里每个项目一行（一个项目 = 一份 workflow = 一个队列 = 一个实例）。
+            这里是"谁在跑、用什么 agent、活进哪个队列"；票据细节点进它自己的页面。
+          </p>
+        </div>
+      </div>
+
+      <%= if @projects == [] do %>
+        <p class="empty-state">注册表是空的（<code>config :symphony_elixir, :projects_dir</code>）。</p>
+      <% else %>
+        <div class="table-wrap">
+          <table class="data-table" style="min-width: 900px;">
+            <thead>
+              <tr>
+                <th>项目</th>
+                <th>地址</th>
+                <th>在跑？</th>
+                <th>agent</th>
+                <th>队列</th>
+                <th>issues / tickets</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={project <- @projects}>
+                <td>
+                  <div class="detail-stack">
+                    <span class="mono">{project.name}</span>
+                    <%= if project[:error] do %>
+                      <span class="muted event-meta">配置读不出来</span>
+                    <% end %>
+                  </div>
+                </td>
+                <td class="mono event-meta">{project[:url] || "—"}</td>
+                <td>
+                  <%= if project[:reachable?] do %>
+                    <span class="state-badge state-badge-active">在跑</span>
+                  <% else %>
+                    <span class="state-badge state-badge-warning">没在跑</span>
+                  <% end %>
+                </td>
+                <td class="mono event-meta">{agent_line(project)}</td>
+                <td class="mono event-meta">{queue_line(project)}</td>
+                <td class="mono event-meta">{repos_line(project)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <%= if @conflicts != %{} do %>
+          <div class="error-card" style="margin-top: 0.8rem;">
+            <h2 class="error-title">⚠️ 有项目在抢同一个队列</h2>
+            <p class="error-copy">
+              <strong>一个队列只能属于一个实例</strong>：两个编排器轮询同一个目录会抢同一批票，
+              两个 janitor 会镜像同一个票据仓库。下面这些必须只跑一个：
+            </p>
+            <ul class="error-copy">
+              <li :for={{queue, names} <- Enum.sort(@conflicts)} class="mono">
+                {queue} ← {Enum.join(names, "、")}
+              </li>
+            </ul>
+          </div>
+        <% end %>
+      <% end %>
+    </section>
+    """
+  end
+
+  defp agent_line(project) do
+    [project[:backend], project[:adapter], project[:model]]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> "—"
+      parts -> Enum.join(parts, " / ")
+    end
+  end
+
+  defp queue_line(project) do
+    case {project[:queue], project[:mirror_path]} do
+      {nil, _} -> "—"
+      {queue, mirror} when queue == mirror -> Path.basename(queue)
+      {queue, mirror} -> "#{Path.basename(queue)} ⚠️镜像=#{mirror && Path.basename(mirror)}"
+    end
+  end
+
+  defp repos_line(project) do
+    case {project[:issues_repo], project[:tickets_repo]} do
+      {nil, nil} -> "—"
+      {issues, tickets} -> "#{issues || "—"} / #{tickets || "—"}"
+    end
+  end
+
+  @doc """
   Ticket states with the issue comments the janitor pulled down.
 
   Exists so the discussion can be read without opening GitHub. The comments are already in the

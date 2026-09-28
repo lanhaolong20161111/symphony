@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{RecorderClient, Settings, TaskComposer}
+  alias SymphonyElixir.{Projects, RecorderClient, Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -17,6 +17,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:site, site_info())
       |> assign(:tickets, load_tickets())
       |> assign(:usage, load_usage())
+      |> assign(:projects, load_projects())
+      |> assign(:queue_conflicts, load_queue_conflicts())
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -76,6 +78,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <%= if @site do %>
         <Layouts.site_card site={@site} title="这套系统连着哪些仓库" />
       <% end %>
+
+      <Layouts.project_overview projects={@projects} conflicts={@queue_conflicts} />
 
       <Layouts.ticket_discussions tickets={@tickets} title="票据状态与讨论（不用去 GitHub）" />
 
@@ -414,6 +418,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   rescue
     _error -> []
+  end
+
+  defp load_projects do
+    Projects.list()
+  rescue
+    _error -> []
+  end
+
+  # Two projects on one queue is not a display detail: both instances would race for the same
+  # tickets and both janitors would mirror one ticket repository. It is shown at the top of the
+  # overview rather than left for someone to notice.
+  defp load_queue_conflicts do
+    Projects.queue_conflicts(Projects.list())
+  rescue
+    _error -> %{}
   end
 
   defp orchestrator do

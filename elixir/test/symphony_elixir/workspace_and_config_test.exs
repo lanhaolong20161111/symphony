@@ -344,6 +344,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         "symphony-elixir-workspace-hook-timeout-#{System.unique_integer([:positive])}"
       )
 
+    # The *identifier* is unique, not just the root, and that is what makes this deterministic.
+    #
+    # `after_create` only runs when the workspace directory did not already exist
+    # (`ensure_workspace/2` returns `created?: false` for an existing one and the hook is skipped).
+    # A fixed identifier therefore asserts "a hook ran here" against a path that can already exist:
+    # these tests share one `WorkflowStore`, so another test's `write_workflow_file!` can win the
+    # reload and the workspace can land under a *different* root -- one an earlier run left behind.
+    # The measured symptom was the opposite of a timeout: `{:ok, path}`, because no hook ran at all.
+    identifier = "MT-TIMEOUT-#{System.unique_integer([:positive])}"
+
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -352,7 +362,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
-               Workspace.create_for_issue("MT-TIMEOUT")
+               Workspace.create_for_issue(identifier)
     after
       File.rm_rf(workspace_root)
     end

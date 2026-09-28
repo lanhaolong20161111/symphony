@@ -11,6 +11,7 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.Projects
   alias SymphonyElixir.Settings
   alias SymphonyElixir.TaskComposer
   alias SymphonyElixirWeb.Layouts
@@ -19,10 +20,14 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    projects = projects()
+
     socket =
       socket
       |> assign(:site, site_info())
       |> assign(:tickets, load_tickets())
+      |> assign(:projects, projects)
+      |> assign_project(default_project_name(projects))
       |> assign(:states, @states)
       |> assign(:form, empty_form())
       |> assign(:creating, false)
@@ -31,6 +36,11 @@ defmodule SymphonyElixirWeb.TaskLive do
       |> assign(:warnings, [])
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_event("select_project", %{"task" => %{"project" => name}}, socket) do
+    {:noreply, assign_project(socket, name)}
   end
 
   @impl true
@@ -45,7 +55,10 @@ defmodule SymphonyElixirWeb.TaskLive do
 
     socket = assign(socket, :creating, true)
 
-    case TaskComposer.create_task(attrs) do
+    # The chosen project decides the queue and the repository the task lands in -- and therefore
+    # which instance picks it up, with its own workspace, hooks and agent. Nothing on this page
+    # decides that; the picker only says where to write.
+    case TaskComposer.create_task(attrs, socket.assigns.project) do
       {:ok, result} ->
         {:noreply,
          socket
@@ -146,7 +159,42 @@ defmodule SymphonyElixirWeb.TaskLive do
           </div>
         </div>
 
-        <form phx-submit="create" class="task-form">
+        <form phx-submit="create" phx-change="select_project" class="task-form">
+          <label class="form-field">
+            <span class="form-label">项目（任务写到哪个队列 / 仓库）</span>
+            <select name="task[project]" class="form-input">
+              <option :for={p <- @projects} value={p.name} selected={p.name == @selected}>
+                <%= p.name %><%= project_option_suffix(p) %>
+              </option>
+            </select>
+            <span class="form-hint">
+              项目决定任务进哪个队列、开在哪个仓库，以及**由哪个实例、用哪个 agent 去跑** ——
+              这三件事在这里都改不了：它们是项目自己的属性（一份 workflow = 一个项目）。
+            </span>
+          </label>
+
+          <%= if @project do %>
+            <div class="dep-node" style="flex-direction: column; align-items: stretch; gap: 0.3rem;">
+              <span class="issue-id">这一提交会发生什么</span>
+              <div class="event-meta">
+                <div><span class="mono muted">队列　　</span> <%= @project[:queue] || "（没声明 ✗）" %></div>
+                <div><span class="mono muted">issues　</span> <%= @project[:issues_repo] || "（没声明 ✗）" %></div>
+                <div><span class="mono muted">tickets　</span> <%= @project[:tickets_repo] || "（没声明 ✗）" %></div>
+                <div><span class="mono muted">agent　　</span> <%= agent_text(@project) %></div>
+                <div><span class="mono muted">工作区　</span> <%= @project[:workspace_root] || "（没声明）" %></div>
+                <div><span class="mono muted">代码　　　</span> <%= repos_text(@project) %></div>
+                <div>
+                  <span class="mono muted">谁来跑　</span>
+                  <%= @project[:url] || "（不知道地址）" %>
+                  <%= if @project[:reachable?], do: "✓ 在跑", else: "✗ 没在跑" %>
+                </div>
+              </div>
+              <%= for warning <- project_warnings(@project) do %>
+                <div class="event-meta" style="color: #a15c00;"><%= warning %></div>
+              <% end %>
+            </div>
+          <% end %>
+
           <label class="form-field">
             <span class="form-label">标题 *</span>
             <input type="text" name="task[title]" class="form-input" required placeholder="一句话说清要做什么" />
@@ -163,10 +211,13 @@ defmodule SymphonyElixirWeb.TaskLive do
           </label>
 
           <label class="form-field">
-            <span class="form-label">依赖（逗号分隔票据 ID，如 SYM-1, SYM-2）</span>
+            <span class="form-label">依赖（逗号分隔票据 ID）</span>
             <input type="text" name="task[blocked_by]" class="form-input" placeholder="可以不填" />
-            <%= if @tickets != [] do %>
-              <span class="form-hint">已有票据: <%= format_ticket_ids(@tickets) %></span>
+            <%= if @dep_tickets != [] do %>
+              <span class="form-hint">
+                只能选**所选项目**的票据（依赖不跨项目）:
+                <%= format_ticket_ids(@dep_tickets) %>
+              </span>
             <% end %>
           </label>
 
@@ -286,6 +337,90 @@ defmodule SymphonyElixirWeb.TaskLive do
     end
   end
 
+  # ── Projects ─────────────────────────────────────────────────────────────────
+
+  # The registry, or a single entry standing in for this instance when there is none yet: the picker
+  # always has one honest option rather than an empty box that explains nothing.
+  defp projects do
+    case Projects.list() do
+      [] -> [local_project()]
+      list -> list
+    end
+  rescue
+    _error -> [local_project()]
+  end
+
+  defp local_project do
+    Projects.from_local_config()
+  rescue
+    _error -> %{name: "本实例", queue: nil, issues_repo: nil, repos: [], error: nil, reachable?: true}
+  end
+
+  # This instance's own project when the registry knows it, so the default is "where I am" rather
+  # than whichever file happens to sort first.
+  defp default_project_name(projects) do
+    case Projects.current() do
+      {:ok, project} -> project.name
+      :error -> projects |> List.first() |> Map.get(:name)
+    end
+  rescue
+    _error -> projects |> List.first() |> Map.get(:name)
+  end
+
+  defp assign_project(socket, name) do
+    case Enum.find(socket.assigns.projects, &(&1.name == name)) do
+      nil ->
+        socket |> assign(:selected, name) |> assign(:project, nil) |> assign(:dep_tickets, [])
+
+      project ->
+        socket
+        |> assign(:selected, project.name)
+        |> assign(:project, project)
+        |> assign(:dep_tickets, tickets_of(project))
+    end
+  end
+
+  # Dependencies are read from the **selected** project's queue, not this instance's: a ticket id
+  # only means something inside the queue it lives in, and cross-project dependencies are not
+  # something this system expresses (one queue belongs to one instance).
+  defp tickets_of(project) do
+    case TaskComposer.list_tickets(tickets_path: project[:queue], issues_repo: project[:issues_repo]) do
+      {:ok, tickets} -> tickets
+      {:error, _reason} -> []
+    end
+  end
+
+  # What the picker must state rather than hide. Every one of these is a way a task can be created
+  # successfully and then not run, which is the failure mode this page exists to prevent.
+  #
+  # Only reached with a project in hand: the template renders the panel under `if @project`, so a
+  # missing project is the panel not existing rather than an empty panel.
+  defp project_warnings(project) do
+    []
+    |> add_warning(project[:error] not in [nil, ""], "配置读不出来：#{project[:error]}")
+    |> add_warning(is_nil(project[:queue]), "⚠️ 没声明队列（tracker.provider.path）⇒ 任务没地方写")
+    |> add_warning(
+      is_binary(project[:queue]) and project[:queue_present?] == false,
+      "⚠️ 队列目录不存在：#{project[:queue]}\n" <>
+        "　提交会**先建 GitHub issue、再写票据**，所以这里缺目录 ⇒ 会留下一个没有票据的 issue ✗"
+    )
+    |> add_warning(is_nil(project[:issues_repo]), "⚠️ 没声明 issues 仓库 ⇒ 开不了 issue")
+    |> add_warning(
+      is_binary(project[:queue]) and is_binary(project[:mirror_path]) and
+        project[:queue] != project[:mirror_path],
+      "⚠️ 队列与镜像目录不一致：编排器轮询 #{project[:queue]}，janitor 镜像 #{project[:mirror_path]}" <>
+        "（票据会写进队列 ✓ 会被跑；但本页的票据列表来自本实例，看不到那一份）"
+    )
+    |> add_warning(
+      project[:url] != nil and project[:reachable?] == false,
+      "⚠️ 这个项目现在没在跑（探测 #{project[:url]} 失败）：任务会写进它的队列，" <>
+        "但要等它的实例起来才会被领走"
+    )
+  end
+
+  defp add_warning(list, true, text), do: list ++ [text]
+  defp add_warning(list, false, _text), do: list
+
   defp site_info do
     Settings.site()
   rescue
@@ -310,6 +445,41 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   defp empty_form do
     %{title: "", description: "", validation: "", blocked_by: "", priority: ""}
+  end
+
+  # ── Project display ──────────────────────────────────────────────────────────
+
+  defp project_option_suffix(project) do
+    case {project[:backend], project[:queue]} do
+      {nil, _} -> "（配置读不出来）"
+      {backend, nil} -> "（#{backend} · 没声明队列）"
+      {backend, queue} -> "（#{backend} · #{Path.basename(queue)}）"
+    end
+  end
+
+  defp agent_text(project) do
+    [project[:backend], project[:adapter], project[:model]]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> "（没声明）"
+      parts -> Enum.join(parts, " / ")
+    end
+  end
+
+  defp repos_text(project) do
+    case project[:repos] do
+      [] -> "（hooks.after_create 里没写 git clone）"
+      [one] -> one
+      many -> "#{length(many)} 个仓库：" <> Enum.map_join(many, "、", &short_repo/1)
+    end
+  end
+
+  # `https://github.com/owner/name` reads better as `owner/name` when several are listed.
+  defp short_repo(url) do
+    case Regex.run(~r{github\.com/([\w.\-]+/[\w.\-]+)}, url) do
+      [_, repo] -> repo
+      _ -> url
+    end
   end
 
   defp parse_blocked_by(nil), do: []
