@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.{Config.Schema, Tracker}
+  alias SymphonyElixir.{Config.Schema, GitWorktree, Tracker}
   alias SymphonyElixir.{Workflow, WorkflowStore}
 
   @default_prompt_template """
@@ -57,8 +57,8 @@ defmodule SymphonyElixir.Config do
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
-    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
-      {:ok, policy} ->
+    case codex_runtime_settings(workspace) do
+      {:ok, %{turn_sandbox_policy: policy}} ->
         policy
 
       {:error, reason} ->
@@ -107,11 +107,37 @@ defmodule SymphonyElixir.Config do
          %{
            approval_policy: settings.codex.approval_policy,
            thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
+           turn_sandbox_policy: writable_git_metadata(turn_sandbox_policy, workspace, settings)
          }}
       end
     end
   end
+
+  # Codex's `workspace-write` sandbox makes a checkout's git metadata read-only **by path**: the names
+  # `.git`, `.agents` and `.codex` are a hard-coded set, so an agent can edit every source file and
+  # still be unable to commit or open a branch (upstream tracks the same gap, openai/codex#14338).
+  #
+  # The remedy is not to guess the layout -- that is the mistake `inside_work_tree?/1` exists to
+  # prevent. Ask git for the resolved git dir and common dir and add exactly those to `writableRoots`:
+  # an explicit entry for the same path suppresses the carveout for it, and for nothing else, so
+  # `.agents`/`.codex` stay read-only. Off unless `codex.git_metadata_writable: true`, and a workspace
+  # that is not a work tree is left exactly as it was.
+  defp writable_git_metadata(policy, workspace, settings) do
+    with true <- settings.codex.git_metadata_writable,
+         true <- workspace_write_policy?(policy),
+         workspace when is_binary(workspace) <- workspace,
+         {:ok, paths} <- GitWorktree.metadata_paths(workspace) do
+      Map.update(policy, "writableRoots", paths, fn configured -> Enum.uniq(paths ++ configured) end)
+    else
+      _ -> policy
+    end
+  end
+
+  defp workspace_write_policy?(%{"type" => type}) when is_binary(type) do
+    String.downcase(type) == "workspacewrite"
+  end
+
+  defp workspace_write_policy?(_policy), do: false
 
   @doc false
   @spec validate_settings(Schema.t()) :: :ok | {:error, term()}

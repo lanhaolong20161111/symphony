@@ -216,6 +216,43 @@ defmodule SymphonyElixir.GitWorktree do
   end
 
   @doc """
+  The directories git itself treats as this checkout's metadata: its git dir and its common dir.
+
+  Asked of git rather than assumed, for the same reason as `inside_work_tree?/1`. A plain clone has one
+  `.git` directory; a linked worktree has a `.git` **file** pointing at
+  `<main>/.git/worktrees/<name>` and shares `<main>/.git` with its siblings, so the two answers differ
+  and both matter. Measured: in a worktree `--absolute-git-dir` and `--git-common-dir` both come back
+  absolute, while in a clone the common dir is the relative string `.git` -- so every line is expanded
+  against the checkout before it is returned.
+
+  A path that is not a work tree is `{:error, :not_a_work_tree}`, never an empty list: callers add
+  these paths to a sandbox policy, and "added nothing" would look exactly like success.
+  """
+  @spec metadata_paths(Path.t(), keyword()) :: {:ok, [Path.t()]} | {:error, term()}
+  def metadata_paths(path, opts \\ []) do
+    case git(path, ["rev-parse", "--absolute-git-dir", "--git-common-dir"], opts) do
+      {:ok, output, 0} ->
+        case output |> String.split("\n", trim: true) |> Enum.map(&expand_against(&1, path)) do
+          [] -> {:error, :not_a_work_tree}
+          paths -> {:ok, paths |> Enum.uniq()}
+        end
+
+      {:ok, _output, _status} ->
+        {:error, :not_a_work_tree}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp expand_against(line, path) do
+    case String.trim(line) do
+      "" -> path
+      value -> Path.expand(value, path)
+    end
+  end
+
+  @doc """
   Parses `git worktree list --porcelain`, with `separator` as the field terminator (`"\\n"` by
   default, `"\\0"` for `-z`).
 

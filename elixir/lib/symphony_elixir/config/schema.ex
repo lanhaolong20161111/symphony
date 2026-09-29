@@ -209,6 +209,12 @@ defmodule SymphonyElixir.Config.Schema do
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
+
+      # Codex makes a checkout's git metadata read-only under `workspace-write`, which stops an agent
+      # from committing or branching even though it can edit every source file. Turning this on adds
+      # the workspace's resolved git dir and common dir to `writableRoots`, so the agent can do the git
+      # work the workflow's skills describe. Off by default: nothing changes until a workflow asks.
+      field(:git_metadata_writable, :boolean, default: false)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -224,6 +230,7 @@ defmodule SymphonyElixir.Config.Schema do
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
+          :git_metadata_writable,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
