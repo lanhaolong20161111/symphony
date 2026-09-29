@@ -15,7 +15,7 @@ still missing to run upstream's agent-driven git workflow here: [`docs/windows-p
 
 ## Behaviour that changed for a caller
 
-Only three engine-level changes are visible to a caller, plus the example workflow.
+Only four engine-level changes are visible to a caller, plus the example workflow.
 
 | # | area | change | why | affects a default? | back to upstream |
 |---|---|---|---|---|---|
@@ -23,6 +23,7 @@ Only three engine-level changes are visible to a caller, plus the example workfl
 | 2 | `lib/symphony_elixir/codex/app_server.ex` | a failed `thread/start` returns `{:error, {:thread_start_rejected, %{approval_policy: .., thread_sandbox: ..}, reason}}`; a failed `initialize` returns `{:error, {:initialize_rejected, reason}}`; both log the values sent | codex renamed an approval policy once (`reject` -> `granular`) and every run then failed before its first turn with an error that never named the option | no | callers that only match `{:error, _}` are unaffected; to restore the bare reason, return `reason` instead of the tuple |
 | 3 | `elixir/WORKFLOW.md` | the example workflow now tracks GitHub Issues, drives `acp`/DSH by default (was `codex`), sets `server: {host, port}` so the observability endpoint is enabled, and carries the file tracker and ZCode routes as comments | the deployment in this workspace uses GitHub, DSH and a loopback endpoint; each was verified end to end | this is the **example file**, not an engine default -- `Config` has no built-in tracker or backend | `git show acea168:elixir/WORKFLOW.md` |
 | 4 | `tracker/file.ex` + `janitor/agent_tool.ex` | a file-tracker session now advertises one agent tool, `symphony_publish`, which asks the host to commit, push and open the pull request for a ticket (`Janitor.publish_now/2`) | the agent cannot publish in the `workspaceWrite` sandbox, and until now it could only *hint* (set the ticket to `in-review`) and hope the 30s sweep noticed; the tool is the same work with the answer returned in the same turn | no default moved. A file-tracker Codex turn gets `dynamicTools` unconditionally, so its tool list is no longer empty; an ACP session still needs `server.tracker_tools: true` for the MCP bridge | drop the two `agent_tool_specs/0` and `execute_agent_tool/3` clauses in `tracker/file.ex` (the sweep is unchanged and still publishes) |
+| 5 | `codex/app_server.ex` + `codex.child_env` + `codex.git_metadata_writable` | the child's environment is now built in one place: tracker secrets are removed as before, variables named in `codex.child_env` are passed through (names only, values read from Symphony's own environment), and when the agent may write git metadata git is told `safe.directory=*` | upstream's workflow expects the **agent** to run `git commit`/`push`/`land`, and on this host that needs (a) metadata the sandbox does not make read-only and (b) a credential the sandbox account can reach; `safe.directory` is needed because that account is not the workspace's owner | both keys default off/empty, so a workflow that names neither behaves exactly as before (`child_env: []` produces the previous env list) | remove the keys from the workflow; the environment reverts to "tracker secrets removed, nothing else" |
 
 ## Engine code: behaviour-preserving work
 

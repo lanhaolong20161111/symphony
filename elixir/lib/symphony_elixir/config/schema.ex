@@ -215,6 +215,12 @@ defmodule SymphonyElixir.Config.Schema do
       # the workspace's resolved git dir and common dir to `writableRoots`, so the agent can do the git
       # work the workflow's skills describe. Off by default: nothing changes until a workflow asks.
       field(:git_metadata_writable, :boolean, default: false)
+
+      # Names of environment variables to pass through to the agent's child process; values are read
+      # from Symphony's own environment when the child is launched. Names only, so a credential never
+      # has to be written into a project file. Empty by default, and a name that is also a declared
+      # tracker secret is refused rather than honoured -- the two intents contradict each other.
+      field(:child_env, {:array, :string}, default: [])
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -231,6 +237,7 @@ defmodule SymphonyElixir.Config.Schema do
           :thread_sandbox,
           :turn_sandbox_policy,
           :git_metadata_writable,
+          :child_env,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms

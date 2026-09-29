@@ -74,23 +74,26 @@ SSH is out too.
 The only supported routes are a credential **in the child environment** (`GH_TOKEN`/`GITHUB_TOKEN` plus
 `gh auth git-credential` as the git helper) or a login performed as the sandbox account itself.
 
-Design to implement (not yet written):
+The mechanism is now in place (both keys default off, so nothing changes until a workflow asks):
 
-- A workflow key that names environment variables to pass through to the agent's child process, e.g.
-  `codex.child_env: [GH_TOKEN]` -- **names only**, values read from Symphony's own environment at
-  launch, so no secret is ever written into the project file. This mirrors the existing
-  `secret_environment_names` machinery, which strips tracker secrets from that same child; child_env is
-  the deliberate opposite direction and must stay opt-in and documented as such.
-- `safe.directory` for the cross-user ownership check, which git reports as `fatal: detected dubious
-  ownership` because the sandbox account is not the owner. Cheapest form: `GIT_CONFIG_COUNT=1`,
-  `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*` in the same child environment.
-- A decision on token scope, because this is the one place the port makes the machine weaker: the
-  token available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to
-  every repository it can see. A fine-grained PAT limited to the target repository is the honest
-  choice; injecting that broad token is not.
+- `codex.child_env: [GH_TOKEN]` -- **names only**; values are read from Symphony's own environment when
+  the child is launched, so no secret is ever written into a project file. This is the deliberate
+  opposite of `secret_environment_names`, which strips tracker secrets from that same child; when a
+  workflow names a variable that is also a declared tracker secret, the secret wins and the refusal is
+  logged (silently honouring either side is how a token leaks). A name this process does not have is
+  omitted rather than passed through empty.
+- `codex.git_metadata_writable: true` also passes `GIT_CONFIG_COUNT=1`,
+  `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*`, which is what makes git stop refusing with
+  `fatal: detected dubious ownership` (the sandbox account is not the workspace's owner).
 
-Until this lands, `symphony_publish` and the janitor remain the only publishers -- which is fine, they
-are idempotent with the agent doing it.
+Still open: the token itself, and the scope decision below. Until that lands, `symphony_publish` and
+the janitor remain the only publishers -- which is fine, they are idempotent with the agent doing it.
+
+**This is the one place the port makes the machine weaker**, so it is stated plainly: the token
+available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
+repository it can see, and anything in the child's environment is readable by the agent. A
+fine-grained PAT limited to the target repository is the honest choice for `codex.child_env`;
+injecting the broad token is not.
 
 ## 4. The tracker: what "as consistent as Linear" means
 
@@ -202,6 +205,7 @@ The port is done when, on this Windows machine, one real ticket run can show all
 - **Round 1 (2026-09-29)**: git-metadata gap measured, fixed and tested (`8000fdb`); the same run found
   the credential half (`SEC_E_NO_CREDENTIALS`) and the separate-sandbox-account explanation, both
   recorded in `docs/fork-changes.md`; the retry-window flake that failed a gate run was fixed
-  (`2fa190a`); Linear and skills reference inventories collected (this file's §4 and §5). Next: the
-  child-environment pass-through (§3), then port the four skills into the target repository (§5), then
-  the tracker parity work (§4.1).
+  (`2fa190a`); Linear and skills reference inventories collected (this file's §4 and §5); the
+  child-environment mechanism written and tested (`codex.child_env` + `safe.directory`), default off.
+  Next: the token decision (§3), then port the four skills into the target repository (§5), then the
+  tracker parity work (§4.1).
