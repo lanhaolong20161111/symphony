@@ -163,9 +163,28 @@ upstream's own repository, which contains `.codex/skills/`. Measured on a real s
 roots are `~/.codex/skills`, `~/.agents/skills` and plugin caches -- the workspace is not among them,
 and none of the seven skills appeared in the session's 44-item skill list.
 
-So the delivery mechanism is: **commit the skills into the repository the agent works on**. In this
-deployment that is `lanhaolong20161111/beekeeper` (locally `ai_beekeeper/.verify_elixir`), not this
-fork.
+**Measured, and it corrected an assumption here.** A session whose own working directory contained
+`.codex/skills/windows-port-probe/SKILL.md` still listed only the user-level roots (`~/.codex/skills`,
+`~/.agents/skills`, the plugin caches) and never mentioned the probe ✗. So codex-cli 0.155.1 does
+**not** discover skills next to the workspace, and "put them in the repository and they load" is
+wrong.
+
+Upstream does something simpler, and its own prompt shows it: it names the file **by path** --
+*"when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`"*. The files
+live in the repository, and the workflow prompt points at them. That is why the mechanism has two
+legs:
+
+1. **The files are repository content** of the repository the agent works on -- here
+   `lanhaolong20161111/beekeeper` (locally `ai_beekeeper/.verify_elixir`), not this fork. Committed:
+   `.codex/skills/{commit,pull,push,land}/SKILL.md`, ported for this host (see the table below).
+2. **The deployment prompt references them by path**, the way upstream does. That belongs to the same
+   change as turning on `codex.git_metadata_writable` and `codex.child_env`, so that permissions,
+   prompt and skills switch together instead of leaving a run able to do something it is told not to.
+
+For a fresh clone to contain them, leg 1 has to be **pushed**: the workspace hook clones from the
+remote, so a local commit alone is invisible to the agent. (The app-server API can also declare extra
+skill roots per cwd via `skills/list`'s `perCwdExtraUserRoots`, but this fork never calls `skills/list`
+and neither does upstream -- that route is out of scope, not a fallback.)
 
 What to do with each file, from the port review:
 
@@ -211,3 +230,11 @@ The port is done when, on this Windows machine, one real ticket run can show all
   normalizes them (trim, downcase, drop blanks, uniq).
   Next: the token decision (§3), then port the four skills into the target repository (§5), then the
   rest of the tracker parity work (§4.1 item 5: `blocked_by` refs and `dispatchable`).
+- **Round 2 (2026-09-29)**: the four skills written and committed in the target repository
+  (`beekeeper` `7733061`): `commit`, `pull`, `push` (repository gate `mix precommit`, `gh --jq`,
+  PowerShell exit-status checks, body files as UTF-8 without BOM) and a reduced `land`; `release`,
+  `linear` and the Python watcher deliberately not reproduced. Skill discovery was measured and
+  found **not** to include the workspace, so the delivery mechanism is corrected above: repository
+  content plus a prompt that names the file by path.
+  Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then
+  §4.1 item 5.
