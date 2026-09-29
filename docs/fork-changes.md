@@ -157,6 +157,47 @@ Consequence: the agent's job ends at "files changed and validated, ticket set to
 **publishing is the host's job**. A hook or a host-side sweep runs outside that sandbox and has
 `.git`, `gh` and the certificate store.
 
+#### Why, exactly (measured later, probe ticket SYM-45)
+
+Codex writes its permission model into every session as `<permission_profile>`. For a workspace-write
+session it contains, verbatim:
+
+```xml
+<entry access="write"><path>…\SYM-44</path></entry>
+<entry access="write"><path>…\symphony-tickets</path></entry>   <!-- the workflow's writableRoots -->
+<entry access="read"><path>…\SYM-44\.git</path></entry>        <!-- read-only, by codex's own rule -->
+<entry access="read"><path>…\SYM-44\.agents</path></entry>
+<entry access="read"><path>…\SYM-44\.codex</path></entry>
+<entry access="read"><path>…\symphony-tickets\.git</path></entry>
+```
+
+Three things follow, and the third is the one that explains the Windows behaviour:
+
+1. **`.git` is not an ACL accident.** Codex emits explicit `access="read"` entries for `.git`,
+   `.agents` and `.codex`, *including* the `.git` of a directory the workflow granted write access to.
+   The `workspaceWrite` policy therefore cannot be talked into letting the agent commit by listing
+   more roots; the read-only entry wins (SYM-45: `checkout -b` and `commit` both still fail with
+   permission errors).
+2. **`gh`'s config read is fixable, its token is not.** Adding `%APPDATA%\GitHub CLI` to
+   `writableRoots` makes `gh` read its own config (SYM-45 measured it: `gh auth status` then lists
+   the account instead of failing to load the file), but the token itself lives in the invoking
+   user's Windows Credential Manager, which the sandbox cannot reach, so `gh` then reports *the token*
+   invalid and `gh pr list` returns `HTTP 401`. A usable `gh` would need a token in the child
+   environment (`GH_TOKEN`/`GITHUB_TOKEN`) — the same environment Symphony deliberately strips tracker
+   secrets from.
+3. **On Windows the sandbox runs the agent as a different local account.** `git` inside it reports
+   `detected dubious ownership`: the repository is owned by `…/lhl20` (SID …-1001) but *the current
+   user is* `…/CodexSandboxOnline` (SID …-1004). That is why `<special>:root access="read">` is not
+   "read everything" — a path is reachable only if that account was explicitly granted it. It is also
+   real credential isolation for anything in `lhl20`'s Credential Manager, which is why (2) fails the
+   way it does.
+
+So "the agent cannot publish" is not a version quirk; it is the Windows sandbox's design. Making the
+official skill-driven flow work here would need a git directory the sandbox account may write (for
+example a worktree whose `gitdir` lives outside the workspace, inside a `writableRoots` entry) *and*
+a token handed to the child environment. Neither is in place, and the host-side janitor is what
+publishes instead.
+
 ### 2. `hooks.after_run` does not fire on the path that matters
 
 `agent_runner.ex` wraps all turns in `try/after`, so `after_run` looks like the natural place to
