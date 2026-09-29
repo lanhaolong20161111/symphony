@@ -39,6 +39,35 @@ defmodule SymphonyElixir.Projects do
   @default_dir "~/code/symphony-projects"
   @probe_timeout_ms 1_500
 
+  # Where project instances live. Kept away from 1-1023 (privileged) and from the ports a developer
+  # machine usually already has something on, so the suggestion is not a port that is taken.
+  @port_range 4001..4099
+
+  @common_ports [
+    3000,
+    3001,
+    3306,
+    4000,
+    4200,
+    5000,
+    5173,
+    5432,
+    5672,
+    6379,
+    7474,
+    8000,
+    8001,
+    8080,
+    8081,
+    8443,
+    8888,
+    9000,
+    9090,
+    9200,
+    11_211,
+    27_017
+  ]
+
   @typedoc "One project as the registry sees it. `error` is set when its file does not parse."
   @type project :: %{
           name: String.t(),
@@ -54,6 +83,7 @@ defmodule SymphonyElixir.Projects do
           backend: String.t() | nil,
           adapter: String.t() | nil,
           model: String.t() | nil,
+          cli_path: String.t() | nil,
           repos: [String.t()],
           reachable?: boolean(),
           queue_present?: boolean(),
@@ -136,6 +166,7 @@ defmodule SymphonyElixir.Projects do
       backend: nil,
       adapter: nil,
       model: nil,
+      cli_path: nil,
       repos: [],
       reachable?: false,
       queue_present?: false,
@@ -164,6 +195,9 @@ defmodule SymphonyElixir.Projects do
           backend: identity.backend,
           adapter: identity.adapter,
           model: identity.model,
+          # Kept so a project that uses workbuddy can answer "where is that CLI" for another instance
+          # that does not -- the model list lives in that CLI's own --help.
+          cli_path: acp_cli_path(settings),
           repos: Settings.clone_urls(settings.hooks.after_create || ""),
           reachable?: url != nil and reachable?(url),
           queue_present?: queue_present?(settings.tracker.provider)
@@ -191,8 +225,19 @@ defmodule SymphonyElixir.Projects do
     end
   end
 
+  # Where this project's ACP adapter CLI is: a path, or the first word of a command list.
+  defp acp_cli_path(%{agent: %{backend: "acp"}} = settings) do
+    present(settings.acp.cli_path) || present(List.first(List.wrap(settings.acp.command)))
+  end
+
+  defp acp_cli_path(_settings), do: nil
+
+  # `retry: false` for the same reason `RecorderClient` sets it: Req retries transport errors with
+  # backoff, so probing a project that is **not running** cost three connection attempts per probe --
+  # measured at ~10 s for one unreachable project, on a page whose whole point is to show which
+  # projects are up.
   defp reachable?(url) do
-    case Req.get(url <> "/api/v1/state", receive_timeout: @probe_timeout_ms) do
+    case Req.get(url <> "/api/v1/state", receive_timeout: @probe_timeout_ms, retry: false) do
       {:ok, %{status: 200}} -> true
       _ -> false
     end
@@ -220,9 +265,167 @@ defmodule SymphonyElixir.Projects do
     end)
   end
 
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_to_nil(value), do: value
+
+  # Same three-line guard `TaskComposer` and `Settings` each carry: nil and "" mean "not set", and
+  # a util module for it would be more machinery than the duplication costs.
+  defp present(value), do: blank_to_nil(value)
+
   @doc "Whether the registry directory exists at all."
   @spec present?() :: boolean()
   def present?, do: File.dir?(registry_dir())
+
+  @doc """
+  The first port in the project range that is neither claimed by a project nor in use.
+
+  "In use" is decided by trying to listen on it, not by reading a table: a port can be held by
+  anything (another service, a stale process, a container) and the registry only knows about
+  Symphony's own projects. A suggestion that turns out to be taken is worse than no suggestion,
+  because it fails at startup rather than in the form.
+
+  Common developer ports are skipped outright, and `nil` means the range is full.
+  """
+  @spec next_free_port([integer()]) :: integer() | nil
+  def next_free_port(claimed) when is_list(claimed) do
+    Enum.find(@port_range, fn port ->
+      port not in claimed and port not in @common_ports and free?(port)
+    end)
+  end
+
+  # Binding is the only honest test: `:eaddrinuse` is the answer, and closing immediately means the
+  # window is microseconds. If it cannot bind at all (no loopback, weird sandbox), it is not free.
+  defp free?(port) do
+    case :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, reuseaddr: true, active: false]) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        true
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  @doc """
+  The GitHub owner this machine's projects live under, taken from what this instance already
+  declares -- so a new project's repositories can be offered with the right prefix instead of
+  asking for it again.
+  """
+  @spec github_owner() :: String.t() | nil
+  def github_owner do
+    candidates =
+      [Config.settings!().janitor.issues_repo, Config.settings!().janitor.tickets_repo] ++
+        Enum.flat_map(list(), &[&1.issues_repo, &1.tickets_repo])
+
+    Enum.find_value(candidates, fn
+      repo when is_binary(repo) ->
+        case String.split(repo, "/", parts: 2) do
+          [owner, _name] when owner != "" -> owner
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  rescue
+    _error -> nil
+  end
+
+  @doc """
+  Model names worth offering for `adapter`, best effort.
+
+  Two sources, and neither is a catalogue:
+
+    * **what this machine already uses** -- the value in this instance's workflow and in every
+      registered project. That is the list that is actually known to work here.
+    * **the adapter's own `--help`** where it documents them. WorkBuddy does: its `--model` line ends
+      with `Currently supported: (auto, glm-5.1, ...)`. DSH does not and cannot -- its model must
+      match an entry `session/new` returns in `configOptions`, which only exists inside a session, so
+      for DSH this returns what is known plus whatever was typed before.
+
+  Always a suggestion list, never a closed set: the form keeps a free-text input, because a picker
+  that can only offer what it could discover is a new way to be stuck.
+  """
+  @spec known_models(String.t() | nil) :: [String.t()]
+  def known_models(adapter) do
+    (from_workflows() ++ from_adapter_help(adapter))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+  end
+
+  defp from_workflows do
+    declared =
+      Enum.flat_map(list(), fn project ->
+        case project.backend do
+          "acp" -> [project.model]
+          "commandcode" -> [project.model]
+          _ -> []
+        end
+      end)
+
+    own =
+      case Config.settings!() do
+        %{agent: %{backend: "acp"}} = settings -> [settings.acp.model]
+        %{agent: %{backend: "commandcode"}} = settings -> [settings.commandcode.model]
+        _ -> []
+      end
+
+    (declared ++ own) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+  rescue
+    _error -> []
+  end
+
+  # WorkBuddy's CLI prints its supported models in `--help`. Parsed rather than hardcoded: the list
+  # belongs to the CLI that validates it, and a copy here would go stale silently.
+  #
+  # The CLI path is looked up in this instance's own ACP configuration **and** in every registered
+  # project, so a project that uses workbuddy makes the list available even when the instance asking
+  # is running something else -- which is the common case, since this form is usually filled in from
+  # whichever instance happens to be up.
+  defp from_adapter_help("workbuddy") do
+    with path when is_binary(path) <- workbuddy_cli(),
+         # WorkBuddy's CLI is a `.js` file -- its own adapter launches it as
+         # `node <path> --acp --acp-transport stdio` -- so running it directly is `:eacces`, measured.
+         {:ok, output, _status} <- Shell.run("node", [path, "--help"], timeout: 20_000),
+         [_, list] <- Regex.run(~r/Currently supported:\s*\(([^)]*)\)/, output) do
+      list
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+    else
+      _ -> []
+    end
+  end
+
+  defp from_adapter_help(_adapter), do: []
+
+  # The rescue is on its own function on purpose: with it wrapped around the whole lookup, a failure
+  # to read *this* instance's settings also skipped the registry scan -- so a machine whose running
+  # project is not ACP found no models at all, however many ACP projects it had registered.
+  defp workbuddy_cli do
+    own_workbuddy_cli() ||
+      Enum.find_value(list(), fn project ->
+        if project.adapter == "workbuddy", do: present(project.cli_path)
+      end)
+  end
+
+  defp own_workbuddy_cli do
+    case Config.settings!() do
+      %{agent: %{backend: "acp"}} = settings ->
+        present(settings.acp.cli_path) || present(List.first(List.wrap(settings.acp.command)))
+
+      _ ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
 
   @doc "`gh` on PATH -- the registry probes and ticket creation both need it."
   @spec gh_available?() :: boolean()
@@ -247,6 +450,7 @@ defmodule SymphonyElixir.Projects do
       backend: settings.agent.backend,
       adapter: if(settings.agent.backend == "acp", do: settings.acp.adapter),
       model: if(settings.agent.backend == "acp", do: settings.acp.model),
+      cli_path: acp_cli_path(settings),
       repos: Settings.clone_urls(settings.hooks.after_create || ""),
       reachable?: true,
       queue_present?: queue_present?(settings.tracker.provider),

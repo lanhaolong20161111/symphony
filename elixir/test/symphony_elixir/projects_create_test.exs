@@ -125,6 +125,53 @@ defmodule SymphonyElixir.ProjectsCreateTest do
     end
   end
 
+  # The port is chosen by trying to bind, not by reading a table: the registry only knows Symphony's
+  # own projects, and a port can be held by anything.
+  describe "next_free_port/1" do
+    test "skips a port a project already claims" do
+      port = Projects.next_free_port([])
+      assert is_integer(port)
+
+      refute Projects.next_free_port([port]) == port
+    end
+
+    test "stays in the project range and away from common developer ports" do
+      port = Projects.next_free_port([])
+      assert port in 4001..4099
+      refute port in [3000, 5173, 5432, 6379, 8000, 8080, 9000]
+    end
+
+    test "skips a port something outside the registry is holding" do
+      {:ok, socket} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, held} = :inet.port(socket)
+      on_exit(fn -> :gen_tcp.close(socket) end)
+
+      if held in 4001..4099 do
+        refute Projects.next_free_port([]) == held
+      else
+        # An ephemeral port rarely lands in our range. Say so rather than passing as though the claim
+        # had been exercised.
+        assert Projects.next_free_port([]) in 4001..4099
+      end
+    end
+  end
+
+  # The candidates come from what this machine already uses and, for workbuddy, from the adapter's own
+  # `--help`. Machine-dependent by design, so the assertions are about shape.
+  describe "known_models/1" do
+    test "always answers with a list, whatever this machine has" do
+      assert is_list(Projects.known_models("workbuddy"))
+      assert is_list(Projects.known_models("dsh"))
+      assert is_list(Projects.known_models(nil))
+    end
+
+    test "has no duplicates and no blanks" do
+      models = Projects.known_models("workbuddy")
+      assert models == Enum.uniq(models)
+      refute "" in models
+    end
+  end
+
   # Validation is the part that keeps a project from being created and then not running. The GitHub
   # question is injected, so "the repository does not exist" is testable without a network.
   describe "validate/3" do

@@ -45,6 +45,7 @@ defmodule SymphonyElixirWeb.ProjectLive do
       |> assign(:backends, @backends)
       |> assign(:adapters, @adapters)
       |> assign(:form, defaults(existing))
+      |> assign(:known_models, models_for("dsh"))
       |> assign(:problems, [])
       |> assign(:warnings, [])
       |> assign(:created, nil)
@@ -55,7 +56,13 @@ defmodule SymphonyElixirWeb.ProjectLive do
 
   @impl true
   def handle_event("validate", %{"project" => params}, socket) do
-    {:noreply, socket |> assign(:form, params) |> recheck()}
+    form = params |> autofill_repos(socket.assigns.form) |> autofill_port(socket.assigns.projects)
+
+    {:noreply,
+     socket
+     |> assign(:form, form)
+     |> assign(:known_models, models_for(form["adapter"]))
+     |> recheck()}
   end
 
   @impl true
@@ -159,6 +166,10 @@ defmodule SymphonyElixirWeb.ProjectLive do
             <label class="form-field" style="flex: 0 1 8rem;">
               <span class="form-label">端口 *</span>
               <input type="text" name="project[port]" class="form-input" value={@form["port"]} />
+              <span class="form-hint">
+                自动扫的：在 4001–4099 里挑第一个**没被任何东西占用**的
+                （真的试着 listen 过 ✓），并跳过常用端口（3000/5173/8080/5432/6379…）
+              </span>
             </label>
           </div>
 
@@ -177,6 +188,8 @@ defmodule SymphonyElixirWeb.ProjectLive do
               <span class="form-label">issues 仓库 *（owner/仓库）</span>
               <input type="text" name="project[issues_repo]" class="form-input" value={@form["issues_repo"]} placeholder="me/my-app" />
               <span class="form-hint">
+                已按你的 GitHub 前缀预填 ✓ 跟着项目名走（<code>owner/</code> → <code>owner/&lt;名&gt;</code>）✓
+                **你改过就不再自动改** ✓<br />
                 <input type="checkbox" name="project[create_issues_repo]" value="true" checked={@form["create_issues_repo"] == "true"} />
                 不在 GitHub 上就帮我建（私有 ✓）
               </span>
@@ -185,6 +198,7 @@ defmodule SymphonyElixirWeb.ProjectLive do
               <span class="form-label">tickets 仓库 *（owner/仓库）</span>
               <input type="text" name="project[tickets_repo]" class="form-input" value={@form["tickets_repo"]} placeholder="me/my-app-tickets" />
               <span class="form-hint">
+                同上预填 ✓（默认 <code>owner/&lt;名&gt;-tickets</code>）<br />
                 <input type="checkbox" name="project[create_tickets_repo]" value="true" checked={@form["create_tickets_repo"] == "true"} />
                 帮我建，并 clone 到上面的队列目录 ✓（janitor 是在**那个目录里**提交推送的）
               </span>
@@ -222,13 +236,37 @@ defmodule SymphonyElixirWeb.ProjectLive do
             <% end %>
             <label class="form-field" style="flex: 1 1 12rem;">
               <span class="form-label">模型</span>
-              <input type="text" name="project[model]" class="form-input" value={@form["model"]} placeholder="auto / 具体模型名" />
+              <input
+                type="text"
+                name="project[model]"
+                class="form-input"
+                value={@form["model"]}
+                list="known-models"
+                placeholder="auto / 具体模型名"
+              />
+              <span class="form-hint">
+                <%= if @known_models == [] do %>
+                  没有可扫的候选 —— 直接手输 ✓
+                <% else %>
+                  下拉里有 <strong><%= length(@known_models) %></strong> 个候选：这台机器**已经在用的**
+                  <%= if @form["adapter"] == "workbuddy" do %>
+                    ＋ **workbuddy CLI 自己声明的**（扫它的 <code>--help</code> ✓ 那份列表归它管，抄一份会静默过期 ✗）
+                  <% end %>
+                  ✓ 也**可以手输** ✓
+                <% end %>
+              </span>
             </label>
           </div>
           <span class="form-hint">
             <%= case @form["backend"] do %>
               <% "acp" -> %>
                 ACP：adapter 和 model 都在 <code>acp:</code> 里 ✓ 票据还能自己覆盖这两项 ✓
+                <%= if @form["adapter"] == "dsh" do %>
+                  <br />
+                  ⚠️ **dsh 的 model 必须是 `session/new` 返回的 `configOptions` 里的条目** ✗
+                  （否则被拒 <code>-32602</code> ✓）—— 那只能在会话里拿到 ⇒ 这里扫不出来 ✓
+                  所以它给的是"这台机器用过的值" ✓
+                <% end %>
               <% "commandcode" -> %>
                 CommandCode：模型写在 <code>commandcode.model</code> ✓
               <% _ -> %>
@@ -236,6 +274,10 @@ defmodule SymphonyElixirWeb.ProjectLive do
                 ⇒ 票据上的 model 覆盖在 codex 上**不生效** ✗
             <% end %>
           </span>
+
+          <datalist id="known-models">
+            <option :for={model <- @known_models} value={model}></option>
+          </datalist>
 
           <label class="form-field">
             <span class="form-label">环境准备（与语言无关，可留空）</span>
@@ -272,18 +314,20 @@ defmodule SymphonyElixirWeb.ProjectLive do
     _error -> "~/code/symphony-projects"
   end
 
-  # A fresh port, a queue path beside the ones already in use, and the prompt skeleton -- so the
-  # common case is "type a name and a repo" rather than filling in ten fields.
+  # A free port, a queue path beside the ones already in use, the GitHub owner this machine already
+  # works under, and the prompt skeleton -- so the common case is "type a name" rather than ten
+  # fields.
   defp defaults(existing) do
-    port = next_port(existing)
-    name = ""
+    claimed = existing |> Enum.map(& &1.port) |> Enum.reject(&is_nil/1)
+    owner = github_owner()
+    prefix = if owner, do: owner <> "/", else: ""
 
     %{
-      "name" => name,
-      "port" => Integer.to_string(port),
+      "name" => "",
+      "port" => port_default(claimed),
       "queue" => Path.join(Path.dirname(Projects.registry_dir()), "my-tickets"),
-      "issues_repo" => "",
-      "tickets_repo" => "",
+      "issues_repo" => prefix,
+      "tickets_repo" => prefix,
       "create_issues_repo" => "true",
       "create_tickets_repo" => "true",
       "repos" => "",
@@ -296,9 +340,74 @@ defmodule SymphonyElixirWeb.ProjectLive do
     }
   end
 
-  defp next_port(existing) do
-    used = existing |> Enum.map(& &1.port) |> Enum.reject(&is_nil/1)
-    Enum.find(4001..4099, fn port -> port not in used end) || 4010
+  # `nil` from the scan means the range is full, which the form then says rather than inventing a
+  # number that will collide.
+  defp port_default(claimed) do
+    case Projects.next_free_port(claimed) do
+      nil -> ""
+      port -> Integer.to_string(port)
+    end
+  end
+
+  defp github_owner do
+    Projects.github_owner()
+  rescue
+    _error -> nil
+  end
+
+  defp models_for(adapter) do
+    Projects.known_models(adapter)
+  rescue
+    _error -> []
+  end
+
+  # The two repository fields arrive prefilled with the owner (`owner/`) because that prefix is not
+  # something a person should have to retype. Once a project name exists, a field still holding only
+  # that prefix becomes `owner/<name>` (and `owner/<name>-tickets`) -- but a field the person has
+  # edited is left alone, because guessing over a typed value is worse than an empty one.
+  defp autofill_repos(params, previous) do
+    owner = github_owner()
+    name = String.trim(params["name"] || "")
+
+    if owner == nil or name == "" do
+      params
+    else
+      prefix = owner <> "/"
+      suffix = slug(name)
+
+      params
+      |> fill_if("issues_repo", previous["issues_repo"], prefix, prefix <> suffix)
+      |> fill_if("tickets_repo", previous["tickets_repo"], prefix, prefix <> suffix <> "-tickets")
+    end
+  end
+
+  defp fill_if(params, key, previous, only_when, replacement) do
+    untouched? = params[key] in [nil, "", only_when] or params[key] == previous
+
+    if untouched? and String.starts_with?(to_string(params[key] || ""), only_when) do
+      Map.put(params, key, replacement)
+    else
+      params
+    end
+  end
+
+  # Project names allow dots and underscores; repository names should not end up with them.
+  defp slug(name) do
+    name
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9-]+/, "-")
+    |> String.trim("-")
+  end
+
+  # A port the scan could not find is worth saying out loud; the field is still editable.
+  defp autofill_port(params, existing) do
+    claimed = existing |> Enum.map(& &1.port) |> Enum.reject(&is_nil/1)
+
+    if String.trim(params["port"] || "") == "" do
+      Map.put(params, "port", port_default(claimed))
+    else
+      params
+    end
   end
 
   defp attrs(params) do
