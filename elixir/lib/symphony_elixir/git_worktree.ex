@@ -222,19 +222,34 @@ defmodule SymphonyElixir.GitWorktree do
   `.git` directory; a linked worktree has a `.git` **file** pointing at
   `<main>/.git/worktrees/<name>` and shares `<main>/.git` with its siblings, so the two answers differ
   and both matter. Measured: in a worktree `--absolute-git-dir` and `--git-common-dir` both come back
-  absolute, while in a clone the common dir is the relative string `.git` -- so every line is expanded
-  against the checkout before it is returned.
+  absolute, while in a clone the common dir is the relative string `.git` -- so a relative line is joined
+  onto the checkout before it is returned.
 
-  A path that is not a work tree is `{:error, :not_a_work_tree}`, never an empty list: callers add
-  these paths to a sandbox policy, and "added nothing" would look exactly like success.
+  **The text is passed through as it came, deliberately.** These paths go into a sandbox policy, and
+  codex matches a policy entry against the path it derives from the session's working directory by plain
+  string comparison. `Path.expand/2` would normalise a Windows drive letter to lower case (`c:/...`),
+  which is *not* equal to the `C:/...` codex derives -- so the entry would not suppress the
+  metadata carveout, and the same `.git` would end up both writable and read-only, read-only winning.
+  Measured on SYM-54: `Path.expand` in this function, `"c:/…/SYM-54/.git"` in the policy, and a session
+  whose `git commit` failed with `index.lock: Permission denied` while the permission profile listed
+  `<workspace>/.git` as both `write` and `read`.
   """
   @spec metadata_paths(Path.t(), keyword()) :: {:ok, [Path.t()]} | {:error, term()}
   def metadata_paths(path, opts \\ []) do
     case git(path, ["rev-parse", "--absolute-git-dir", "--git-common-dir"], opts) do
       {:ok, output, 0} ->
-        case output |> String.split("\n", trim: true) |> Enum.map(&expand_against(&1, path)) do
-          [] -> {:error, :not_a_work_tree}
-          paths -> {:ok, paths |> Enum.uniq()}
+        case output |> String.split("\n", trim: true) |> Enum.map(&join_against(&1, path)) do
+          [] ->
+            {:error, :not_a_work_tree}
+
+          from_git ->
+            # The checkout's own `.git` comes first, spelled with the same base string the session is
+            # given -- that is the entry codex will match, because it derives its carveout from the
+            # session's working directory. git's own answers follow, for the worktree case where the
+            # metadata lives outside the checkout, and duplicates are dropped by spelling rather than
+            # by string: `Path.expand/2` lower-cases a Windows drive letter, and `c:/...` is not
+            # `C:/...` to a textual comparison.
+            [Path.join(path, ".git") | from_git] |> Enum.uniq_by(&spelling/1) |> then(&{:ok, &1})
         end
 
       {:ok, _output, _status} ->
@@ -245,11 +260,23 @@ defmodule SymphonyElixir.GitWorktree do
     end
   end
 
-  defp expand_against(line, path) do
+  defp join_against(line, path) do
     case String.trim(line) do
       "" -> path
-      value -> Path.expand(value, path)
+      value -> if absolute_path?(value), do: value, else: Path.join(path, value)
     end
+  end
+
+  # `Path.join/2` keeps the first argument's form, which is the point: a relative `.git` becomes
+  # `<checkout>/.git` with the checkout's own drive-letter case and separators, exactly as codex will
+  # derive it from the session's cwd.
+  defp absolute_path?(value) do
+    Regex.match?(~r{^[A-Za-z]:[\\/]}, value) or String.starts_with?(value, ["/", "\\\\"])
+  end
+
+  # Two spellings of one directory: separators and letter case are all that may differ.
+  defp spelling(value) do
+    value |> String.replace("\\", "/") |> String.downcase() |> String.trim_trailing("/")
   end
 
   @doc """

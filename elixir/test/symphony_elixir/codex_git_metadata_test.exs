@@ -54,7 +54,21 @@ defmodule SymphonyElixir.CodexGitMetadataTest do
 
       assert {:ok, [metadata]} = GitWorktree.metadata_paths(repo)
       assert Path.basename(metadata) == ".git"
-      assert metadata == Path.join(Path.expand(repo), ".git")
+      assert metadata == Path.join(repo, ".git")
+    end
+
+    test "the path's own spelling survives, because a sandbox entry is matched as text",
+         %{root: root} do
+      # The bug this pins: codex matches a policy entry against the path it derives from the session's
+      # cwd by string comparison, and `Path.expand/2` lower-cases a Windows drive letter. `c:/...` is not
+      # `C:/...`, so the entry stopped suppressing the metadata carveout, and the same `.git` came out
+      # both writable and read-only -- with read-only winning. Measured on SYM-54.
+      repo = init_repo(Path.join(root, "case"))
+
+      assert {:ok, [metadata]} = GitWorktree.metadata_paths(repo)
+      assert metadata == Path.join(repo, ".git")
+      # Same string the caller passed, character for character -- that is what makes it match.
+      assert String.starts_with?(metadata, repo)
     end
 
     test "a linked worktree reports its own git dir and the shared common dir", %{root: root} do
@@ -68,12 +82,19 @@ defmodule SymphonyElixir.CodexGitMetadataTest do
         )
 
       assert {:ok, paths} = GitWorktree.metadata_paths(worktree)
-      assert length(paths) == 2
+      # The checkout's own `.git` (a file here), its git dir, and the shared common dir.
+      assert length(paths) == 3
 
       # In a worktree `.git` is a file, and the metadata that has to be writable lives outside it.
       refute File.dir?(Path.join(worktree, ".git"))
+      assert Path.join(worktree, ".git") in paths
       assert Enum.any?(paths, &String.contains?(&1, "worktrees"))
-      assert Path.join(Path.expand(main), ".git") in paths
+      # Same directory, possibly a different spelling: git prints its own separators and drive case.
+      assert Enum.any?(paths, &(plain(&1) == plain(Path.join(main, ".git"))))
+    end
+
+    defp plain(value) do
+      value |> String.replace("\\", "/") |> String.downcase() |> String.trim_trailing("/")
     end
 
     test "a path that is not a work tree is an error, never an empty list", %{root: root} do
@@ -100,7 +121,7 @@ defmodule SymphonyElixir.CodexGitMetadataTest do
       roots = Config.codex_turn_sandbox_policy(repo)["writableRoots"]
 
       assert "C:/pinned/root" in roots
-      assert Path.join(Path.expand(repo), ".git") in roots
+      assert Path.join(repo, ".git") in roots
     end
 
     test "on, but the workspace is not a work tree: the policy is left alone", %{root: root} do
