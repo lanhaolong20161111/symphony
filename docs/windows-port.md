@@ -375,3 +375,11 @@ rounds, which are counted separately.
   and the janitor's mirrored entries now share that one line format, so the two sources cannot drift.
   Next: rebuild so the new tool is live and verify it on a ticket, then §3's credential decision for
   acceptance item 3.
+- **Round 13 (2026-09-29)**: rebuilt and verified `ticket_comment` live. On SYM-52 the session called
+  it and then `symphony_publish` in the same turn; the ticket's `## Discussion` now carries
+  `- **agent** (2026-09-29T10:15:52.487000Z, id=local-1): ...` -- a substantive note about which
+  validation it chose and why, plus what it deliberately did not run -- the agent made its own commit
+  (`a961992 | codex | Add symphony comment smoke marker to README`), the host put it on
+  `symphony/SYM-52`, PR #53 was opened and the link recorded on the ticket. The deployment prompt gained
+  one line pointing at the tool, so a run does not have to discover it from the tool list alone.
+  Next: §3's credential decision, which is the last thing between here and acceptance item 3.
