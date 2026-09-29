@@ -559,11 +559,22 @@ defmodule SymphonyElixir.Janitor do
     with true <- GitWorktree.inside_work_tree?(workspace),
          true <- File.exists?(ticket_path),
          text = File.read!(ticket_path),
-         true <- text =~ ~r/^state:\s*in-review\s*$/m,
-         branch = ticket_branch(text, id),
-         dirty = git(workspace, ["status", "--porcelain"]),
-         true <- dirty != {:ok, "", 0} or not has_pull_request?(branch, cfg) do
-      publish(id, workspace, ticket_path, branch, cfg)
+         true <- text =~ ~r/^state:\s*in-review\s*$/m do
+      branch = ticket_branch(text, id)
+
+      # Always: the ticket records its own branch and pull request, whether or not this sweep has
+      # anything left to push. An agent that pushed and opened the PR itself leaves a clean tree and a
+      # live PR -- exactly the case the old gate short-circuited, so the ticket ended up carrying
+      # neither field. Measured on SYM-53.
+      record_publish_metadata(ticket_path, branch, cfg)
+
+      if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} or
+           not has_pull_request?(branch, cfg) do
+        publish(id, workspace, ticket_path, branch, cfg)
+      else
+        Logger.debug("janitor: #{id} nothing left to publish (workspace=#{workspace})")
+        :ok
+      end
     else
       # Every guard above is a boolean, so `false` is the only other outcome -- the compiler says so
       # when that stops being true.
@@ -636,6 +647,19 @@ defmodule SymphonyElixir.Janitor do
       not File.exists?(ticket_path) -> {:error, {:no_such_ticket, id}}
       not GitWorktree.inside_work_tree?(workspace) -> {:error, {:not_a_workspace, workspace}}
       true -> :ok
+    end
+  end
+
+  # Recording is separated from publishing because the two now happen at different times: the agent
+  # commits and pushes, and this sweep is often the first thing to notice that the pull request exists.
+  # Both writes are idempotent, so a round that does publish records the same values twice and changes
+  # nothing the second time.
+  defp record_publish_metadata(ticket_path, branch, cfg) do
+    record_branch(ticket_path, branch)
+
+    case existing_pull_request(branch, cfg) do
+      {:ok, url} -> record_pull_request(ticket_path, url)
+      _ -> :ok
     end
   end
 
