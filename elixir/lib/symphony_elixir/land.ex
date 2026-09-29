@@ -11,6 +11,10 @@ defmodule SymphonyElixir.Land do
   clock, or a process; a rule that can only be tested by waiting is a rule that
   stops being tested.
 
+  The bottom of this file is the other half -- `run_gh/2`, four paginated
+  fetchers, `watch/1` and `cli/1` -- and it decides nothing. It observes, hands
+  what it saw to `verdict/1`, and prints the answer.
+
   ## The exit codes are the contract
 
   `verdict/1` is the one place that turns the facts into the skill's numbers:
@@ -517,5 +521,343 @@ defmodule SymphonyElixir.Land do
       {:ok, value} -> value
       :error -> Map.get(map, Atom.to_string(key), default)
     end
+  end
+
+  ## The IO half: `gh`, the wait loop and the exit codes
+
+  alias SymphonyElixir.Shell
+
+  @gh_pr_fields "number,url,headRefOid,mergeable,mergeStateStatus"
+  @gh_per_page 100
+  @gh_command_timeout 60_000
+  @gh_max_attempts 5
+  @gh_backoff_ms 2_000
+  @gh_max_backoff_ms 32_000
+
+  @poll_interval_ms 10_000
+  @watch_deadline_ms 1_800_000
+
+  @waiting_message "Waiting for CI checks..."
+  @passed_message "Checks passed"
+  @failed_message "Checks failed:"
+  @feedback_message "Review comments detected. Address before merge."
+  @head_message "PR head updated; pull/amend/force-push to retrigger CI"
+  @conflict_message "PR has merge conflicts. Resolve/rebase against main and push before running land_watch again."
+  @no_checks_message "No checks detected after 120s; check CI configuration"
+
+  @typedoc """
+  What the watcher concluded: the pull request is landable, a verdict stopped it,
+  or it could not observe the pull request at all.
+  """
+  @type watch_result :: {:ok, map()} | {:verdict, 2 | 3 | 4 | 5, [String.t()]} | {:error, term()}
+
+  @doc """
+  Runs `gh` and reports how it went instead of raising.
+
+  Rate limiting is the one failure worth waiting out, because the answer is still
+  coming: it is retried at most five attempts, waiting exponentially from two
+  seconds with jitter and a cap. Every other failure -- an unknown repository, a
+  bad token, a usage error -- is returned on the first attempt, since retrying a
+  reply that will not change only delays the report.
+
+  Options: `:run_gh` replaces the command itself with a `fn args -> {:ok, output}
+  | {:error, reason} end`; `:backoff_base_ms` shortens the first wait, which
+  tests set to `0`.
+  """
+  @spec run_gh([String.t()], keyword()) :: {:ok, String.t()} | {:error, term()}
+  def run_gh(args, opts \\ []) when is_list(args) do
+    transport = Keyword.get(opts, :run_gh, &gh_command/1)
+    attempt(transport, args, 1, Keyword.get(opts, :backoff_base_ms, @gh_backoff_ms))
+  end
+
+  defp attempt(transport, args, tries, delay) do
+    case transport.(args) do
+      {:ok, output} -> {:ok, output}
+      {:error, reason} -> retry_or_fail(transport, args, tries, delay, reason)
+    end
+  end
+
+  defp retry_or_fail(transport, args, tries, delay, reason) do
+    cond do
+      not rate_limited?(reason) ->
+        {:error, reason}
+
+      tries >= @gh_max_attempts ->
+        {:error, {:rate_limited, error_text(reason)}}
+
+      true ->
+        Process.sleep(wait_ms(delay))
+        attempt(transport, args, tries + 1, next_delay(delay))
+    end
+  end
+
+  defp wait_ms(delay), do: min(delay + jitter(delay), @gh_max_backoff_ms)
+
+  defp jitter(0), do: 0
+  defp jitter(delay), do: trunc(:rand.uniform() * delay)
+
+  defp next_delay(delay), do: min(delay * 2, @gh_max_backoff_ms)
+
+  defp rate_limited?(reason) do
+    text = error_text(reason)
+    String.contains?(text, "429") or String.contains?(String.downcase(text), "rate limit")
+  end
+
+  defp error_text(reason) when is_binary(reason), do: reason
+  defp error_text(reason), do: inspect(reason)
+
+  defp gh_command(args) do
+    case Shell.run("gh", args, timeout: @gh_command_timeout) do
+      {:ok, output, 0} -> {:ok, output}
+      {:ok, output, status} -> {:error, "gh exited #{status}: #{String.trim(output)}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The pull request of the current branch, as `gh pr view` reports it.
+
+  The map keeps GitHub's own spelling -- `headRefOid`, `mergeable`,
+  `mergeStateStatus` -- because that is what `conflicting?/1` and the watcher
+  read; translating it here would be a second vocabulary for the same facts.
+  """
+  @spec pr_info(keyword()) :: {:ok, map()} | {:error, term()}
+  def pr_info(opts \\ []) do
+    with {:ok, output} <- run_gh(["pr", "view", "--json", @gh_pr_fields], opts),
+         {:ok, pr} when is_map(pr) <- decode(output) do
+      {:ok, pr}
+    else
+      {:ok, other} -> {:error, {:not_a_pull_request, other}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "The issue comments of a pull request, every page of them."
+  @spec issue_comments(integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def issue_comments(pr_number, opts \\ []) do
+    paginate("repos/{owner}/{repo}/issues/#{pr_number}/comments", &list_batch/2, opts)
+  end
+
+  @doc "The review (inline) comments of a pull request, every page of them."
+  @spec review_comments(integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def review_comments(pr_number, opts \\ []) do
+    paginate("repos/{owner}/{repo}/pulls/#{pr_number}/comments", &list_batch/2, opts)
+  end
+
+  @doc "The reviews of a pull request, every page of them."
+  @spec reviews(integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def reviews(pr_number, opts \\ []) do
+    paginate("repos/{owner}/{repo}/pulls/#{pr_number}/reviews", &list_batch/2, opts)
+  end
+
+  @doc """
+  The check runs of a commit, every page of them.
+
+  This endpoint answers with an object -- `check_runs` plus a `total_count` --
+  rather than the bare array the comment endpoints answer with, and the count is
+  what says when to stop: a page that came back full is not the same thing as the
+  last page, so pages are read until the count is reached or a page comes back
+  empty.
+  """
+  @spec check_runs(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def check_runs(head_sha, opts \\ []) do
+    paginate("repos/{owner}/{repo}/commits/#{head_sha}/check-runs", &check_runs_batch/2, opts)
+  end
+
+  defp paginate(endpoint, batch, opts), do: paginate(endpoint, batch, 1, [], opts)
+
+  defp paginate(endpoint, batch, page, acc, opts) do
+    args = ["api", "--method", "GET", endpoint, "-f", "per_page=#{@gh_per_page}", "-f", "page=#{page}"]
+
+    with {:ok, output} <- run_gh(args, opts),
+         {:ok, payload} <- decode(output) do
+      next_page(endpoint, batch, page, acc, payload, opts)
+    end
+  end
+
+  defp next_page(endpoint, batch, page, acc, payload, opts) do
+    {items, done?} = batch.(payload, length(acc))
+
+    cond do
+      items == [] -> {:ok, acc}
+      done? -> {:ok, acc ++ items}
+      true -> paginate(endpoint, batch, page + 1, acc ++ items, opts)
+    end
+  end
+
+  defp list_batch(payload, _seen) when is_list(payload), do: {payload, false}
+  defp list_batch(_payload, _seen), do: {[], true}
+
+  defp check_runs_batch(payload, seen) when is_map(payload) do
+    case Map.get(payload, "check_runs") do
+      items when is_list(items) -> {items, total_reached?(Map.get(payload, "total_count"), seen + length(items))}
+      _other -> {[], true}
+    end
+  end
+
+  defp check_runs_batch(_payload, _seen), do: {[], true}
+
+  defp total_reached?(total, seen) when is_integer(total), do: seen >= total
+  defp total_reached?(_total, _seen), do: false
+
+  defp decode(output) do
+    case JSON.decode(output) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, reason} -> {:error, {:bad_json, reason, output}}
+    end
+  end
+
+  @doc """
+  Watches the pull request until it is safe to land, and reports what stopped it.
+
+  Facts are gathered on every poll and handed to `verdict/1`, so the ordering of
+  the outcomes -- conflict, moved head, feedback, checks -- is decided in exactly
+  one place. A conflict is re-checked on every poll and not only at the start,
+  because a branch that was clean when the watch began goes dirty the moment
+  somebody merges to `main`. Checks that never appear are given
+  `checks_absent_seconds` and nothing else: "no check has run yet" and "every
+  check passed" are different answers.
+
+  Options: `:interval_ms` (the wait between polls, 10 seconds), `:deadline_ms`
+  (the total budget, 30 minutes, after which this returns `{:error,
+  :deadline_exceeded}` rather than polling forever), `:now` (a clock, for tests),
+  and the `:run_gh` seam the fetchers take.
+  """
+  @spec watch(keyword()) :: watch_result()
+  def watch(opts \\ []) do
+    clock = Keyword.get(opts, :now, fn -> System.monotonic_time(:millisecond) end)
+
+    context = %{
+      opts: opts,
+      now: clock,
+      started_at: clock.(),
+      interval_ms: Keyword.get(opts, :interval_ms, @poll_interval_ms),
+      deadline_ms: Keyword.get(opts, :deadline_ms, @watch_deadline_ms)
+    }
+
+    with {:ok, pr} <- pr_info(opts) do
+      start(pr, context)
+    end
+  end
+
+  defp start(pr, context) do
+    if conflicting?(pr) do
+      {:verdict, 5, [@conflict_message]}
+    else
+      loop(Map.get(pr, "headRefOid"), nil, context)
+    end
+  end
+
+  defp loop(head_sha, empty_since, context) do
+    case poll(head_sha, empty_since, context) do
+      {:cont, empty_since} -> continue(head_sha, empty_since, context)
+      result -> result
+    end
+  end
+
+  defp continue(head_sha, empty_since, context) do
+    if context.now.() - context.started_at >= context.deadline_ms do
+      {:error, :deadline_exceeded}
+    else
+      Process.sleep(context.interval_ms)
+      loop(head_sha, empty_since, context)
+    end
+  end
+
+  defp poll(head_sha, empty_since, context) do
+    opts = context.opts
+
+    with {:ok, pr} <- pr_info(opts),
+         {:ok, check_runs} <- check_runs(head_sha, opts),
+         {:ok, issue} <- issue_comments(Map.get(pr, "number"), opts),
+         {:ok, review} <- review_comments(Map.get(pr, "number"), opts),
+         {:ok, reviews} <- reviews(Map.get(pr, "number"), opts) do
+      comments = %{issue: issue, review: review, reviews: reviews}
+      evaluate(pr, head_sha, check_runs, comments, empty_since, context)
+    end
+  end
+
+  defp evaluate(pr, head_sha, check_runs, comments, empty_since, context) do
+    checks = checks(check_runs)
+    empty_since = absent_since(check_runs, empty_since, context)
+
+    facts = %{
+      conflicting: conflicting?(pr),
+      head_moved: Map.get(pr, "headRefOid") != head_sha,
+      feedback: feedback?(comments),
+      checks: checks,
+      checks_absent_seconds: absent_seconds(empty_since, context)
+    }
+
+    case verdict(facts) do
+      :ok -> clear(pr, check_runs, checks, empty_since)
+      code -> {:verdict, code, verdict_messages(code, checks, check_runs)}
+    end
+  end
+
+  defp clear(pr, check_runs, checks, empty_since) do
+    cond do
+      checks.pending -> {:cont, empty_since}
+      check_runs == [] -> {:cont, empty_since}
+      true -> {:ok, pr}
+    end
+  end
+
+  # The clock counts milliseconds, the core counts seconds: `verdict/1` compares
+  # `checks_absent_seconds` against its own `120`, so the conversion happens here
+  # rather than in the rule.
+  defp absent_seconds(nil, _context), do: 0
+  defp absent_seconds(since, context), do: div(context.now.() - since, 1000)
+
+  defp absent_since([], nil, context), do: context.now.()
+  defp absent_since([], since, _context), do: since
+  defp absent_since(_check_runs, _since, _context), do: nil
+
+  defp feedback?(comments) do
+    issue = comments.issue
+    review = comments.review
+    request_at = latest_review_request(issue)
+    context = %{issue: issue, review: review, request_at: request_at}
+    {codex_issue, codex_review} = codex_comments(context)
+
+    human_issue_comments(issue) != [] or
+      human_review_comments(review) != [] or
+      codex_issue != [] or codex_review != [] or
+      blocking_reviews(comments.reviews, request_at) != []
+  end
+
+  defp verdict_messages(3, _checks, []), do: [@no_checks_message]
+  defp verdict_messages(3, checks, _check_runs), do: [@failed_message | Enum.map(checks.failures, &("- " <> &1))]
+  defp verdict_messages(2, _checks, _check_runs), do: [@feedback_message]
+  defp verdict_messages(4, _checks, _check_runs), do: [@head_message]
+  defp verdict_messages(5, _checks, _check_runs), do: [@conflict_message]
+
+  @doc """
+  The command line the skill runs: prints the watcher's messages, then halts with
+  the skill's exit code.
+
+  `mix run -e "SymphonyElixir.Land.cli()"`. The wording is part of the contract
+  rather than cosmetics -- the skill's instructions quote these lines back to
+  whoever reads the transcript -- so they are written once, here.
+  """
+  @spec cli(keyword()) :: no_return()
+  def cli(opts \\ []) do
+    IO.puts(@waiting_message)
+    halt(watch(opts))
+  end
+
+  defp halt({:ok, _pr}) do
+    IO.puts(@passed_message)
+    System.halt(0)
+  end
+
+  defp halt({:verdict, code, messages}) do
+    Enum.each(messages, &IO.puts/1)
+    System.halt(code)
+  end
+
+  defp halt({:error, reason}) do
+    IO.puts(:stderr, "land watch failed: #{error_text(reason)}")
+    System.halt(1)
   end
 end

@@ -315,4 +315,161 @@ defmodule SymphonyElixir.LandTest do
 
     Map.merge(defaults, Map.new(overrides))
   end
+
+  # Nothing below reaches `gh`: `:run_gh` is the transport, so the retry rules and
+  # the loop can be driven from a script. The script is one queue per endpoint
+  # kind; when a queue runs out, a list endpoint answers `[]` (which is how a page
+  # loop ends) and a one-element queue keeps repeating, which is what holds the
+  # head sha still from poll to poll.
+  describe "run_gh/2" do
+    test "a rate-limited command is retried and the retry's answer is returned" do
+      replies = [{:error, "HTTP 429: rate limit exceeded"}, {:ok, "payload"}]
+      opts = [run_gh: sequence(replies), backoff_base_ms: 0]
+
+      assert Land.run_gh(["pr", "view"], opts) == {:ok, "payload"}
+    end
+
+    test "any other failure is returned on the first attempt" do
+      opts = [run_gh: sequence([{:error, "could not resolve to a Repository"}]), backoff_base_ms: 0]
+
+      assert Land.run_gh(["pr", "view"], opts) == {:error, "could not resolve to a Repository"}
+    end
+
+    test "a command that stays rate-limited gives up after five attempts" do
+      replies = List.duplicate({:error, "rate limit exceeded"}, 5)
+      opts = [run_gh: sequence(replies), backoff_base_ms: 0]
+
+      assert Land.run_gh(["pr", "view"], opts) == {:error, {:rate_limited, "rate limit exceeded"}}
+    end
+  end
+
+  describe "watch/1" do
+    test "a pending check that passes ends the watch with the pull request" do
+      queues = %{
+        pr: [pr_reply("sha1")],
+        checks: [checks_reply([run("ci", "in_progress")]), checks_reply([run("ci", "completed", "success")])]
+      }
+
+      assert {:ok, %{"number" => 7, "headRefOid" => "sha1"}} = Land.watch(watch_opts(queues))
+    end
+
+    test "a failed check exits 3 and names the check and its conclusion" do
+      queues = %{pr: [pr_reply("sha1")], checks: [checks_reply([run("build", "completed", "failure")])]}
+
+      assert {:verdict, 3, ["Checks failed:", "- build: failure"]} = Land.watch(watch_opts(queues))
+    end
+
+    test "checks that never appear exit 3 once the 120s window has passed" do
+      opts = watch_opts(%{pr: [pr_reply("sha1")]}, now: fake_clock(60_000))
+
+      assert {:verdict, 3, ["No checks detected after 120s; check CI configuration"]} = Land.watch(opts)
+    end
+
+    test "a human comment exits 2" do
+      issue = [comment(1, "please handle the nil case", "2024-05-01T00:00:00Z", "alice")]
+      checks = checks_reply([run("ci", "completed", "success")])
+      queues = %{pr: [pr_reply("sha1")], checks: [checks], issue: [{:ok, JSON.encode!(issue)}, {:ok, "[]"}]}
+
+      assert {:verdict, 2, ["Review comments detected. Address before merge."]} = Land.watch(watch_opts(queues))
+    end
+
+    test "a conflicting pull request exits 5 without fetching anything else" do
+      queues = %{pr: [pr_reply("sha1", "CONFLICTING")]}
+
+      assert {:verdict, 5, [message]} = Land.watch(watch_opts(queues))
+
+      assert message ==
+               "PR has merge conflicts. Resolve/rebase against main and push before running land_watch again."
+    end
+
+    test "a head that moves while waiting exits 4" do
+      queues = %{
+        pr: [pr_reply("sha1"), pr_reply("sha1"), pr_reply("sha2")],
+        checks: [checks_reply([run("ci", "in_progress")])]
+      }
+
+      assert {:verdict, 4, ["PR head updated; pull/amend/force-push to retrigger CI"]} = Land.watch(watch_opts(queues))
+    end
+
+    test "a watch that never settles gives up at the deadline" do
+      queues = %{pr: [pr_reply("sha1")], checks: [checks_reply([run("ci", "in_progress")])]}
+      opts = watch_opts(queues, now: fake_clock(60_000), deadline_ms: 300_000)
+
+      assert Land.watch(opts) == {:error, :deadline_exceeded}
+    end
+  end
+
+  defp watch_opts(queues, overrides \\ []) do
+    Keyword.merge([run_gh: gh_stub(queues), interval_ms: 0, now: fake_clock(60_000)], overrides)
+  end
+
+  # A clock that jumps a minute per reading, so the absent-checks window and the
+  # deadline are reached in a few polls instead of in real time.
+  defp fake_clock(step_ms) do
+    {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+    fn -> Agent.get_and_update(agent, fn now -> {now, now + step_ms} end) end
+  end
+
+  defp gh_stub(queues) do
+    {:ok, agent} = Agent.start_link(fn -> %{} end)
+
+    fn args -> Agent.get_and_update(agent, fn state -> next_reply(queues, state, gh_key(args)) end) end
+  end
+
+  defp next_reply(queues, state, key) do
+    remaining = Map.get(state, key, Map.get(queues, key, []))
+
+    case remaining do
+      [only] -> {only, Map.put(state, key, [only])}
+      [reply | rest] -> {reply, Map.put(state, key, rest)}
+      [] -> {empty_reply(key), state}
+    end
+  end
+
+  defp empty_reply(:pr), do: {:error, "no pull request reply scripted"}
+  defp empty_reply(_list_endpoint), do: {:ok, "[]"}
+
+  defp gh_key(["pr" | _rest]), do: :pr
+
+  defp gh_key(["api", "--method", "GET", endpoint | _rest]) do
+    cond do
+      String.ends_with?(endpoint, "check-runs") -> :checks
+      String.ends_with?(endpoint, "/reviews") -> :reviews
+      String.contains?(endpoint, "/issues/") -> :issue
+      true -> :review_comments
+    end
+  end
+
+  defp sequence(replies) do
+    {:ok, agent} = Agent.start_link(fn -> replies end)
+
+    fn _args -> Agent.get_and_update(agent, fn [reply | rest] -> {reply, rest} end) end
+  end
+
+  defp pr_reply(head_sha, mergeable \\ "MERGEABLE") do
+    merge_state = if mergeable == "CONFLICTING", do: "DIRTY", else: "CLEAN"
+
+    {:ok,
+     JSON.encode!(%{
+       "number" => 7,
+       "url" => "https://github.com/me/repo/pull/7",
+       "headRefOid" => head_sha,
+       "mergeable" => mergeable,
+       "mergeStateStatus" => merge_state
+     })}
+  end
+
+  defp checks_reply(runs) do
+    {:ok, JSON.encode!(%{"total_count" => length(runs), "check_runs" => runs})}
+  end
+
+  defp run(name, status, conclusion \\ nil) do
+    %{
+      "name" => name,
+      "status" => status,
+      "conclusion" => conclusion,
+      "completed_at" => "2024-05-01T00:00:00Z"
+    }
+  end
 end
