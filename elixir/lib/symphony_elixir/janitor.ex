@@ -513,8 +513,9 @@ defmodule SymphonyElixir.Janitor do
     # `:ok` -- the ticket sat in `in-review` forever and nothing anywhere said why. Ask git.
     with true <- GitWorktree.inside_work_tree?(workspace),
          true <- File.exists?(ticket_path),
-         true <- File.read!(ticket_path) =~ ~r/^state:\s*in-review\s*$/m,
-         branch = "symphony/#{id}",
+         text = File.read!(ticket_path),
+         true <- text =~ ~r/^state:\s*in-review\s*$/m,
+         branch = ticket_branch(text, id),
          dirty = git(workspace, ["status", "--porcelain"]),
          true <- dirty != {:ok, "", 0} or not has_pull_request?(branch, cfg) do
       publish(id, workspace, ticket_path, branch, cfg)
@@ -530,7 +531,61 @@ defmodule SymphonyElixir.Janitor do
     end
   end
 
+  # ── the branch this ticket publishes on ──────────────────────────────────────
+
+  @doc """
+  The branch this ticket publishes on: its own `branch_name`, or `symphony/<id>`.
+
+  `branch_name` is the tracker-provided branch metadata the spec's normalized issue carries, and the
+  file tracker already parses it. Reading it here is what makes it load-bearing rather than
+  decorative. Read through `Ticket.split/1` rather than by scanning the file, for the same reason
+  `issue_number/1` parses: a body line that happens to read `branch_name: something` must not decide
+  where the work gets published.
+  """
+  @spec ticket_branch(String.t(), String.t()) :: String.t()
+  def ticket_branch(ticket_text, id) when is_binary(ticket_text) and is_binary(id) do
+    case Ticket.split(ticket_text) do
+      {:ok, %{front_matter: front_matter}} ->
+        presence(Ticket.get(front_matter, "branch_name")) || "symphony/#{id}"
+
+      :skip ->
+        "symphony/#{id}"
+    end
+  end
+
+  @doc """
+  Records `branch` in a ticket's front matter, unless the ticket already names one.
+
+  The "unless" is the load-bearing part: a branch name written in the ticket is the tracker-provided
+  value, so the derived default must never overwrite it.
+  """
+  @spec with_branch_name(String.t(), String.t()) :: String.t()
+  def with_branch_name(ticket_text, branch) when is_binary(ticket_text) and is_binary(branch) do
+    case Ticket.split(ticket_text) do
+      {:ok, %{front_matter: front_matter}} ->
+        if presence(Ticket.get(front_matter, "branch_name")) do
+          ticket_text
+        else
+          Ticket.set_key(ticket_text, "branch_name", branch)
+        end
+
+      :skip ->
+        ticket_text
+    end
+  end
+
+  # Recorded on the ticket before the first push, so the name a person reads there is the name every
+  # later round uses -- including when the push itself fails and the round retries.
+  defp record_branch(ticket_path, branch) do
+    text = File.read!(ticket_path)
+    updated = with_branch_name(text, branch)
+
+    if updated == text, do: :ok, else: File.write!(ticket_path, updated)
+  end
+
   defp publish(id, workspace, ticket_path, branch, cfg) do
+    record_branch(ticket_path, branch)
+
     if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} do
       git(workspace, ["checkout", "-B", branch])
       git(workspace, ["add", "-A"])

@@ -40,8 +40,9 @@ tracker:
 Markdown with YAML front matter; the body becomes the issue description, so write it like a task
 brief. Move work along by editing `state:` -- an agent can do that itself, since it is only a
 file. A `.md` file without front matter is ignored (a README may live beside the tickets), a
-ticket carrying `blocked_by:` is held back rather than dropped, and a missing `path` is an error
-on every poll instead of an empty backlog.
+ticket carrying `blocked_by:` is held back rather than dropped, `branch_name:` names the branch the
+host publishes on (absent, the janitor derives `symphony/<id>` and records it there), and a missing
+`path` is an error on every poll instead of an empty backlog.
 
 ### GitHub Issues
 

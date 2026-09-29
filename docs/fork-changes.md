@@ -193,11 +193,19 @@ have checked how the run is terminated.
 |---|---|---|
 | `state`, `assignee_id`, discussion | the human, through the Issue | Issue -> janitor -> ticket file |
 | code changes, the PR | the agent | workspace -> janitor -> branch + PR |
+| `branch_name` | a person, or the janitor **once** when the ticket has none | ticket -> the branch, the push and the PR, every round after |
 | the boards | the janitor alone | read-only for everyone else |
 
 The conflict rule for `state` is what makes that work: the janitor remembers the label it last wrote,
 and only treats the label as a human edit when it differs from **that** value. Without it the two
 sides would fight every 30s.
+
+`branch_name` is `SPEC.md` §4.1.1's "tracker-provided branch metadata", and the file tracker has
+always parsed it -- but the janitor read a hardcoded `symphony/<id>` until now, so the field was
+decorative. It uses the ticket's value when there is one, and records the derived value on the ticket
+before the first push when there is not: the name a person reads in the ticket is then the name of
+the branch and the PR, and a project that wants different naming has somewhere to say so. Recording
+it **only when absent** is what keeps that from becoming the state/label fight again.
 
 ## Board conventions
 
