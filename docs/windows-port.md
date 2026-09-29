@@ -155,9 +155,14 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 
 1. Same normalized field set and presence rules: absent nullable field -> `nil`, absent collection ->
    `[]`. Both reads return `{:ok, list} | {:error, term}`, and an empty input list returns `{:ok, []}`
-   **with no I/O**.
-2. `labels` normalize identically: trim, downcase, drop blanks, uniq (`linear/client.ex:607-616`). The
-   file tracker currently trims only -- a SPEC 1266-1267 deviation (`tracker/file.ex:310-321`).
+   **with no I/O** -- a SPEC 11.1 MUST (SPEC 1199, SPEC 1204). In the file tracker that short-circuit
+   sits at both adapter entry points, ahead of path resolution, so it holds even when `provider.path`
+   is missing or unreadable: an empty request is answered with `{:ok, []}`, never with
+   `{:error, {:file_tracker_path_not_found, path}}`. Linear short-circuits in the same place
+   (`linear/client.ex:111-113`, `127-129`).
+2. `labels` normalize identically: trim, downcase, drop blanks, uniq (`linear/client.ex:607-616`).
+   **Done**: the file tracker runs those same four steps in `normalize_labels/1`, so the list and the
+   comma-string front-matter forms land on the same answer (SPEC 1266-1267).
 3. `state` verbatim; compared trimmed + downcased only.
 4. `priority` integer-or-null with Linear's 1..4-then-unknown dispatch rank. **Done in round 6**: the
    coercion is "an integer, or `nil`" -- a quoted integer is accepted because front matter is

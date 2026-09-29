@@ -64,6 +64,10 @@ defmodule SymphonyElixir.Tracker.File do
   explicit claim to be a ticket. A missing `path` is an error on every fetch, never an empty
   backlog -- a silent empty tracker looks like "no work to do", which is the one failure mode that
   is genuinely hard to notice.
+
+  The one exception is an **empty request**, which is not a fetch at all: `fetch_issues_by_states([])`
+  and `fetch_issues_by_ids([])` return `{:ok, []}` before the path is even resolved, because asking
+  for nothing is answered by nothing (SPEC 1199 and SPEC 1204 both make that a MUST).
   """
 
   @behaviour SymphonyElixir.Tracker
@@ -78,16 +82,27 @@ defmodule SymphonyElixir.Tracker.File do
 
   @doc """
   Fetch the tickets whose `state` is one of `state_names`, using the configured tracker settings.
+
+  An empty list is answered with `{:ok, []}` before anything else runs -- SPEC 1199 asks for no
+  provider request, and this adapter reads that as no settings, no path, no filesystem either.
   """
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states([]), do: {:ok, []}
+
   def fetch_issues_by_states(state_names) when is_list(state_names) do
     fetch_issues_by_states(state_names, Config.settings!().tracker)
   end
 
   @doc """
   Same as `fetch_issues_by_states/1`, with the tracker settings passed in explicitly (tests, tools).
+
+  The empty-list short-circuit (SPEC 1199) is at this entry point, ahead of `resolve_path/1`: a
+  tracker whose `provider.path` is missing or unreadable still answers `{:ok, []}` for an empty
+  request, exactly as `fetch_issues_by_states/1` does and as Linear does (`client.ex:111-113`).
   """
   @spec fetch_issues_by_states([String.t()], map()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states([], _tracker_settings), do: {:ok, []}
+
   def fetch_issues_by_states(state_names, tracker_settings) when is_list(state_names) do
     wanted = state_names |> Enum.map(&normalize_state/1) |> MapSet.new()
 
@@ -99,14 +114,28 @@ defmodule SymphonyElixir.Tracker.File do
     end
   end
 
-  @doc "Fetch tickets by `id` (or `identifier`), using the configured tracker settings."
+  @doc """
+  Fetch tickets by `id` (or `identifier`), using the configured tracker settings.
+
+  An empty list is answered with `{:ok, []}` before anything else runs (SPEC 1204).
+  """
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_ids([]), do: {:ok, []}
+
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
     fetch_issues_by_ids(issue_ids, Config.settings!().tracker)
   end
 
-  @doc "Same as `fetch_issues_by_ids/1`, with the tracker settings passed in explicitly."
+  @doc """
+  Same as `fetch_issues_by_ids/1`, with the tracker settings passed in explicitly.
+
+  As with `fetch_issues_by_states/2`, the empty-list short-circuit (SPEC 1204) sits ahead of
+  `resolve_path/1`, so an empty request never turns into a path error (`client.ex:127-129` in Linear
+  is the same shape).
+  """
   @spec fetch_issues_by_ids([String.t()], map()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_ids([], _tracker_settings), do: {:ok, []}
+
   def fetch_issues_by_ids(issue_ids, tracker_settings) when is_list(issue_ids) do
     wanted = MapSet.new(issue_ids)
 

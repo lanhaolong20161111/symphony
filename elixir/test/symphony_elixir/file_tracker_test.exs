@@ -217,6 +217,48 @@ defmodule SymphonyElixir.FileTrackerTest do
     end
   end
 
+  describe "empty requests" do
+    test "return {:ok, []} before the path is resolved, even when it does not exist", %{dir: dir} do
+      # SPEC 1199: "An empty `state_names` list MUST return an empty result without a provider
+      # request." SPEC 1204 says the same for `issue_ids`. For this adapter "without a request" is
+      # read at its strongest -- before `resolve_path/1`, the filesystem, or `Config` -- so the
+      # path-shaped failure below must never be reachable from an empty list.
+      missing = Path.expand(Path.join(dir, "does-not-exist"))
+      no_path = %{provider: %{}}
+
+      assert {:ok, []} = FileTracker.fetch_issues_by_states([], settings(missing))
+      assert {:ok, []} = FileTracker.fetch_issues_by_ids([], settings(missing))
+
+      # A tracker with no `provider.path` at all: SPEC 1199/1204 still outrank the fail-closed rule,
+      # because nothing was asked for.
+      assert {:ok, []} = FileTracker.fetch_issues_by_states([], no_path)
+      assert {:ok, []} = FileTracker.fetch_issues_by_ids([], no_path)
+
+      # The configured entry point (arity-1) must short-circuit too, ahead of `Config.settings!()`.
+      assert {:ok, []} = FileTracker.fetch_issues_by_states([])
+      assert {:ok, []} = FileTracker.fetch_issues_by_ids([])
+    end
+
+    test "a non-empty request against a missing path still fails closed", %{dir: dir} do
+      # The short-circuit is about empty input, not about weakening "a missing path is an error on
+      # every fetch": asking for something must still report the path.
+      missing = Path.expand(Path.join(dir, "does-not-exist"))
+
+      assert {:error, {:file_tracker_path_not_found, ^missing}} =
+               FileTracker.fetch_issues_by_states(["ready"], settings(missing))
+
+      assert {:error, {:file_tracker_path_not_found, ^missing}} =
+               FileTracker.fetch_issues_by_ids(["T-1"], settings(missing))
+    end
+
+    test "a real directory still answers non-empty requests", %{dir: dir} do
+      write_ticket(dir, "E-1.md", markdown("id: E-1\ntitle: Real one\nstate: ready", "b\n"))
+
+      assert {:ok, [%Issue{id: "E-1"}]} = FileTracker.fetch_issues_by_states(["ready"], settings(dir))
+      assert {:ok, [%Issue{id: "E-1"}]} = FileTracker.fetch_issues_by_ids(["E-1"], settings(dir))
+    end
+  end
+
   describe "configuration" do
     test "validate_config is ok for a real directory", %{dir: dir} do
       assert :ok = FileTracker.validate_config(settings(dir))
