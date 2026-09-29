@@ -51,6 +51,7 @@ defmodule SymphonyElixir.Tracker.File do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Janitor.AgentTool
   alias SymphonyElixir.Tracker.Issue
 
   @ticket_extensions ~w(.md .markdown .yaml .yml)
@@ -106,11 +107,21 @@ defmodule SymphonyElixir.Tracker.File do
   def secret_environment_names(_tracker_settings), do: []
 
   @doc """
-  No provider-native tools: the ticket *is* a file, so an agent that wants to change it just
-  edits it.
+  The janitor's tool, not a provider tool.
+
+  A file ticket is changed by editing it, so this tracker has never needed a provider API. What it
+  does need is a publisher: the agent cannot commit, push or open a pull request (see
+  `SymphonyElixir.Janitor`), so the janitor -- this tracker's host-side caretaker -- offers
+  `symphony_publish` and the agent calls it when the work is done.
   """
   @spec agent_tool_specs() :: [map()]
-  def agent_tool_specs, do: []
+  def agent_tool_specs, do: AgentTool.tool_specs()
+
+  @doc """
+  Runs one agent tool call. Only the janitor's `symphony_publish` exists for this tracker.
+  """
+  @spec execute_agent_tool(String.t() | nil, term(), keyword()) :: map()
+  def execute_agent_tool(tool, arguments, opts), do: AgentTool.execute(tool, arguments, opts)
 
   @doc """
   Validate the tracker block.

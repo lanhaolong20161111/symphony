@@ -266,10 +266,16 @@ is file-backed.
 What the agents themselves can do depends on the backend, and this is easy to get wrong. The
 tracker adapters advertise a provider-native tool -- GitHub's is `github_api`, a general REST call
 **executed server-side with Symphony's credentials** -- so on the **codex** backend an agent can
-file issues itself. The **acp** backend has no dynamic-tool channel at all, so under ACP (the
-default here) the only way an agent creates work is by writing files. Stripping the tracker token
-out of the agent's environment and offering it a mediated tool are two different things: the first
-does not remove the capability when the second is present.
+file issues itself. The file tracker has no provider API, but it advertises one tool of its own,
+`symphony_publish`: the janitor's "commit, push and open the pull request for this ticket" (see
+`docs/fork-changes.md`), which the agent cannot do itself in the `workspaceWrite` sandbox.
+
+The **codex** backend is handed `dynamicTools` directly. The **acp** backend has no dynamic-tool
+channel, so it reaches the same tools through the MCP bridge, and that bridge is off until the
+workflow sets `server.tracker_tools: true` -- with it off, an ACP agent's only way to create work is
+by writing files. Stripping the tracker token out of the agent's environment and offering it a
+mediated tool are two different things: the first does not remove the capability when the second is
+present.
 
 ## What reloads, and what does not
 

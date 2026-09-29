@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Janitor do
 
   require Logger
 
+  alias SymphonyElixir.Config
   alias SymphonyElixir.GitWorktree
   alias SymphonyElixir.Janitor.{Board, Labels, Ticket}
   alias SymphonyElixir.Shell
@@ -44,6 +45,11 @@ defmodule SymphonyElixir.Janitor do
   @managed_label "symphony"
   @command_timeout 120_000
   @terminal_states ~w(done cancelled)
+
+  # A ticket identifier is also a path segment under two configured roots, and the caller of
+  # `publish_now/2` is a language model. Anything that could climb out of those roots (a separator, a
+  # leading dot, `..`, an absolute path) is refused rather than joined.
+  @ticket_id ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
   # Marker left in the how-to comment so it is posted at most once per issue. A person who opens a
   # plain issue and sees nothing happen has no way to learn why; measured on issue #26, where the
@@ -81,6 +87,29 @@ defmodule SymphonyElixir.Janitor do
       interval_seconds: Keyword.get(opts, :interval_seconds, 30)
     }
   end
+
+  @doc """
+  The janitor's options from a workflow's `janitor` settings.
+
+  Public and next to `config/1` so the entry points cannot drift: anything that decides *where* the
+  janitor works goes through here, and `config/1` fills in this machine's defaults for whatever the
+  workflow left blank.
+  """
+  @spec options_from_settings(map()) :: keyword()
+  def options_from_settings(settings) when is_map(settings) do
+    [
+      tickets: Map.get(settings, :tickets_path),
+      workspace_root: Map.get(settings, :workspace_root),
+      repo: Map.get(settings, :issues_repo),
+      tickets_repo: Map.get(settings, :tickets_repo),
+      state_file: Map.get(settings, :state_file),
+      interval_seconds: interval_seconds(Map.get(settings, :interval_ms))
+    ]
+    |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+  end
+
+  defp interval_seconds(ms) when is_integer(ms) and ms > 0, do: div(ms, 1_000)
+  defp interval_seconds(_ms), do: nil
 
   @doc """
   Runs one round. Never raises: every step logs its own failure and the round continues.
@@ -531,6 +560,42 @@ defmodule SymphonyElixir.Janitor do
     end
   end
 
+  @doc """
+  Publishes one ticket now: commits its workspace, pushes its branch and opens the pull request.
+  Returns what happened, so a caller can report the branch and the pull-request URL.
+
+  `publish_sweep/1` decides *when* a ticket should be published; this is the same work without that
+  decision, for a caller that has already made it -- the agent, through
+  `SymphonyElixir.Janitor.AgentTool`. Both paths are idempotent, so they tolerate each other.
+
+  Fails closed on anything it cannot identify: an `id` that is not a plain ticket name, a ticket file
+  that does not exist, or a workspace that is not a git work tree. Nothing is created or pushed in
+  those cases.
+  """
+  @spec publish_now(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def publish_now(id, opts \\ []) when is_binary(id) do
+    with :ok <- validate_id(id),
+         cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
+         workspace = Path.join(cfg.workspace_root, id),
+         ticket_path = Path.join(cfg.tickets, "#{id}.md"),
+         :ok <- publishable(id, workspace, ticket_path) do
+      branch = ticket_branch(File.read!(ticket_path), id)
+      {:ok, publish(id, workspace, ticket_path, branch, cfg)}
+    end
+  end
+
+  defp validate_id(id) do
+    if Regex.match?(@ticket_id, id), do: :ok, else: {:error, {:invalid_ticket_id, id}}
+  end
+
+  defp publishable(id, workspace, ticket_path) do
+    cond do
+      not File.exists?(ticket_path) -> {:error, {:no_such_ticket, id}}
+      not GitWorktree.inside_work_tree?(workspace) -> {:error, {:not_a_workspace, workspace}}
+      true -> :ok
+    end
+  end
+
   # ── the branch this ticket publishes on ──────────────────────────────────────
 
   @doc """
@@ -586,24 +651,50 @@ defmodule SymphonyElixir.Janitor do
   defp publish(id, workspace, ticket_path, branch, cfg) do
     record_branch(ticket_path, branch)
 
-    if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} do
-      git(workspace, ["checkout", "-B", branch])
-      git(workspace, ["add", "-A"])
-      git(workspace, ["-c", "user.name=symphony", "-c", "user.email=symphony@local",
-                      "commit", "-q", "-m", "symphony/#{id}: automated change"])
-      Logger.info("janitor: #{id} committed on #{branch}")
-    end
+    committed =
+      if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} do
+        git(workspace, ["checkout", "-B", branch])
+        git(workspace, ["add", "-A"])
+        git(workspace, ["-c", "user.name=symphony", "-c", "user.email=symphony@local",
+                        "commit", "-q", "-m", "symphony/#{id}: automated change"])
+        Logger.info("janitor: #{id} committed on #{branch}")
+        true
+      else
+        false
+      end
 
-    unless remote_branch?(workspace, branch) do
-      git(workspace, ["push", "-u", "origin", branch])
-      Logger.info("janitor: #{id} pushed #{branch}")
-    end
+    pushed =
+      if remote_branch?(workspace, branch) do
+        false
+      else
+        git(workspace, ["push", "-u", "origin", branch])
+        Logger.info("janitor: #{id} pushed #{branch}")
+        true
+      end
 
-    unless has_pull_request?(branch, cfg) do
-      create_pull_request(id, workspace, ticket_path, branch, cfg)
-    end
+    %{
+      branch: branch,
+      committed: committed,
+      pushed: pushed,
+      pull_request: publish_pull_request(id, workspace, ticket_path, branch, cfg)
+    }
+  end
 
-    :ok
+  # An existing pull request is the answer, not a reason to make a second one. A `gh` failure is not
+  # treated as "no pull request": the sweep tries again next round, and inventing a branch because
+  # GitHub could not be reached is how duplicates happen.
+  defp publish_pull_request(id, workspace, ticket_path, branch, cfg) do
+    case existing_pull_request(branch, cfg) do
+      {:ok, url} ->
+        url
+
+      :none ->
+        create_pull_request(id, workspace, ticket_path, branch, cfg)
+
+      {:error, reason} ->
+        Logger.warning("janitor: #{id} cannot list pull requests for #{branch}: #{inspect(reason)}")
+        nil
+    end
   end
 
   # `gh` must run with the workspace as its cwd: `--fill` would ask git for `main...branch`, and the
@@ -619,12 +710,15 @@ defmodule SymphonyElixir.Janitor do
       {:ok, output, 0} ->
         Logger.info("janitor: #{id} PR #{String.trim(output)}")
         comment_pr_link(id, ticket_path, output, cfg)
+        pull_request_url(output)
 
       {:ok, output, status} ->
         Logger.warning("janitor: #{id} pr create exited #{status}: #{String.trim(output)}")
+        nil
 
       {:error, reason} ->
         Logger.warning("janitor: #{id} pr create failed: #{inspect(reason)}")
+        nil
     end
   end
 
@@ -694,10 +788,17 @@ defmodule SymphonyElixir.Janitor do
   def issue_number(_ticket_text), do: nil
 
   defp has_pull_request?(branch, cfg) do
+    match?({:ok, _url}, existing_pull_request(branch, cfg))
+  end
+
+  # `--state all` on purpose: a *closed* pull request for this branch still means the branch was
+  # published, so neither the sweep nor the tool should open a second one for it.
+  defp existing_pull_request(branch, cfg) do
     case gh_json(["pr", "list", "--repo", cfg.repo, "--head", branch, "--state", "all",
-                       "--json", "number"]) do
-      {:ok, [_ | _]} -> true
-      _ -> false
+                  "--json", "url", "--limit", "1"]) do
+      {:ok, [%{"url" => url} | _]} when is_binary(url) -> {:ok, url}
+      {:ok, _none} -> :none
+      {:error, reason} -> {:error, reason}
     end
   end
 

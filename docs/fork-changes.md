@@ -12,13 +12,14 @@ get upstream behaviour back. Anything not listed here should be assumed unchange
 
 ## Behaviour that changed for a caller
 
-Only two engine-level changes are visible to a caller, plus the example workflow.
+Only three engine-level changes are visible to a caller, plus the example workflow.
 
 | # | area | change | why | affects a default? | back to upstream |
 |---|---|---|---|---|---|
 | 1 | `lib/symphony_elixir/specs_check.ex` | `Path.expand/1` before globbing | a path built by `Path.join/2` from `System.tmp_dir!/0` mixes separators on Windows (`C:\...\Temp/x`), and `Path.wildcard/1` then matches **nothing** -- the check read zero files and still reported "all public functions have @spec". Now it finds them. | no default moved, but it **checks more files** than before, so a tree with unspecced top-level modules can newly fail | none needed; the fix is strictly more checking |
 | 2 | `lib/symphony_elixir/codex/app_server.ex` | a failed `thread/start` returns `{:error, {:thread_start_rejected, %{approval_policy: .., thread_sandbox: ..}, reason}}`; a failed `initialize` returns `{:error, {:initialize_rejected, reason}}`; both log the values sent | codex renamed an approval policy once (`reject` -> `granular`) and every run then failed before its first turn with an error that never named the option | no | callers that only match `{:error, _}` are unaffected; to restore the bare reason, return `reason` instead of the tuple |
 | 3 | `elixir/WORKFLOW.md` | the example workflow now tracks GitHub Issues, drives `acp`/DSH by default (was `codex`), sets `server: {host, port}` so the observability endpoint is enabled, and carries the file tracker and ZCode routes as comments | the deployment in this workspace uses GitHub, DSH and a loopback endpoint; each was verified end to end | this is the **example file**, not an engine default -- `Config` has no built-in tracker or backend | `git show acea168:elixir/WORKFLOW.md` |
+| 4 | `tracker/file.ex` + `janitor/agent_tool.ex` | a file-tracker session now advertises one agent tool, `symphony_publish`, which asks the host to commit, push and open the pull request for a ticket (`Janitor.publish_now/2`) | the agent cannot publish in the `workspaceWrite` sandbox, and until now it could only *hint* (set the ticket to `in-review`) and hope the 30s sweep noticed; the tool is the same work with the answer returned in the same turn | no default moved. A file-tracker Codex turn gets `dynamicTools` unconditionally, so its tool list is no longer empty; an ACP session still needs `server.tracker_tools: true` for the MCP bridge | drop the two `agent_tool_specs/0` and `execute_agent_tool/3` clauses in `tracker/file.ex` (the sweep is unchanged and still publishes) |
 
 ## Engine code: behaviour-preserving work
 
@@ -192,7 +193,7 @@ have checked how the run is terminated.
 | field | written by | flows |
 |---|---|---|
 | `state`, `assignee_id`, discussion | the human, through the Issue | Issue -> janitor -> ticket file |
-| code changes, the PR | the agent | workspace -> janitor -> branch + PR |
+| code changes, the PR | the agent, as files, then through `symphony_publish` | workspace -> janitor -> branch + PR |
 | `branch_name` | a person, or the janitor **once** when the ticket has none | ticket -> the branch, the push and the PR, every round after |
 | the boards | the janitor alone | read-only for everyone else |
 
@@ -206,6 +207,20 @@ decorative. It uses the ticket's value when there is one, and records the derive
 before the first push when there is not: the name a person reads in the ticket is then the name of
 the branch and the PR, and a project that wants different naming has somewhere to say so. Recording
 it **only when absent** is what keeps that from becoming the state/label fight again.
+
+### The agent can ask for the publish
+
+The sweep publishes within one interval of a ticket reaching `in-review`; `symphony_publish` asks for
+the same work inside the turn that finished it, so a run can report the branch and the pull-request
+URL instead of ending with "the PR will appear shortly, I hope". It calls `Janitor.publish_now/2`,
+which is the sweep's own commit/push/PR code without the sweep's trigger, and the two stay idempotent:
+a run that never calls the tool is still published, and a run that calls it twice gets the same branch
+and the same pull request (an existing PR is the answer, not a reason to open a second one).
+
+It refuses an identifier that is not a plain ticket name -- the identifier is a path segment under two
+configured roots and the caller is a language model -- and refuses when the ticket file or the
+workspace is missing. A misconfigured janitor block therefore fails loudly instead of publishing
+somewhere unexpected.
 
 ## Board conventions
 

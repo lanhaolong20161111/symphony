@@ -149,9 +149,12 @@ defmodule SymphonyElixir.FileTrackerTest do
       assert {:error, {:file_tracker_path_not_found, ^missing}} = FileTracker.validate_config(settings(missing))
     end
 
-    test "no credentials to redact, no agent tools", %{dir: dir} do
+    test "no credentials to redact, and the janitor's publish tool", %{dir: dir} do
       assert FileTracker.secret_environment_names(settings(dir)) == []
-      assert FileTracker.agent_tool_specs() == []
+
+      # This tracker has no provider API, but its host-side caretaker does have work the agent cannot
+      # do itself (commit/push/PR), so it advertises exactly that one tool.
+      assert [%{"name" => "symphony_publish"}] = FileTracker.agent_tool_specs()
     end
 
     test "`~` in the path is expanded", %{dir: dir} do

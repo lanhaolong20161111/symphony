@@ -104,17 +104,7 @@ defmodule SymphonyElixir.Janitor.Server do
   end
 
   # Only the keys a workflow actually set are passed on; `SymphonyElixir.Janitor.config/1` fills in
-  # this machine's defaults for the rest, so the two entry points (`mix janitor` and this server)
-  # cannot drift apart.
-  defp janitor_options(settings) do
-    [
-      tickets: settings.tickets_path,
-      workspace_root: settings.workspace_root,
-      repo: settings.issues_repo,
-      tickets_repo: settings.tickets_repo,
-      state_file: settings.state_file,
-      interval_seconds: div(settings.interval_ms, 1_000)
-    ]
-    |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
-  end
+  # this machine's defaults for the rest. The mapping itself lives in `Janitor` so the two entry
+  # points -- this server and the agent tool -- cannot drift apart.
+  defp janitor_options(settings), do: Janitor.options_from_settings(settings)
 end
