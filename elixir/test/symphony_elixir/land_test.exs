@@ -152,6 +152,29 @@ defmodule SymphonyElixir.LandTest do
       assert issue == [ack]
       assert review == []
     end
+
+    test "with no review request, a Codex-bot notice is not feedback" do
+      notice =
+        comment(
+          1,
+          "You have reached your Codex usage limits for code reviews.",
+          "2024-05-02T00:00:00Z",
+          @codex
+        )
+
+      assert Land.codex_comments(%{issue: [notice], review: [], request_at: nil}) == {[], []}
+    end
+
+    test "with no review request, a Codex review still counts" do
+      review_comment =
+        comment(1, "## Codex Review\n\nGuardrails used: none.", "2024-05-02T00:00:00Z", @codex)
+
+      {issue, review} =
+        Land.codex_comments(%{issue: [review_comment], review: [], request_at: nil})
+
+      assert issue == [review_comment]
+      assert review == []
+    end
   end
 
   describe "blocking_reviews/2" do

@@ -324,8 +324,18 @@ defmodule SymphonyElixir.Land do
   defp codex_comment_kept?(comment, request_at, latest_replies) do
     time = comment_time(comment)
 
+    # With no `@codex review` request there is no referent for "after the request", and this filter
+    # compares only against `request_at` -- never against the latest `[codex]` reply -- so whatever
+    # the no-request case keeps is permanent: no acknowledgement can ever age it out. Measured on
+    # PR 63 (2026-09-29): a pull request that was clean and mergeable with both `precommit` runs
+    # SUCCESS was reported as exit 2, because the Codex bot's "You have reached your Codex usage
+    # limits for code reviews." notice is not a review but was the only Codex-bot comment. Requiring
+    # the review marker is fail-closed: a `## Codex Review` posted without a request still counts,
+    # the requested path never reaches this clause, and the human and blocking-review clauses of
+    # `feedback?/1` are untouched.
     cond do
       is_nil(time) -> false
+      is_nil(request_at) -> codex_review?(comment)
       stale?(time, request_at) -> false
       threaded?(comment) -> not superseded?(time, Map.get(latest_replies, thread_root_id(comment)))
       true -> true
