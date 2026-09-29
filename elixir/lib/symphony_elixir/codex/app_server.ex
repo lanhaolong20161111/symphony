@@ -272,11 +272,24 @@ defmodule SymphonyElixir.Codex.AppServer do
     secrets = dynamic_tool_binding.secret_environment_names |> valid_environment_names()
     passthrough = passthrough_env(secrets)
 
-    Enum.map(secrets, &{String.to_charlist(&1), false}) ++ passthrough ++ git_config_env(passthrough)
+    Enum.map(secrets, &{String.to_charlist(&1), false}) ++
+      passthrough ++ no_prompt_env(passthrough) ++ git_config_env(passthrough)
   end
 
-  # The two names `gh` itself reads, and therefore the two that make git's credential helper work.
+  # The two names `gh` itself reads, and therefore the two that mean "a GitHub token is on its way to the
+  # child". Defined here, above every use: a module attribute reads as nil in any function compiled
+  # before it, and `name in nil` fails at runtime rather than at compile time.
   @gh_token_names ~w(GH_TOKEN GITHUB_TOKEN)
+
+  # A broken token should fail, not hang: without this, git may sit waiting for a username it can never
+  # be given, and the run burns its budget on a prompt nobody will answer.
+  defp no_prompt_env(passthrough) do
+    if Enum.any?(passthrough, fn {name, _value} -> to_string(name) in @gh_token_names end) do
+      [{~c"GIT_TERMINAL_PROMPT", ~c"0"}]
+    else
+      []
+    end
+  end
 
   defp passthrough_env(secrets) do
     Config.settings!().codex.child_env
@@ -325,14 +338,37 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  # How the token reaches git, and why it is not a credential helper.
+  #
+  # A helper (`!gh auth git-credential`) is the tidier idea, but it makes git run another program: the
+  # string goes to `sh`, which needs `gh` on PATH inside a sandbox owned by a different Windows account
+  # whose PATH nobody has measured. `http.<url>.extraheader` needs none of that -- git sends the header
+  # itself -- and it is what CI systems do with a token. Measured: SYM-54 and SYM-55 both failed with
+  # `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`, which is what git reports when it
+  # has no credential at all, helper or not.
+  #
+  # The empty `credential.helper` comes first and clears any inherited helper, so a credential manager in
+  # the sandbox account cannot answer for the wrong user.
+  defp github_auth_entries(token) do
+    basic = Base.encode64("x-access-token:#{token}")
+
+    [
+      {"credential.helper", ""},
+      {"http.https://github.com/.extraheader", "Authorization: Basic #{basic}"}
+    ]
+  end
+
   defp git_config_env(passthrough) do
-    child_names = Enum.map(passthrough, fn {name, _value} -> to_string(name) end)
-    gh_token? = Enum.any?(child_names, &(&1 in @gh_token_names))
+    gh_token =
+      Enum.find_value(passthrough, fn {name, value} ->
+        if to_string(name) in @gh_token_names, do: to_string(value)
+      end)
+
     trust? = Config.settings!().codex.git_metadata_writable
 
     entries =
-      (if trust? or gh_token?, do: [{"safe.directory", "*"}], else: []) ++
-        (if gh_token?, do: [{"credential.helper", "!gh auth git-credential"}], else: [])
+      (if trust? or gh_token, do: [{"safe.directory", "*"}], else: []) ++
+        (if gh_token, do: github_auth_entries(gh_token), else: [])
 
     case entries do
       [] ->

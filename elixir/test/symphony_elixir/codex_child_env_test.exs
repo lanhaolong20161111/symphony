@@ -72,7 +72,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
     assert {~c"GH_TOKEN", ~c"scoped-token"} in env
   end
 
-  test "a GitHub token also brings the credential helper, which git needs to push", %{binding: binding} do
+  test "a GitHub token also brings git's own auth, which needs no helper program", %{binding: binding} do
     restore_env("SYMPHONY_AGENT_TOKEN", "scoped-token")
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -82,10 +82,27 @@ defmodule SymphonyElixir.CodexChildEnvTest do
 
     env = AppServer.child_env("/tmp/ws", binding)
 
-    assert {~c"GIT_CONFIG_COUNT", ~c"2"} in env
+    assert {~c"GIT_CONFIG_COUNT", ~c"3"} in env
     assert {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"} in env
     assert {~c"GIT_CONFIG_KEY_1", ~c"credential.helper"} in env
-    assert {~c"GIT_CONFIG_VALUE_1", ~c"!gh auth git-credential"} in env
+    # Empty on purpose: it clears any inherited helper, so a credential manager in the sandbox account
+    # cannot answer for the wrong user.
+    assert {~c"GIT_CONFIG_VALUE_1", ~c""} in env
+    assert {~c"GIT_CONFIG_KEY_2", ~c"http.https://github.com/.extraheader"} in env
+
+    header =
+      Enum.find_value(env, fn
+        {~c"GIT_CONFIG_VALUE_2", value} -> to_string(value)
+        _ -> nil
+      end)
+
+    # Basic auth for the token itself, built without mangling it.
+    assert header =~ "Authorization: Basic "
+    assert Base.decode64!(String.replace_prefix(header, "Authorization: Basic ", "")) ==
+             "x-access-token:scoped-token"
+
+    # A broken token must fail rather than hang.
+    assert {~c"GIT_TERMINAL_PROMPT", ~c"0"} in env
   end
 
   test "a tracker secret is refused by its source name too", %{binding: binding} do
