@@ -30,10 +30,16 @@ defmodule SymphonyElixir.Janitor.TicketTest do
       assert Ticket.split("") == :skip
     end
 
-    test "a BOM before the opening --- also fails to parse (the silent-vanish case)" do
-      # This is not a curiosity: the tracker's regex is the same, so a BOM'd ticket is invisible
-      # to the queue. `problems/1` is what turns that silence into a warning.
-      assert Ticket.split(<<0xEF, 0xBB, 0xBF>> <> @ticket) == :skip
+    test "a BOM is tolerated when parsing, and still reported as a smell" do
+      # Measured on SYM-48: a run edited its own ticket with a Windows shell, the BOM stopped the file
+      # being a ticket at all, and the queue lost it mid-run. Parsing now tolerates the BOM; `problems/1`
+      # still says so, because whatever wrote it may have changed more than the BOM.
+      text = <<0xEF, 0xBB, 0xBF>> <> @ticket
+
+      assert {:ok, %{front_matter: fm}} = Ticket.split(text)
+      assert fm =~ "id: SYM-6"
+      assert :bom in Ticket.problems(text)
+      refute :no_front_matter in Ticket.problems(text)
     end
   end
 

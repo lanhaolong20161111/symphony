@@ -231,6 +231,15 @@ was blamed on the Chinese. The rule to keep is "write UTF-8 **without a BOM**" (
 ASCII" -- that belief would ban legitimate comments, and one validator in this fork enforces exactly
 that mistake.
 
+**And a BOM must not cost a ticket.** Measured the hard way, on ticket SYM-48: the run edited its own
+ticket with a Windows shell, the BOM broke the tracker's `\A---` front-matter match, and the ticket
+**vanished from the queue mid-run** -- the run was stopped, the ticket sat at `in-progress`, and the
+janitor's warning (`SYM-48.md looks wrong: [:bom, :no_front_matter]`) was the only trace. Both parsers
+(`tracker/file.ex` and `janitor/ticket.ex`) now strip a leading BOM before matching, so the ticket keeps
+working; `problems/1` still reports `:bom`, because whatever wrote it may have changed more than the
+BOM. On a POSIX host a BOM is exotic; on Windows it is one `Set-Content` away, which is exactly why
+this belongs in the port.
+
 ## 6. Acceptance
 
 The port is done when, on this Windows machine, one real ticket run can show all of:
@@ -301,3 +310,11 @@ rounds, which are counted separately.
   the prompt's own file still loads, an earlier note was corrected: non-ASCII front matter parses
   (`prompt template 6323 chars`), and the real hazard is the encoding a Windows shell writes.
   Next: §3's token decision and enabling the two sandbox keys, then §6's end-to-end acceptance.
+- **Round 8 (2026-09-29)**: a live defect found and fixed by the round's own regression run. Ticket
+  SYM-48's run edited its own ticket with a Windows shell, the BOM broke the tracker's front-matter
+  match, and the ticket **vanished from the queue mid-run** (the run was stopped; the ticket sat at
+  `in-progress`; the janitor's warning was the only trace). Both parsers now strip a leading BOM and
+  `problems/1` still reports it. The same run also proved the round-7 prompt correct: the session called
+  `symphony_publish`, then changed the state, and PR #45 was opened -- and after the BOM was stripped the
+  ticket was re-dispatched and finished on its own.
+  Next: §3's token decision and the two sandbox keys, then §6's end-to-end acceptance.

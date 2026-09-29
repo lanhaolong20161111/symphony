@@ -895,9 +895,9 @@ defmodule SymphonyElixir.Janitor do
   end
 
   # A file with no front matter is usually just prose -- this repository keeps a guide and the boards
-  # next to the tickets -- so only shout when the file is *named* like a ticket. A BOM is always
-  # worth shouting about, because a BOM'd ticket is invisible to the tracker and nothing else in the
-  # system will ever mention it.
+  # next to the tickets -- so only shout when the file is *named* like a ticket. A BOM is worth saying
+  # out loud even though parsing tolerates it now: it means a tool rewrote the file, and that tool may
+  # have changed more than the BOM.
   defp warn_if_intended_ticket(path, text) do
     name = Path.basename(path)
     problems = Ticket.problems(text)

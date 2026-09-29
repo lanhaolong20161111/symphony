@@ -12,11 +12,12 @@ defmodule SymphonyElixir.Janitor.Ticket do
 
   ## Things this module refuses to do quietly
 
-  A `.md` file whose front matter does not match is **skipped**, and with a leading UTF-8 BOM it
-  never matches: `\\A---` cannot see past `EF BB BF`, so a BOM'd ticket disappears from the queue
-  with no error anywhere. That is the failure this project fears most, and it is one `Set-Content`
-  away in Windows PowerShell. `problems/1` exists so the janitor can be the thing that says it out
-  loud instead of the thing that shrugs.
+  A `.md` file whose front matter does not match is **skipped**. A leading UTF-8 BOM used to be the
+  worst case of that -- `\\A---` cannot see past `EF BB BF`, so a BOM'd ticket disappeared from the
+  queue with no error anywhere, one `Set-Content` away in Windows PowerShell. Parsing now strips the
+  BOM first (measured on SYM-48: a run's own ticket edit removed the ticket from the queue mid-run), and
+  `problems/1` still reports it: the file works, and the operator learns that some tool rewrote it,
+  which may have changed more than the BOM.
   """
 
   @front_matter ~r/\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)\z/s
@@ -40,15 +41,24 @@ defmodule SymphonyElixir.Janitor.Ticket do
   Parses a ticket file's text.
 
   Returns `{:ok, %{front_matter: fm, body: body}}` when the text opens with front matter, or
-  `:skip` when it does not (a board file, a guide, or -- the dangerous case -- a BOM'd ticket).
+  `:skip` when it does not (a board file, or a guide).
+
+  A leading UTF-8 BOM is **tolerated** and stripped: on Windows the obvious way to edit a file
+  (`Set-Content -Encoding UTF8`) writes one, and a queue that silently loses a ticket because of it is
+  the worst failure this system has -- measured on SYM-48, where a run's own ticket edit removed the
+  ticket from the queue mid-run. `problems/1` still reports `:bom`, so the smell is visible without
+  being fatal.
   """
   @spec split(String.t()) :: {:ok, %{front_matter: String.t(), body: String.t()}} | :skip
   def split(text) when is_binary(text) do
-    case Regex.run(@front_matter, text) do
+    case Regex.run(@front_matter, strip_bom(text)) do
       [_, front_matter, body] -> {:ok, %{front_matter: front_matter, body: body}}
       _ -> :skip
     end
   end
+
+  defp strip_bom(<<0xEF, 0xBB, 0xBF, rest::binary>>), do: rest
+  defp strip_bom(text), do: text
 
   @doc """
   Reads one front-matter key, unquoting it.
@@ -190,7 +200,9 @@ defmodule SymphonyElixir.Janitor.Ticket do
   @doc """
   Reports conditions that make a file a bad ticket, without changing anything.
 
-  * `:bom` -- a leading UTF-8 BOM, which hides the ticket from the tracker entirely.
+  * `:bom` -- a leading UTF-8 BOM. Parsing tolerates it, because on Windows the obvious way to write a
+    file adds one; it is reported because it means some tool wrote the ticket, and that tool may have
+    changed more than the BOM.
   * `:no_front_matter` -- nothing to parse; fine for prose, fatal for an intended ticket.
   * `:unquoted_colon_in_title` -- `title: Smoke test: add a line` is invalid YAML; the tracker
     answers with `{:file_tracker_invalid_yaml, ..}` and the ticket never dispatches.

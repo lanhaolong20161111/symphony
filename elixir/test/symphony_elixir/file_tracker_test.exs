@@ -140,6 +140,18 @@ defmodule SymphonyElixir.FileTrackerTest do
       refute issue.dispatchable
     end
 
+    test "a ticket written with a BOM is still a ticket", %{dir: dir} do
+      # Windows shells write a BOM by default (`Set-Content -Encoding UTF8`), and the front-matter regex
+      # anchors on `\A---`, so this used to remove the ticket from the queue with no error at all.
+      # Measured on SYM-48: a run's own ticket edit did exactly that, mid-run.
+      path = Path.join(dir, "B-1.md")
+      File.write!(path, <<0xEF, 0xBB, 0xBF>> <> markdown("id: B-1\nstate: ready", "Body\n"))
+
+      assert {:ok, [issue]} = FileTracker.tickets(settings(dir))
+      assert issue.id == "B-1"
+      assert issue.state == "ready"
+    end
+
     test "a blocker only gates the workflow's first active state", %{dir: dir} do
       # Linear's rule (`linear/client.ex:501-503`): a blocked issue is held back only while it sits in
       # the first state (their `Todo`); once work has started, an unfinished blocker cannot freeze it.

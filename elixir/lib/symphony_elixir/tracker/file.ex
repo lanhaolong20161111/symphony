@@ -266,12 +266,19 @@ defmodule SymphonyElixir.Tracker.File do
   defp parse_contents(path, contents, directory?) do
     extension = path |> Path.extname() |> String.downcase()
 
-    if extension in @yaml_extensions do
-      parse_yaml(path, contents)
-    else
-      parse_markdown(path, contents, directory?)
+    case strip_bom(contents) do
+      stripped when extension in @yaml_extensions -> parse_yaml(path, stripped)
+      stripped -> parse_markdown(path, stripped, directory?)
     end
   end
+
+  # A leading UTF-8 BOM is stripped before anything looks at the text. On Windows the obvious way to
+  # edit a file (`Set-Content -Encoding UTF8`) writes one, and because the front-matter regex anchors on
+  # `\A---`, a BOM'd ticket used to stop being a ticket at all -- it vanished from the queue with no
+  # error, which is the one failure mode this module exists to avoid. Measured on SYM-48: a run's own
+  # edit to its ticket removed that ticket from the queue mid-run.
+  defp strip_bom(<<0xEF, 0xBB, 0xBF, rest::binary>>), do: rest
+  defp strip_bom(contents), do: contents
 
   defp parse_markdown(path, contents, directory?) do
     case Regex.run(@front_matter, contents) do
