@@ -110,8 +110,10 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 2. `labels` normalize identically: trim, downcase, drop blanks, uniq (`linear/client.ex:607-616`). The
    file tracker currently trims only -- a SPEC 1266-1267 deviation (`tracker/file.ex:310-321`).
 3. `state` verbatim; compared trimmed + downcased only.
-4. `priority` integer-or-null with Linear's 1..4-then-unknown dispatch rank. Today's file tracker
-   accepts numbers, numeric strings and floats (`file.ex:334-344`); pick one coercion and document it.
+4. `priority` integer-or-null with Linear's 1..4-then-unknown dispatch rank. **Done in round 6**: the
+   coercion is "an integer, or `nil`" -- a quoted integer is accepted because front matter is
+   hand-written, and a float (or a number with anything after it) is `nil`, which is the answer
+   Linear's parser gives rather than a truncation nobody asked for.
 5. `blocked_by` entries are `{id, identifier, state}` maps with each key nullable, as Linear produces
    (`linear/client.ex:626-630`). **Done in round 3**: front matter accepts both the shorthand and the
    full form, and the shorthand is expanded by reading the blocker's own file:
@@ -276,3 +278,9 @@ rounds, which are counted separately.
   surfaces), and the malformed-record rule stays the stricter one, documented with its reason.
   Next: the token decision (§3) and the prompt/skills/permission switch (§5 leg 2), which together are
   the last thing between here and the end-to-end acceptance in §6.
+- **Round 6 (2026-09-29)**: the last tracker parity item -- `priority`'s coercion is now "an integer,
+  or nil", matching Linear's parser; a float is no longer truncated into a priority nobody wrote, and a
+  quoted integer is still accepted for hand-written front matter. With that, §4.1's ten items and
+  §4.2's emulations are all either implemented or documented as a deliberate decision.
+  Next: §3's token decision and §5's switch (prompt + permissions + paths), then §6's end-to-end
+  acceptance.

@@ -72,6 +72,21 @@ defmodule SymphonyElixir.FileTrackerTest do
       assert fourth.labels == ["perf", "ux"]
     end
 
+    test "priority is an integer or nil, never a truncation", %{dir: dir} do
+      # SPEC 1268, and the same answer Linear's parser gives. The quoted integer is the one affordance
+      # this tracker adds, because front matter is written by hand.
+      write_ticket(dir, "P-1.md", markdown("id: P-1\nstate: ready\npriority: 2", "Body\n"))
+      write_ticket(dir, "P-2.md", markdown(~s(id: P-2\nstate: ready\npriority: "3"), "Body\n"))
+      write_ticket(dir, "P-3.md", markdown("id: P-3\nstate: ready\npriority: 2.5", "Body\n"))
+      write_ticket(dir, "P-4.md", markdown(~s(id: P-4\nstate: ready\npriority: "2.5"), "Body\n"))
+      write_ticket(dir, "P-5.md", markdown("id: P-5\nstate: ready\npriority: high", "Body\n"))
+
+      assert {:ok, issues} = FileTracker.tickets(settings(dir))
+      priorities = Map.new(issues, &{&1.id, &1.priority})
+
+      assert priorities == %{"P-1" => 2, "P-2" => 3, "P-3" => nil, "P-4" => nil, "P-5" => nil}
+    end
+
     test "id / title / state fall back to the file name and to open", %{dir: dir} do
       write_ticket(dir, "T-9.md", markdown("title: Only a title", "Body\n"))
 

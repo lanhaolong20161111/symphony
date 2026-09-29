@@ -28,6 +28,10 @@ defmodule SymphonyElixir.Tracker.File do
   Defaults: `id`/`identifier` fall back to the file name, `title` to the identifier, `state` to
   `"open"`, `description` to the Markdown body.
 
+  `priority` is an integer or `nil` (SPEC 1268). A quoted integer is accepted, since front matter is
+  hand-written; a float, or a number with anything after it, is `nil` -- the same answer Linear's
+  parser gives, rather than a truncation nobody asked for.
+
   `blocked_by` takes both shapes, and they mean the same thing:
 
       blocked_by: [T-1, T-2]                                     # shorthand
@@ -449,13 +453,17 @@ defmodule SymphonyElixir.Tracker.File do
   defp to_string_value(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
   defp to_string_value(_value), do: nil
 
+  # SPEC 1268 says `integer or null`, and this gives the same answer Linear's parser gives: a float is
+  # not an integer, so `2.5` becomes nil rather than being truncated to 2. The one affordance this
+  # tracker adds is a quoted integer -- `priority: "2"` -- because front matter is written by hand. The
+  # parse must consume the whole string: `"2.5"` and `"2abc"` are not integers, and prefix-parsing them
+  # into 2 would invent a priority nobody wrote.
   defp to_integer(value) when is_integer(value), do: value
-  defp to_integer(value) when is_float(value), do: trunc(value)
 
   defp to_integer(value) when is_binary(value) do
     case Integer.parse(String.trim(value)) do
-      {parsed, _rest} -> parsed
-      :error -> nil
+      {parsed, ""} -> parsed
+      _ -> nil
     end
   end
 
