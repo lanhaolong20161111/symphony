@@ -266,9 +266,9 @@ The port is done when, on this Windows machine, one real ticket run can show all
 
 | # | state |
 |---|---|
-| 1 | implemented, default off -- turning it on is part of the switch, with 2 and 3 |
-| 2 | mechanism ready (the `commit` skill is in the target repository); needs 1 and 3 |
-| 3 | needs the credential decision (§3) |
+| 1 | **on and demonstrated**: `codex.git_metadata_writable: true` in the deployment; SYM-50's run committed in a sandbox that had refused exactly that before |
+| 2 | **demonstrated**: the agent wrote its own commit, on the ticket's branch, with a real message (`docs: append branch-fix smoke marker to README.md`) rather than the janitor's fixed `symphony/<id>: automated change` |
+| 3 | needs the credential decision (§3). Until then the split is: **the agent commits, the host pushes and opens the PR** -- measured on SYM-51, where the host moved the agent's commit onto `symphony/SYM-51` and opened PR #51 |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
 | 6 | every round: `mix lint` clean, suite green (613 at the time of writing) |
@@ -350,3 +350,15 @@ rounds, which are counted separately.
   lifecycle lines this host actually emits. The fork's own `.codex/worktree_init.sh` was checked:
   nothing references it and it is POSIX-only, so it is recorded as dormant rather than ported.
   Next: §3's token decision and the two sandbox keys (acceptance items 1-3), then the rest of §6.
+- **Round 11 (2026-09-29)**: `codex.git_metadata_writable` turned on in the deployment, and the prompt
+  rewritten so the split is explicit: **the agent makes its own commit** (following
+  `.codex/skills/commit/SKILL.md` by path), the host pushes and opens the PR. Enabling it immediately
+  exposed an integration bug in the publish path, found by the first ticket that ran with the flag
+  (SYM-50): the agent now leaves a **clean** tree, and `publish/5` only created the ticket's branch in
+  the dirty case -- so it pushed the wrong ref and `gh pr create` failed with `Head sha can't be blank
+  ... No commits between main and symphony/SYM-50`, leaving no PR and no link, while the log claimed
+  "pushed" because it never checked git's status. Fixed (`73347b4`): the branch is created whenever HEAD
+  is not already on it, and a push only logs success when git agreed. Re-verified on SYM-51: the agent's
+  commit `c23bef6` ended up on `symphony/SYM-51`, PR #51 was opened, and the ticket carries
+  `links: [{url: ".../pull/51", ...}]`. Acceptance items 1, 2 and 4 are therefore demonstrated live; 3
+  waits on the credential decision.
