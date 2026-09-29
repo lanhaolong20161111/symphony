@@ -70,8 +70,26 @@ None of this changes the application; it changes what the gate checks and with w
 
 Two things written elsewhere during this work were wrong and are corrected here:
 
-- The schema's `approval_policy` default (`granular`) is **not** a change made here; `git diff
-  acea168..HEAD -- lib/symphony_elixir/config/schema.ex` is empty.
+- The schema's `approval_policy` default (`granular`) **is** a change made here. An earlier note said
+  it was not, and backed that with `git diff acea168..HEAD --
+  lib/symphony_elixir/config/schema.ex`, which is empty for two reasons rather than one: that path
+  does not exist in this repository (the real one is
+  `elixir/lib/symphony_elixir/config/schema.ex`), and the same diff with the right path is empty
+  too, because the rename is 2 commits *before* `acea168`. The evidence is the commit, not a diff:
+  `git show 84428e5 -- elixir/lib/symphony_elixir/config/schema.ex` -- `84428e5`, "Rename the codex
+  approval policy tag for codex 0.154" (2026-09-21, lhl20), four commits after upstream's `main`
+  (`be10a1b`), whose `schema.ex` still ships `reject`. codex 0.154.0 dropped that tag -- the
+  app-server answers an unknown-variant error and lists `untrusted | on-request | granular | never`
+  -- so upstream's fail-closed default failed every session before its first turn. `granular` keeps
+  the nested shape and its meaning ("reject these approval categories outright"); `never` was
+  deliberately not used, because it means *never ask for approval*, the opposite of that default.
+  Re-checked against the pinned codex here (0.155.1): the schema its own binary generates for its
+  protocol (`codex app-server generate-json-schema`) types `AskForApproval` as `untrusted |
+  on-request | never` or the object `{granular: {sandbox_approval, rules, mcp_elicitations}}`, with
+  no `reject` variant anywhere. So this **is** a default moved against the rule at the top of this
+  file, bought with version coupling: a codex older than 0.154 knew the tag as `reject`, so the
+  default there is an unknown policy variant and the session dies at `thread/start` before its first
+  turn -- the failure `codex/app_server.ex` now names the policy in (row 2 above).
 - The Makefile's `build` target is fine: `mix build` is an alias (`build: ["escript.build"]`) in
   `mix.exs`. An earlier "task not found" was a wrong-directory mistake, not a broken target.
 
