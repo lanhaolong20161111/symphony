@@ -206,6 +206,8 @@ The port is done when, on this Windows machine, one real ticket run can show all
   the credential half (`SEC_E_NO_CREDENTIALS`) and the separate-sandbox-account explanation, both
   recorded in `docs/fork-changes.md`; the retry-window flake that failed a gate run was fixed
   (`2fa190a`); Linear and skills reference inventories collected (this file's §4 and §5); the
-  child-environment mechanism written and tested (`codex.child_env` + `safe.directory`), default off.
+  child-environment mechanism written and tested (`codex.child_env` + `safe.directory`), default off;
+  tracker parity started: the file tracker's `labels` now normalize exactly as the Linear adapter
+  normalizes them (trim, downcase, drop blanks, uniq).
   Next: the token decision (§3), then port the four skills into the target repository (§5), then the
-  tracker parity work (§4.1).
+  rest of the tracker parity work (§4.1 item 5: `blocked_by` refs and `dispatchable`).

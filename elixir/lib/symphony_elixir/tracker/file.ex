@@ -307,18 +307,31 @@ defmodule SymphonyElixir.Tracker.File do
 
   defp blank_map?(map), do: map == %{} or Enum.all?(map, fn {_k, v} -> is_nil(v) end)
 
+  # SPEC 1266-1267, and the same four steps Linear's adapter applies (`linear/client.ex:607-616`):
+  # trim, downcase, drop blanks, uniq. Trimming alone makes `Ready` and `ready` two different labels to
+  # everything downstream that compares them, which is why the spec asks for the whole rule and not
+  # part of it. Both front-matter shapes feed the same normalizer, so a list and a comma string cannot
+  # disagree.
   defp labels(nil), do: []
 
   defp labels(value) when is_binary(value) do
     value
     |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
+    |> normalize_labels()
   end
 
-  defp labels(value) when is_list(value), do: value |> Enum.map(&to_string/1) |> Enum.map(&String.trim/1)
+  defp labels(value) when is_list(value) do
+    value |> Enum.map(&to_string/1) |> normalize_labels()
+  end
 
   defp labels(_value), do: []
+
+  defp normalize_labels(values) do
+    values
+    |> Enum.map(&(String.trim(&1) |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
 
   defp to_string_value(value) when is_binary(value) do
     case String.trim(value) do

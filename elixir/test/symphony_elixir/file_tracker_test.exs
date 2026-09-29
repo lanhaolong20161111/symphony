@@ -56,6 +56,22 @@ defmodule SymphonyElixir.FileTrackerTest do
       assert second.state == "open"
     end
 
+    test "labels normalize exactly as the Linear adapter normalizes them", %{dir: dir} do
+      # SPEC 1266-1267: trim, downcase, drop blanks, uniq. The list and the comma-string forms are
+      # both front matter a person may write, so they have to land on the same answer.
+      write_ticket(
+        dir,
+        "T-3.md",
+        markdown(~s(id: T-3\nstate: ready\nlabels: [Perf, "  UX ", perf, ""]), "Body\n")
+      )
+
+      write_ticket(dir, "T-4.md", markdown("id: T-4\nstate: ready\nlabels: \"Perf, ux ,, PERF\"", "Body\n"))
+
+      assert {:ok, [third, fourth]} = FileTracker.tickets(settings(dir))
+      assert third.labels == ["perf", "ux"]
+      assert fourth.labels == ["perf", "ux"]
+    end
+
     test "id / title / state fall back to the file name and to open", %{dir: dir} do
       write_ticket(dir, "T-9.md", markdown("title: Only a title", "Body\n"))
 
