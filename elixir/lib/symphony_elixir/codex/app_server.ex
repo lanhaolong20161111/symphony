@@ -353,7 +353,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     basic = Base.encode64("x-access-token:#{token}")
 
     [
-      {"credential.helper", ""},
+      # Git for Windows defaults to schannel, and schannel needs a TLS client credential from
+      # CryptoAPI. The sandbox account has no loaded profile, so it cannot get one: measured on
+      # SYM-56, an agent whose git config *did* carry the Authorization header still failed with
+      # `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` -- the failure is below
+      # the token, in the TLS layer. OpenSSL ships with Git for Windows and needs none of that.
+      {"http.sslBackend", "openssl"},
       {"http.https://github.com/.extraheader", "Authorization: Basic #{basic}"}
     ]
   end

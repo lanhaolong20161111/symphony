@@ -84,10 +84,10 @@ defmodule SymphonyElixir.CodexChildEnvTest do
 
     assert {~c"GIT_CONFIG_COUNT", ~c"3"} in env
     assert {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"} in env
-    assert {~c"GIT_CONFIG_KEY_1", ~c"credential.helper"} in env
-    # Empty on purpose: it clears any inherited helper, so a credential manager in the sandbox account
-    # cannot answer for the wrong user.
-    assert {~c"GIT_CONFIG_VALUE_1", ~c""} in env
+    # OpenSSL, not schannel: the sandbox account cannot get a TLS client credential from CryptoAPI,
+    # which is what the push failure actually was (measured on SYM-56, with the header already set).
+    assert {~c"GIT_CONFIG_KEY_1", ~c"http.sslBackend"} in env
+    assert {~c"GIT_CONFIG_VALUE_1", ~c"openssl"} in env
     assert {~c"GIT_CONFIG_KEY_2", ~c"http.https://github.com/.extraheader"} in env
 
     header =
