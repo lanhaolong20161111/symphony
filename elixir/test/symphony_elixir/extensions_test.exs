@@ -524,6 +524,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    # The fork's additions live on /control now: this page is upstream's, so none of them are here.
+    refute html =~ "Tokens / context"
+    refute html =~ "Agent usage"
+    refute html =~ "/control"
+    refute html =~ "Pause"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"

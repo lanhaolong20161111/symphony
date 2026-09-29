@@ -5,8 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Projects, RecorderClient, Settings, TaskComposer}
-  alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
+  alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -14,10 +13,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:payload, load_payload())
-      |> assign(:site, site_info())
-      |> assign(:tickets, load_tickets())
-      |> assign(:usage, load_usage())
-      |> assign_site_projects()
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -61,7 +56,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
 
           <div class="status-stack">
-            <Layouts.page_nav current={:dashboard} />
             <span class="status-badge status-badge-live">
               <span class="status-badge-dot"></span>
               Live
@@ -73,53 +67,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </div>
       </header>
-
-      <%= if @site do %>
-        <Layouts.site_card site={@site} title="这套系统连着哪些仓库" />
-      <% end %>
-
-      <Layouts.project_overview projects={@projects} conflicts={@queue_conflicts} />
-
-      <Layouts.ticket_discussions tickets={@tickets} title="票据状态与讨论（不用去 GitHub）" />
-
-      <section class="section-card">
-        <div class="section-header">
-          <div>
-            <h2 class="section-title">各 agent 的用量（来自 recorder）</h2>
-            <p class="section-copy">
-              为什么看 recorder 而不是上面的 token 卡：<strong>ACP 协议的 <code>usage_update</code>
-              只给上下文窗口的 used/size，不送 token 总数</strong> ⇒ Symphony 自己的 token 统计对
-              <code>backend: acp</code>（dsh / workbuddy）**恒为 0**。
-              recorder 读的是各 agent 自己的落盘记录，所以那里有真数。
-            </p>
-          </div>
-        </div>
-
-        <%= if @usage == [] do %>
-          <p class="empty-state">读不到 recorder（4010 没起，或 <code>:recorder_upstream</code> 不对）。</p>
-        <% else %>
-          <div class="table-wrap">
-            <table class="data-table" style="min-width: 520px;">
-              <thead>
-                <tr>
-                  <th>agent</th>
-                  <th>会话数</th>
-                  <th>tokensUsed 合计</th>
-                  <th>最大上下文窗口</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr :for={row <- @usage}>
-                  <td><span class="mono"><%= row.agent %></span></td>
-                  <td class="numeric"><%= row.sessions %></td>
-                  <td class="numeric"><%= format_int(row.tokens) %></td>
-                  <td class="numeric"><%= format_int(row.context) %></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        <% end %>
-      </section>
 
       <%= if @payload[:error] do %>
         <section class="error-card">
@@ -204,7 +151,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Session</th>
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
-                    <th>Tokens / context</th>
+                    <th>Tokens</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -256,12 +203,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="token-stack numeric">
                         <span>Total: <%= format_int(entry.tokens.total_tokens) %></span>
                         <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
-                        <%= if entry.context do %>
-                          <span class="muted">
-                            上下文 <%= format_int(entry.context.used) %>/<%= format_int(entry.context.size) %>
-                            （<%= entry.context.percent %>%）
-                          </span>
-                        <% end %>
                       </div>
                     </td>
                   </tr>
@@ -390,54 +331,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
-  end
-
-  defp site_info do
-    Settings.site()
-  rescue
-    _error -> nil
-  end
-
-  defp load_tickets do
-    case TaskComposer.list_tickets() do
-      {:ok, tickets} -> tickets
-      {:error, _reason} -> []
-    end
-  rescue
-    _error -> []
-  end
-
-  # From the recorder, because ACP does not report token totals (see the card's own text). No
-  # caching on purpose: this page already re-reads the ticket files on every mount, and a stale
-  # usage number is worse than a slightly slower page.
-  defp load_usage do
-    case RecorderClient.usage() do
-      {:ok, rows} -> rows
-      {:error, _reason} -> []
-    end
-  rescue
-    _error -> []
-  end
-
-  defp load_projects do
-    Projects.list()
-  rescue
-    _error -> []
-  end
-
-  # The registry is read **once**: `Projects.list/0` probes every project over HTTP, so calling it
-  # twice to answer two questions about the same list doubled the cost of an optional panel.
-  #
-  # Two projects on one queue is not a display detail either way: both instances would race for the
-  # same tickets and both janitors would mirror one ticket repository.
-  defp assign_site_projects(socket) do
-    projects = load_projects()
-
-    socket
-    |> assign(:projects, projects)
-    |> assign(:queue_conflicts, Projects.queue_conflicts(projects))
-  rescue
-    _error -> socket |> assign(:projects, []) |> assign(:queue_conflicts, %{})
   end
 
   defp orchestrator do
