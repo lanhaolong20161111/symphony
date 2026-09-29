@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   alias SymphonyElixir.Janitor
 
   @publish_tool "symphony_publish"
+  @comment_tool "ticket_comment"
 
   @publish_description """
   Commit this ticket's workspace, push its branch and open the pull request, then report the branch
@@ -26,6 +27,13 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   -- but without this call the run cannot report the pull-request URL.
   """
 
+  @comment_description """
+  Add a comment to a ticket, in its `## Discussion` section. Use it to leave something the next reader
+  needs -- why you stopped, what you could not verify, an assumption you made -- instead of editing the
+  ticket's body, which cannot be done without risking its structure. The host assigns the comment id
+  and answers with it.
+  """
+
   @publish_input_schema %{
     "type" => "object",
     "additionalProperties" => false,
@@ -33,6 +41,22 @@ defmodule SymphonyElixir.Janitor.AgentTool do
       "ticket" => %{
         "type" => "string",
         "description" => "Ticket identifier to publish, for example SYM-26. Defaults to the running ticket."
+      }
+    }
+  }
+
+  @comment_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["body"],
+    "properties" => %{
+      "ticket" => %{
+        "type" => "string",
+        "description" => "Ticket to comment on, for example SYM-26. Defaults to the running ticket."
+      },
+      "body" => %{
+        "type" => "string",
+        "description" => "The comment. Plain text; newlines are flattened into the single discussion line."
       }
     }
   }
@@ -47,6 +71,11 @@ defmodule SymphonyElixir.Janitor.AgentTool do
         "name" => @publish_tool,
         "description" => @publish_description,
         "inputSchema" => @publish_input_schema
+      },
+      %{
+        "name" => @comment_tool,
+        "description" => @comment_description,
+        "inputSchema" => @comment_input_schema
       }
     ]
   end
@@ -62,6 +91,7 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @publish_tool -> publish(arguments, opts)
+      @comment_tool -> comment(arguments, opts)
       other -> failure(%{"error" => unsupported_error(other)})
     end
   end
@@ -92,6 +122,30 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   # Injected in tests so a tool call never reaches git or GitHub, the same way the tracker adapters
   # take their client.
   defp publish_fun(opts), do: Keyword.get(opts, :publish, &Janitor.publish_now/1)
+
+  defp comment(arguments, opts) do
+    with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
+         body when is_binary(body) <- arguments |> arguments_map() |> Map.get("body") |> presence() do
+      case comment_fun(opts).(ticket, body) do
+        {:ok, result} -> success(Map.merge(%{"ticket" => ticket}, result))
+        {:error, reason} -> failure(%{"error" => %{"message" => describe(reason), "ticket" => ticket}})
+      end
+    else
+      _ ->
+        failure(%{
+          "error" => %{
+            "message" =>
+              "ticket_comment needs a body and a ticket identifier, for example " <>
+                "{\"ticket\": \"SYM-26\", \"body\": \"...\"}.",
+            "supportedTools" => [@comment_tool]
+          }
+        })
+    end
+  rescue
+    error -> failure(%{"error" => %{"message" => Exception.message(error)}})
+  end
+
+  defp comment_fun(opts), do: Keyword.get(opts, :comment, &Janitor.comment_on_ticket/2)
 
   defp ticket_from(arguments, opts) do
     from_arguments = arguments |> arguments_map() |> Map.get("ticket") |> presence()
@@ -125,7 +179,7 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   defp unsupported_error(tool) do
     %{
       "message" => "Unsupported dynamic tool: #{inspect(tool)}.",
-      "supportedTools" => [@publish_tool]
+      "supportedTools" => [@publish_tool, @comment_tool]
     }
   end
 

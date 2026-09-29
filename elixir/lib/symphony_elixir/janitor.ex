@@ -449,10 +449,12 @@ defmodule SymphonyElixir.Janitor do
   """
   @spec discussion_entry(map()) :: String.t()
   def discussion_entry(comment) when is_map(comment) do
-    who = get_in(comment, ["author", "login"]) || "unknown"
-    body = (comment["body"] || "") |> String.replace(~r/\r?\n/, " ") |> String.trim()
-
-    "- **#{who}** (#{comment["createdAt"]}, id=#{comment_id(comment)}): #{body}"
+    Ticket.comment_line(
+      get_in(comment, ["author", "login"]) || "unknown",
+      comment["createdAt"],
+      comment["body"],
+      comment_id(comment)
+    )
   end
 
   defp append_discussion(row, comments) do
@@ -571,6 +573,33 @@ defmodule SymphonyElixir.Janitor do
       false ->
         Logger.debug("janitor: #{id} not published (workspace=#{workspace})")
         :ok
+    end
+  end
+
+  @doc """
+  Adds a comment to a ticket: the file tracker's counterpart of Linear's `commentCreate`.
+
+  A file ticket's mutation API is editing the file, which is why the agent's tool list has no CRUD
+  surface -- but a comment is the one thing an edit cannot do safely: appending to the body by hand can
+  break the ticket's structure. So the host writes it, in the reserved `## Discussion` section, and
+  assigns the id (`local-1`, `local-2`, ...), because GitHub's comment ids belong to the entries the
+  janitor mirrors in from the issue and the two spaces should stay distinguishable.
+
+  Fails closed on the same things `publish_now/2` does: an `id` that is not a plain ticket name, or a
+  ticket file that does not exist.
+  """
+  @spec comment_on_ticket(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def comment_on_ticket(id, body, opts \\ []) when is_binary(id) and is_binary(body) do
+    with :ok <- validate_id(id),
+         cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
+         ticket_path = Path.join(cfg.tickets, "#{id}.md"),
+         true <- File.exists?(ticket_path) or {:error, {:no_such_ticket, id}} do
+      text = File.read!(ticket_path)
+      comment_id = Ticket.next_local_id(text)
+
+      File.write!(ticket_path, Ticket.append_comment(text, "agent", body, comment_id))
+
+      {:ok, %{ticket: id, comment: %{id: comment_id, author: "agent"}}}
     end
   end
 

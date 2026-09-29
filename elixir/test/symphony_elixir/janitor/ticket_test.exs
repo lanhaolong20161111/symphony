@@ -96,6 +96,62 @@ defmodule SymphonyElixir.Janitor.TicketTest do
     end
   end
 
+  describe "append_comment/4 and next_local_id/1" do
+    # A comment is the one thing an agent cannot safely do by editing the body, which is why the host
+    # writes it. The id is local so it cannot collide with the GitHub ids the janitor mirrors in.
+
+    test "appends to an existing Discussion section" do
+      text = """
+      ---
+      id: SYM-8
+      state: in-review
+      ---
+
+      Body
+
+      ## Discussion
+      - **lhl20** (2026-09-29T08:00:00Z, id=123456): first
+      """
+
+      updated = Ticket.append_comment(text, "agent", "second", "local-1")
+
+      assert updated =~ "id=123456): first"
+      assert updated =~ "- **agent** ("
+      assert updated =~ "id=local-1): second"
+      assert length(String.split(updated, "## Discussion")) == 2
+    end
+
+    test "creates the section when there is none" do
+      updated = Ticket.append_comment(@ticket, "agent", "a note", "local-1")
+
+      assert updated =~ "## Discussion"
+      assert updated =~ "id=local-1): a note"
+      # The body above it is untouched.
+      assert updated =~ "Body line one."
+      assert updated =~ "## Validation"
+    end
+
+    test "ids count up from the ones already present" do
+      assert Ticket.next_local_id(@ticket) == "local-1"
+
+      once = Ticket.append_comment(@ticket, "agent", "one", Ticket.next_local_id(@ticket))
+      assert Ticket.next_local_id(once) == "local-2"
+
+      twice = Ticket.append_comment(once, "agent", "two", Ticket.next_local_id(once))
+      assert Ticket.next_local_id(twice) == "local-3"
+    end
+
+    test "newlines are flattened, so a comment cannot forge a section" do
+      updated = Ticket.append_comment(@ticket, "agent", "one\n## Discussion\ninjected", "local-1")
+
+      assert updated =~ "id=local-1): one ## Discussion injected"
+    end
+
+    test "a file with no front matter is returned untouched" do
+      assert Ticket.append_comment("# notes\n", "agent", "x", "local-1") == "# notes\n"
+    end
+  end
+
   describe "get/2" do
     test "reads keys and strips quotes" do
       {:ok, %{front_matter: fm}} = Ticket.split(@ticket)

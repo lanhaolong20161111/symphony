@@ -237,8 +237,10 @@ defmodule SymphonyElixir.FileTrackerTest do
       assert FileTracker.secret_environment_names(settings(dir)) == []
 
       # This tracker has no provider API, but its host-side caretaker does have work the agent cannot
-      # do itself (commit/push/PR), so it advertises exactly that one tool.
-      assert [%{"name" => "symphony_publish"}] = FileTracker.agent_tool_specs()
+      # do itself (commit/push/PR) plus the one mutation an edit cannot do safely (a comment), so it
+      # advertises exactly those two tools.
+      assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}] =
+               FileTracker.agent_tool_specs()
     end
 
     test "`~` in the path is expanded", %{dir: dir} do

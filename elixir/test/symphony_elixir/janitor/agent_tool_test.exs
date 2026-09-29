@@ -17,14 +17,19 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
     end
   end
 
-  test "advertises one tool, taking the ticket as an argument" do
-    assert [%{"name" => "symphony_publish", "description" => description, "inputSchema" => schema}] =
-             AgentTool.tool_specs()
+  test "advertises its tools, each taking the ticket as an argument" do
+    specs = AgentTool.tool_specs()
 
-    assert is_binary(description)
-    assert schema["type"] == "object"
-    assert Map.has_key?(schema["properties"], "ticket")
-    refute schema["additionalProperties"]
+    assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}] = specs
+
+    for %{"description" => description, "inputSchema" => schema} <- specs do
+      assert is_binary(description)
+      assert schema["type"] == "object"
+      assert Map.has_key?(schema["properties"], "ticket")
+      refute schema["additionalProperties"]
+    end
+
+    assert Enum.at(specs, 1)["inputSchema"]["required"] == ["body"]
   end
 
   test "publishes the ticket the call names, and reports branch and pull request" do
@@ -80,11 +85,11 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
     assert Jason.decode!(response["output"])["error"]["message"] =~ "needs a ticket identifier"
   end
 
-  test "an unknown tool is refused, listing the one that exists" do
+  test "an unknown tool is refused, listing the ones that exist" do
     response = AgentTool.execute("something_else", %{}, publish: stub(:never_used))
 
     refute response["success"]
-    assert Jason.decode!(response["output"])["error"]["supportedTools"] == ["symphony_publish"]
+    assert Jason.decode!(response["output"])["error"]["supportedTools"] == ["symphony_publish", "ticket_comment"]
   end
 
   test "an exception while publishing becomes a failed result, not a crashed session" do
@@ -94,5 +99,57 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
 
     refute response["success"]
     assert Jason.decode!(response["output"])["error"]["message"] =~ "no workspace"
+  end
+
+  describe "ticket_comment" do
+    test "comments on the ticket the call names, and reports the assigned id" do
+      comment = fn ticket, body ->
+        send(self(), {:commented, ticket, body})
+        {:ok, %{ticket: ticket, comment: %{id: "local-1", author: "agent"}}}
+      end
+
+      response =
+        AgentTool.execute("ticket_comment", %{"ticket" => "SYM-26", "body" => "stopped: needs a decision"},
+          comment: comment
+        )
+
+      assert response["success"]
+      assert_received {:commented, "SYM-26", "stopped: needs a decision"}
+
+      payload = Jason.decode!(response["output"])
+      assert payload["ticket"] == "SYM-26"
+      assert payload["comment"]["id"] == "local-1"
+    end
+
+    test "falls back to the running ticket, like publish does" do
+      comment = fn ticket, _body -> {:ok, %{ticket: ticket, comment: %{id: "local-1"}}} end
+
+      response =
+        AgentTool.execute("ticket_comment", %{"body" => "note"},
+          issue: %{identifier: "SYM-31"},
+          comment: comment
+        )
+
+      assert response["success"]
+      assert Jason.decode!(response["output"])["ticket"] == "SYM-31"
+    end
+
+    test "a call with no body is a failure, not an empty comment" do
+      response = AgentTool.execute("ticket_comment", %{"ticket" => "SYM-26"}, comment: stub(:never_used))
+
+      refute response["success"]
+      assert Jason.decode!(response["output"])["error"]["message"] =~ "needs a body"
+    end
+
+    test "a failed comment names the ticket and the reason" do
+      comment = fn _ticket, _body -> {:error, {:no_such_ticket, "SYM-999"}} end
+
+      response = AgentTool.execute("ticket_comment", %{"ticket" => "SYM-999", "body" => "hi"}, comment: comment)
+
+      refute response["success"]
+      payload = Jason.decode!(response["output"])
+      assert payload["error"]["ticket"] == "SYM-999"
+      assert payload["error"]["message"] =~ "no ticket file"
+    end
   end
 end

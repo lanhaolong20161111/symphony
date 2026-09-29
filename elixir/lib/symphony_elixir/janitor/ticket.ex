@@ -165,6 +165,72 @@ defmodule SymphonyElixir.Janitor.Ticket do
 
   defp escape_link(value), do: value |> to_string() |> String.replace("\"", "\\\"")
 
+  @doc """
+  Appends one comment to the ticket's `## Discussion` section, creating the section when it is absent.
+
+  The id is the caller's: entries mirrored from GitHub carry GitHub's comment id, and one written here
+  carries a local id (`local-1`, `local-2`, ...), so the two spaces cannot collide and a reader can tell
+  where an entry came from. The body is appended to -- never rewritten -- and a comment that cannot be
+  parsed as a ticket comes back untouched.
+
+  Newlines are flattened for the same reason `problems/1` exists: a comment body must not be able to
+  forge a heading, or a front-matter delimiter, inside the ticket.
+  """
+  @spec append_comment(String.t(), String.t(), String.t(), String.t()) :: String.t()
+  def append_comment(text, author, body, id) do
+    case split(text) do
+      {:ok, %{front_matter: front_matter, body: ticket_body}} ->
+        discussion = ensure_discussion(ticket_body || "")
+
+        "---\n" <>
+          front_matter <>
+          "\n---\n" <>
+          discussion <>
+          "\n" <> comment_line(author, DateTime.utc_now() |> DateTime.to_iso8601(), body, id) <> "\n"
+
+      :skip ->
+        text
+    end
+  end
+
+  @doc """
+  The next local comment id for this ticket, as a string (`local-1` when there are none).
+  """
+  @spec next_local_id(String.t()) :: String.t()
+  def next_local_id(text) when is_binary(text) do
+    highest =
+      ~r/id=local-(\d+)/
+      |> Regex.scan(text)
+      |> Enum.map(fn [_, n] -> String.to_integer(n) end)
+      |> Enum.max(fn -> 0 end)
+
+    "local-#{highest + 1}"
+  end
+
+  @doc """
+  One discussion line: author, timestamp, id and the body, on a single line.
+
+  The timestamp is a string the caller already has -- GitHub's `createdAt` for a mirrored comment, an
+  ISO-8601 stamp for one written here -- so one function owns the line's shape and the two sources
+  cannot drift apart.
+  """
+  @spec comment_line(String.t(), String.t(), String.t(), String.t()) :: String.t()
+  def comment_line(author, timestamp, body, id) do
+    flat = (body || "") |> String.replace(~r/\r?\n/, " ") |> String.trim()
+
+    "- **#{author}** (#{timestamp}, id=#{id}): #{flat}"
+  end
+
+  defp ensure_discussion(body) do
+    trimmed = String.trim_trailing(body)
+
+    if Regex.match?(~r/^## Discussion\s*$/m, trimmed) do
+      trimmed
+    else
+      trimmed <> "\n\n## Discussion"
+    end
+  end
+
   @doc "Builds the text of a brand-new ticket."
   @spec build(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def build(id, title, issue_number, body) do

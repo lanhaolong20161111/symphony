@@ -146,6 +146,11 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
   flattened on the way in: a comment body must not be able to forge a `## Discussion` heading inside
   the ticket. Linear keeps comments and description separate; the file tracker's body *is* the
   description, and that stays the documented difference.
+  **And the agent can write one (round 12)**: the file tracker's second tool, `ticket_comment`, appends
+  to that section and answers with the id it assigned (`local-1`, `local-2`, ...). This is the one
+  mutation an edit cannot do safely -- appending to the body by hand can break the ticket's structure --
+  and it is the file tracker's answer to Linear's `commentCreate`, without pretending a raw GraphQL
+  surface makes sense here.
 - **Attachments / PR links** -> front-matter `links: [{url, title, kind: pr|url}]`, mirroring
   `attachmentLinkGitHubPR` / `attachmentLinkURL`. **Done in round 3**: when the host observes a pull
   request for a ticket -- whether it opened it or found it already open -- it records the link on the
@@ -362,3 +367,11 @@ rounds, which are counted separately.
   commit `c23bef6` ended up on `symphony/SYM-51`, PR #51 was opened, and the ticket carries
   `links: [{url: ".../pull/51", ...}]`. Acceptance items 1, 2 and 4 are therefore demonstrated live; 3
   waits on the credential decision.
+- **Round 12 (2026-09-29)**: the file tracker's agent surface grew its second tool, `ticket_comment`:
+  the agent can append to a ticket's `## Discussion` and the host assigns the id (`local-<n>`, kept
+  distinct from the GitHub ids the janitor mirrors in). It is the one mutation an edit cannot do safely,
+  and the counterpart of Linear's `commentCreate` -- not a copy of `linear_graphql`, which has nothing
+  to mirror here. `Ticket.append_comment/4`, `next_local_id/1` and `comment_line/4` are pure and tested,
+  and the janitor's mirrored entries now share that one line format, so the two sources cannot drift.
+  Next: rebuild so the new tool is live and verify it on a ticket, then §3's credential decision for
+  acceptance item 3.
