@@ -665,8 +665,10 @@ defmodule SymphonyElixir.Janitor do
   defp publish(id, workspace, ticket_path, branch, cfg) do
     record_branch(ticket_path, branch)
 
+    dirty? = git(workspace, ["status", "--porcelain"]) != {:ok, "", 0}
+
     committed =
-      if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} do
+      if dirty? do
         git(workspace, ["checkout", "-B", branch])
         git(workspace, ["add", "-A"])
         git(workspace, ["-c", "user.name=symphony", "-c", "user.email=symphony@local",
@@ -677,21 +679,61 @@ defmodule SymphonyElixir.Janitor do
         false
       end
 
-    pushed =
-      if remote_branch?(workspace, branch) do
-        false
-      else
-        git(workspace, ["push", "-u", "origin", branch])
-        Logger.info("janitor: #{id} pushed #{branch}")
-        true
-      end
+    # The branch is created whether or not there was anything to commit. An agent whose sandbox lets it
+    # work makes its own commit on whatever branch the clone came with, leaving a **clean** tree -- and
+    # the first version of this only created the branch in the dirty case, so the push sent the wrong
+    # ref and `gh pr create` answered "No commits between main and symphony/<id>", with no PR and no
+    # error anywhere the ticket could see. Measured on SYM-50, the first run with
+    # `codex.git_metadata_writable: true`.
+    moved = ensure_branch(workspace, branch)
+
+    pushed = push_branch(id, workspace, branch)
 
     %{
       branch: branch,
       committed: committed,
+      moved_to_branch: moved,
       pushed: pushed,
       pull_request: publish_pull_request(id, workspace, ticket_path, branch, cfg)
     }
+  end
+
+  # `checkout -B` on a clean tree just moves the branch to the commit that is already there, which is
+  # exactly what the agent's own commit needs.
+  defp ensure_branch(workspace, branch) do
+    case git(workspace, ["branch", "--show-current"]) do
+      {:ok, current, 0} -> String.trim(current) != branch and create_branch(workspace, branch)
+      _ -> create_branch(workspace, branch)
+    end
+  end
+
+  defp create_branch(workspace, branch) do
+    case git(workspace, ["checkout", "-B", branch]) do
+      {:ok, _output, 0} ->
+        true
+
+      other ->
+        Logger.warning("janitor: cannot switch to #{branch}: #{inspect(other)}")
+        false
+    end
+  end
+
+  # Only says "pushed" when git agreed: the first version logged success unconditionally, so a failed
+  # push read as a successful one in the log while `gh` reported a blank head sha.
+  defp push_branch(id, workspace, branch) do
+    if remote_branch?(workspace, branch) do
+      false
+    else
+      case git(workspace, ["push", "-u", "origin", branch]) do
+        {:ok, _output, 0} ->
+          Logger.info("janitor: #{id} pushed #{branch}")
+          true
+
+        other ->
+          Logger.warning("janitor: #{id} push failed for #{branch}: #{inspect(other)}")
+          false
+      end
+    end
   end
 
   # An existing pull request is the answer, not a reason to make a second one. A `gh` failure is not
