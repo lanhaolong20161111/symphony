@@ -16,13 +16,21 @@ defmodule SymphonyElixir.RecorderClient do
   @default_url "http://127.0.0.1:4010"
   @timeout_ms 8_000
 
+  # `retry: false` is load-bearing, not tidiness.
+  #
+  # Req retries transport errors by default, with backoff. Measured 2026-09-28 with the recorder down:
+  # `usage/0` took **15 seconds** to give up -- three connection attempts -- and the dashboard
+  # rendering that optional panel took 15.3 s to answer. A panel whose whole content is "read the
+  # recorder" has to fail as fast as it can say so.
+  @req_opts [receive_timeout: @timeout_ms, retry: false]
+
   @doc "The recorder's base URL. `config :symphony_elixir, :recorder_upstream` to move it."
   @spec base_url() :: String.t()
   def base_url, do: Application.get_env(:symphony_elixir, :recorder_upstream, @default_url)
 
   @spec sessions() :: {:ok, [map()]} | {:error, term()}
   def sessions do
-    case Req.get(base_url() <> "/api/sessions", receive_timeout: @timeout_ms) do
+    case Req.get(base_url() <> "/api/sessions", @req_opts) do
       {:ok, %{status: 200, body: %{"sessions" => list}}} when is_list(list) -> {:ok, list}
       {:ok, %{status: status}} -> {:error, {:recorder_http, status}}
       {:error, reason} -> {:error, {:recorder_unreachable, reason}}
@@ -35,7 +43,7 @@ defmodule SymphonyElixir.RecorderClient do
   def handoff_pack(session_key) when is_binary(session_key) do
     url = base_url() <> "/api/sessions/" <> URI.encode_www_form(session_key) <> "/handoff"
 
-    case Req.get(url, receive_timeout: @timeout_ms) do
+    case Req.get(url, @req_opts) do
       {:ok, %{status: 200, body: body}} when is_binary(body) and body != "" -> {:ok, body}
       {:ok, %{status: 200}} -> {:error, :empty_pack}
       {:ok, %{status: status}} -> {:error, {:recorder_http, status}}

@@ -40,6 +40,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.Layouts,
           SymphonyElixirWeb.ObservabilityApiController,
           SymphonyElixirWeb.Presenter,
+          SymphonyElixirWeb.ProjectLive,
           SymphonyElixirWeb.SettingsLive,
           SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,

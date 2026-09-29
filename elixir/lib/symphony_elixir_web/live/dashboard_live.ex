@@ -17,8 +17,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:site, site_info())
       |> assign(:tickets, load_tickets())
       |> assign(:usage, load_usage())
-      |> assign(:projects, load_projects())
-      |> assign(:queue_conflicts, load_queue_conflicts())
+      |> assign_site_projects()
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -426,13 +425,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
     _error -> []
   end
 
-  # Two projects on one queue is not a display detail: both instances would race for the same
-  # tickets and both janitors would mirror one ticket repository. It is shown at the top of the
-  # overview rather than left for someone to notice.
-  defp load_queue_conflicts do
-    Projects.queue_conflicts(Projects.list())
+  # The registry is read **once**: `Projects.list/0` probes every project over HTTP, so calling it
+  # twice to answer two questions about the same list doubled the cost of an optional panel.
+  #
+  # Two projects on one queue is not a display detail either way: both instances would race for the
+  # same tickets and both janitors would mirror one ticket repository.
+  defp assign_site_projects(socket) do
+    projects = load_projects()
+
+    socket
+    |> assign(:projects, projects)
+    |> assign(:queue_conflicts, Projects.queue_conflicts(projects))
   rescue
-    _error -> %{}
+    _error -> socket |> assign(:projects, []) |> assign(:queue_conflicts, %{})
   end
 
   defp orchestrator do

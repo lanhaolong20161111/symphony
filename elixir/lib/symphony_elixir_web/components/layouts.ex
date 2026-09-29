@@ -79,6 +79,7 @@ defmodule SymphonyElixirWeb.Layouts do
     <nav class="status-stack" aria-label="页面导航">
       <.nav_link href="/" label="仪表盘" current={@current == :dashboard} />
       <.nav_link href="/tasks" label="任务管理" current={@current == :tasks} />
+      <.nav_link href="/projects/new" label="新建项目" current={@current == :new_project} />
       <.nav_link href="/settings" label="设置" current={@current == :settings} />
     </nav>
     """

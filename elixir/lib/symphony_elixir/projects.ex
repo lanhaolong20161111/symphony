@@ -253,4 +253,577 @@ defmodule SymphonyElixir.Projects do
       error: nil
     }
   end
+
+  # ── Creating a project ───────────────────────────────────────────────────────
+
+  @doc """
+  The prompt skeleton a new project starts from.
+
+  Generic on purpose: it says how to *behave* (resume rather than restart, do not end a turn while
+  the ticket is still active, write down what you verified) and leaves what the project *is* to the
+  person. Those three are the parts that are hard to get right and the same in every project.
+  """
+  @spec default_prompt() :: String.t()
+  def default_prompt do
+    """
+    你正在做 `{{ issue.identifier }}`：{{ issue.title }}
+
+    {% if attempt %}
+    这是第 {{ attempt }} 次尝试（可能是正常续跑，也可能是失败后重试）：
+    - 从**当前工作区的状态**继续，不要从头再来。
+    - 已经查过、验过的东西不要重复，除非这次改动需要。
+    - 除非被必需权限卡住，**不要**在工单还是进行中时结束回合。
+    {% endif %}
+
+    {% if issue.description %}
+    ## 要做什么
+
+    {{ issue.description }}
+    {% endif %}
+
+    ## 这个项目是什么
+
+    <写 2-3 句：这个仓库是干什么的，代码在哪几个子目录里>
+
+    ## 规矩
+
+    - <这个项目特有的约定：怎么跑测试、什么不许动、提交信息怎么写 …>
+
+    ## 怎么算做完了
+
+    做完**自己验一遍**，然后在票里写下你验了什么、结论是什么。
+    票的 `state` 改成 `in-review`（等人验收）；没做完或做不了就改成 `paused`，并**写清卡在哪**。
+    """
+  end
+
+  @doc """
+  Renders a project's workflow from a form's answers.
+
+  Pure, so the page can render the exact bytes it is about to write -- and a test can prove that what
+  it writes is a workflow the real parser accepts, rather than a shape that merely looks right.
+
+  ## The front matter is ASCII, on purpose
+
+  Measured 2026-09-28: `YamlElixir` reports `invalid_unicode` for some non-ASCII characters in the
+  front matter -- the message pointed at `←` (U+2190) while other characters in the same document
+  were fine, so which code points survive is not something this module is willing to guess. The
+  workflow this machine actually runs has a handful of non-ASCII lines in its front matter and
+  parses, which is exactly why guessing is the wrong move.
+
+  So generated comments are English, generated values are ASCII, and everything meant for a person
+  goes in the **body** -- which is not YAML and takes any language at all. `ascii_problems/1` refuses
+  a form whose values would break this.
+  """
+  @spec render(map()) :: String.t()
+  def render(attrs) do
+    front_matter =
+      [
+        "---",
+        # Comments stay English and values stay ASCII (see the moduledoc). The reasoning for each
+        # key is in the body below, which is not YAML.
+        "server:\n  host: 127.0.0.1\n  port: #{attrs[:port]}",
+        tracker_block(attrs[:queue]),
+        janitor_block(attrs),
+        "workspace:\n  root: #{attrs[:workspace_root]}",
+        "polling:\n  interval_ms: 5000",
+        agent_block(attrs),
+        # Its own block, joined at the top level: interpolating it into an indented heredoc put it
+        # under `agent:` and the parser dropped it entirely -- which is how `adapter` silently fell
+        # back to its default.
+        backend_block(attrs),
+        hooks_block(attrs)
+      ]
+      |> Enum.join("\n\n")
+
+    front_matter <> "\n---\n\n" <> (attrs[:prompt] || default_prompt())
+  end
+
+  defp tracker_block(queue) do
+    """
+    tracker:
+      kind: file
+      provider:
+        # NOTE: this key and janitor.tickets_path below are THE SAME DIRECTORY declared twice.
+        # This one is what the orchestrator polls (where work is found); the other is what the
+        # janitor mirrors. Change one and the instance keeps polling the other -- silently.
+        path: #{queue}
+      required_labels: []
+      active_states: [open, ready]
+      terminal_states: [done, cancelled]\
+    """
+  end
+
+  defp janitor_block(attrs) do
+    """
+    janitor:
+      enabled: true
+      interval_ms: 30000
+      issues_repo: #{attrs[:issues_repo]}
+      tickets_repo: #{attrs[:tickets_repo]}
+      tickets_path: #{attrs[:queue]}\
+    """
+  end
+
+  defp agent_block(attrs) do
+    """
+    agent:
+      backend: #{attrs[:backend] || "codex"}
+      max_concurrent_agents: #{attrs[:max_concurrent_agents] || 2}
+      max_turns: #{attrs[:max_turns] || 5}\
+    """
+  end
+
+  # Every comment here is English because the front matter is ASCII-only; the reasoning is written up
+  # in the body the person can read.
+  defp backend_block(%{backend: "acp"} = attrs) do
+    """
+    acp:
+      adapter: #{attrs[:adapter] || "dsh"}
+      model: #{attrs[:model] || "auto"}
+      # <- path to the adapter's CLI
+      cli_path: #{attrs[:cli_path] || "<path-to-adapter-cli>"}
+      init_timeout_ms: 150000\
+    """
+  end
+
+  defp backend_block(%{backend: "commandcode"} = attrs) do
+    """
+    commandcode:
+      model: #{attrs[:model] || "<model-name>"}\
+    """
+  end
+
+  defp backend_block(attrs) do
+    """
+    codex:
+      # WARNING: codex has no model field -- the model lives inside this shell string. A ticket
+      # asking for a different model therefore cannot be honoured on codex, and says so.
+      command: codex --config 'model="#{attrs[:model] || "<model-name>"}"' app-server\
+    """
+  end
+
+  # A block scalar's indentation is set by its first line, so every line inside `after_create: |`
+  # has to carry the same prefix -- mixing two widths ends the block early and the parser then sees a
+  # scalar where a key should be.
+  @hook_indent "        "
+
+  defp hooks_block(attrs) do
+    """
+    hooks:
+      timeout_ms: 600000
+      after_create: |
+    #{@hook_indent}# Ask git, not the filesystem: inside a worktree `.git` is a FILE, so
+    #{@hook_indent}# `[ ! -d .git ]` is true and this would clone over an existing checkout.
+    #{@hook_indent}if ! git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    #{clone_lines(attrs[:repos] || [])}
+    #{@hook_indent}fi#{env_prep_block(attrs)}\
+    """
+  end
+
+  defp clone_lines([]), do: "#{@hook_indent}  echo 'no repositories declared' >&2"
+
+  defp clone_lines(repos) do
+    repos
+    |> Enum.map_join("\n", fn repo ->
+      # Several repositories means one subdirectory each -- several code bases in one directory, which
+      # the prompt has to say something about.
+      target = if length(repos) > 1, do: " " <> Path.basename(repo), else: " ."
+
+      "#{@hook_indent}  git clone --depth 1 #{repo_url(repo)}#{target}"
+    end)
+  end
+
+  defp env_prep_block(%{env_prep: prep}) when is_binary(prep) and prep != "" do
+    prep
+    |> String.split("\n")
+    |> Enum.map_join("\n", &(@hook_indent <> &1))
+    |> then(&("\n" <> &1))
+  end
+
+  defp env_prep_block(_attrs), do: ""
+
+  defp repo_url(repo) do
+    if String.contains?(repo, "/") and not String.starts_with?(repo, ["http", "git@"]),
+      do: "https://github.com/#{repo}",
+      else: repo
+  end
+
+  @doc """
+  Everything that must be true before a project file is written.
+
+  Each message is something a person can act on, because each of these is a way a project can be
+  created and then not run:
+
+    * a **queue another project already claims** -- two instances racing for the same tickets and two
+      janitors mirroring one ticket repository (measured, during the WorkBuddy smoke test);
+    * a **queue directory that does not exist** -- the create path opens the GitHub issue first and
+      writes the ticket second, so this leaves an issue with no ticket;
+    * a **port another project already listens on**;
+    * a **name**, repo or workspace that is missing or malformed.
+
+  `existing` is passed in rather than read, so the rule can be tested without a registry.
+  """
+  @spec validate(map(), [project()], keyword()) :: :ok | {:error, [String.t()]}
+  def validate(attrs, existing, opts \\ []) do
+    repo_exists? = Keyword.get(opts, :repo_exists?, &repo_exists?/1)
+
+    problems =
+      name_problems(attrs, existing) ++
+        queue_problems(attrs, existing, repo_exists?) ++
+        port_problems(attrs, existing) ++
+        repo_problems(attrs, repo_exists?) ++
+        workspace_problems(attrs) ++
+        ascii_problems(attrs)
+
+    case problems do
+      [] -> :ok
+      problems -> {:error, problems}
+    end
+  end
+
+  # Measured 2026-09-28: this parser reports `invalid_unicode` for a non-ASCII **value** in the front
+  # matter -- quoting does not help, and it happens whether or not the value also contains `<`/`>`.
+  # Chinese in a **comment** or in the **body** is fine, which is why the workflows on this machine
+  # never hit it: their values are paths and URLs, and their Chinese lives in comments and prompts.
+  #
+  # So the rule for a front-matter value is ASCII, and the fields that carry free text a person might
+  # write Chinese into -- environment prep above all -- are checked for it here rather than producing
+  # a workflow that will not load.
+  defp ascii_problems(attrs) do
+    [
+      {"队列目录", attrs[:queue]},
+      {"issues 仓库", attrs[:issues_repo]},
+      {"tickets 仓库", attrs[:tickets_repo]},
+      {"工作区根目录", attrs[:workspace_root]},
+      {"模型", attrs[:model]},
+      {"adapter", attrs[:adapter]},
+      {"环境准备", attrs[:env_prep]}
+    ]
+    |> Enum.flat_map(&ascii_problem/1)
+    |> Kernel.++(Enum.flat_map(attrs[:repos] || [], &ascii_problem({"代码仓库", &1})))
+  end
+
+  defp ascii_problem({_label, value}) when value in [nil, ""], do: []
+
+  defp ascii_problem({label, value}) do
+    if String.printable?(value) and String.match?(value, ~r/^[\x20-\x7E\r\n\t]*$/) do
+      []
+    else
+      [
+        "#{label}里有非 ASCII 字符（中文等）⇒ 这份 workflow **解析不了** ✗\n" <>
+          "　实测：front matter 的【值】里放非 ASCII，解析器报 invalid_unicode（加引号也没用）；\n" <>
+          "　注释和正文里放中文没问题 ✓ ⇒ 说明写进 `#` 注释，别写进值里"
+      ]
+    end
+  end
+
+  defp name_problems(attrs, existing) do
+    name = attrs[:name] || ""
+
+    cond do
+      String.trim(name) == "" ->
+        ["项目名不能为空（它就是文件名）"]
+
+      not Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/, name) ->
+        ["项目名只能用字母数字和 . _ -，且不能以符号开头：#{name}"]
+
+      String.downcase(name) == "readme" ->
+        ["`README` 是注册表的说明，不能当项目名"]
+
+      Enum.any?(existing, &(&1.name == name)) ->
+        ["已经有一个叫 #{name} 的项目（#{Path.basename(registry_dir())}/#{name}.md）"]
+
+      true ->
+        []
+    end
+  end
+
+  defp queue_problems(attrs, existing, repo_exists?) do
+    queue = attrs[:queue] || ""
+
+    cond do
+      String.trim(queue) == "" ->
+        ["队列目录不能为空"]
+
+      not File.dir?(queue) ->
+        ["队列目录不存在：#{queue}\n　先建好目录再来 —— 否则会【先建 issue、后写票失败】，\n　留下一个没有票据的 issue"]
+
+      owner = Enum.find(existing, &(&1.queue == queue)) ->
+        [
+          "这个队列已经被项目 #{owner.name} 占了\n" <>
+            "　**一个队列只能属于一个实例**：两个编排器会抢同一批票，两个 janitor 会镜像同一个票据仓库"
+        ]
+
+      # The tickets repository has to be *this directory's* remote, and it has to exist -- unless the
+      # form says to create it, in which case it is created and cloned before the file is written.
+      true ->
+        queue_repo_problems(attrs, queue, repo_exists?)
+    end
+  end
+
+  defp queue_repo_problems(attrs, queue, repo_exists?) do
+    repo = attrs[:tickets_repo]
+
+    cond do
+      attrs[:create_tickets_repo] ->
+        []
+
+      not tickets_clone?(queue, repo) ->
+        [
+          "队列目录不是一个指向 #{repo} 的 git clone：#{queue}\n" <>
+            "　janitor 是在**这个目录里** git add/commit/push 的 ⇒ 它必须就是那个票据仓库的检出 ✓\n" <>
+            "　（勾上「帮我建」我会建仓库 + clone 过来；已存在的话自己 `git clone <url> .` 也行）"
+        ]
+
+      not repo_exists?.(repo) ->
+        ["GitHub 上没有这个票据仓库：#{repo}（勾「帮我建」会自动创建）"]
+
+      true ->
+        []
+    end
+  end
+
+  defp port_problems(attrs, existing) do
+    port = attrs[:port]
+
+    cond do
+      not is_integer(port) ->
+        ["端口必须是整数"]
+
+      port < 1024 or port > 65_535 ->
+        ["端口要在 1024–65535 之间：#{port}"]
+
+      owner = Enum.find(existing, &(&1.port == port)) ->
+        ["端口 #{port} 已经被项目 #{owner.name} 用了"]
+
+      true ->
+        []
+    end
+  end
+
+  defp repo_problems(attrs, repo_exists?) do
+    []
+    |> require_repo(:issues_repo, "issues 仓库", attrs[:issues_repo], attrs[:create_issues_repo], repo_exists?)
+    |> require_repo(:tickets_repo, "tickets 仓库", attrs[:tickets_repo], attrs[:create_tickets_repo], repo_exists?)
+    |> add_problem(
+      (attrs[:repos] || []) == [],
+      "至少要有一个代码仓库（hooks.after_create 里的 git clone）—— 否则 agent 会跑在一个空目录里"
+    )
+  end
+
+  # A repo that does not exist is an error unless the form says to create it, because the first
+  # issue creation would fail and the project would look fine until then. A repo that *does* exist
+  # while "create" is ticked is only a note: `gh repo create` would fail, and the form says it will
+  # not be run.
+  defp require_repo(problems, _key, label, value, create?, repo_exists?) do
+    cond do
+      not valid_repo?(value) ->
+        problems ++ ["#{label}要写 owner/仓库 的形式，现在是：#{inspect(value)}"]
+
+      create? and repo_exists?.(value) ->
+        problems ++ ["#{label} #{value} 已经存在 ⇒ 勾了「帮我建」也不会重复建（去掉勾选即可）"]
+
+      not create? and not repo_exists?.(value) ->
+        problems ++ ["GitHub 上没有 #{label}：#{value}（勾「帮我建」会自动创建）"]
+
+      true ->
+        problems
+    end
+  end
+
+  defp valid_repo?(value) when is_binary(value),
+    do: Regex.match?(~r{^[\w.\-]+/[\w.\-]+$}, value)
+
+  defp valid_repo?(_value), do: false
+
+  @doc "Whether `owner/name` exists on GitHub, judged by `gh repo view`'s own exit status."
+  @spec repo_exists?(String.t() | nil) :: boolean()
+  def repo_exists?(repo) when is_binary(repo) do
+    case Shell.run("gh", ["repo", "view", repo, "--json", "name"], timeout: 15_000) do
+      {:ok, _output, 0} -> true
+      _ -> false
+    end
+  end
+
+  def repo_exists?(_repo), do: false
+
+  @doc """
+  Creates `owner/name` on GitHub, with one README commit.
+
+  `--add-readme` is not decoration: the janitor mirrors the ticket repository with
+  `pull --rebase --autostash` and `push`, and an entirely empty repository has no branch to pull.
+  Private by default -- a task queue is not public reading.
+  """
+  @spec create_repo(String.t(), keyword()) :: :ok | {:error, term()}
+  def create_repo(repo, opts \\ []) do
+    visibility = if Keyword.get(opts, :public, false), do: "--public", else: "--private"
+
+    args = ["repo", "create", repo, visibility, "--add-readme"]
+
+    case Shell.run("gh", args, timeout: 120_000) do
+      {:ok, _output, 0} -> :ok
+      {:ok, output, status} -> {:error, {:gh_exit, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Makes sure `path` is a clone of `repo`.
+
+  Already a checkout of it ⇒ `:ok`. A non-empty directory that is not ⇒ an error naming both, because
+  the alternative is cloning into whatever is already there. An empty directory (or a fresh one) is
+  cloned into, the same way the workspace hooks do it.
+  """
+  @spec ensure_clone(String.t(), String.t()) :: :ok | {:error, term()}
+  def ensure_clone(repo, path) do
+    cond do
+      tickets_clone?(path, repo) ->
+        :ok
+
+      File.dir?(path) and File.ls!(path) != [] ->
+        {:error, {:not_empty, path}}
+
+      true ->
+        File.mkdir_p!(path)
+        url = if String.starts_with?(repo, ["http", "git@"]), do: repo, else: "https://github.com/#{repo}"
+
+        case Shell.run("git", ["clone", url, "."], cd: path, timeout: 300_000) do
+          {:ok, _output, 0} -> :ok
+          {:ok, output, status} -> {:error, {:git_exit, status, output}}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # The directory is a checkout *of that repository* -- not merely "a git directory", which is what a
+  # clone of something else would also be.
+  defp tickets_clone?(path, repo) when is_binary(path) and is_binary(repo) do
+    case Shell.run("git", ["-C", path, "remote", "get-url", "origin"], timeout: 10_000) do
+      {:ok, url, 0} -> String.contains?(url, repo)
+      _ -> false
+    end
+  end
+
+  defp tickets_clone?(_path, _repo), do: false
+
+  defp workspace_problems(attrs) do
+    add_problem([], String.trim(attrs[:workspace_root] || "") == "", "工作区根目录不能为空")
+  end
+
+  defp add_problem(problems, true, message), do: problems ++ [message]
+  defp add_problem(problems, false, _message), do: problems
+
+  @doc """
+  Things that will still work but that a person should know before starting it.
+
+  The credential check is a warning rather than an error on purpose: what matters is whether the
+  token is visible to the **instance that will run this project**, and this page can only see its
+  own environment. A project started from a shell that has the variable is fine even when this
+  process cannot see it.
+  """
+  @spec warnings(map()) :: [String.t()]
+  def warnings(attrs) do
+    credential_warnings(attrs) ++ workspace_warnings(attrs)
+  end
+
+  # One warning per missing credential, rather than one expression that tries to say both.
+  defp credential_warnings(attrs) do
+    case {attrs[:backend] || "codex", attrs[:adapter] || "dsh"} do
+      {"acp", "workbuddy"} ->
+        missing_credential_warning("workbuddy", "CODEBUDDY_AUTH_TOKEN")
+
+      {"acp", "dsh"} ->
+        missing_credential_warning("dsh", "CMD_API_KEY")
+
+      _other ->
+        []
+    end
+  end
+
+  defp missing_credential_warning(agent, variable) do
+    if credential_visible?(variable) do
+      []
+    else
+      [
+        "⚠️ 这个项目要用 #{agent}，但 #{variable} 对**本进程**不可见 ✓" <>
+          "　（对新进程来说可能是可见的 —— 从新终端启动就没问题；这一页只能看到自己的环境）"
+      ]
+    end
+  end
+
+  defp workspace_warnings(attrs) do
+    root = attrs[:workspace_root] || ""
+
+    if File.dir?(root) do
+      []
+    else
+      ["工作区根目录还不存在 —— 没关系，每个工单会自己创建（#{root}）"]
+    end
+  end
+
+  defp credential_visible?(name) do
+    case Enum.find(Settings.credentials(), &(&1.name == name)) do
+      %{} = credential -> Map.get(credential, :visible?) == true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  @doc """
+  Writes the project file, then commits it in the registry repository.
+
+  The file is written **first** and the commit is best effort, because a project that exists but is
+  not committed is recoverable by hand while a commit that failed after nothing was written is just
+  a lost form. What happened to the commit is returned, not swallowed.
+  """
+  @spec create(map(), [project()]) :: {:ok, String.t(), [String.t()]} | {:error, term()}
+  def create(attrs, existing) do
+    case validate(attrs, existing) do
+      :ok ->
+        # Repositories first, the project file second. A file naming a repository that was never
+        # created leaves a project that looks configured and fails on its first task -- so nothing is
+        # written if provisioning does not finish, and the form still holds what was typed.
+        with :ok <- provision(attrs) do
+          path = Path.join(registry_dir(), "#{attrs[:name]}.md")
+          File.mkdir_p!(registry_dir())
+          File.write!(path, render(attrs))
+
+          {:ok, path, commit_note(path)}
+        end
+
+      {:error, problems} ->
+        {:error, {:invalid, problems}}
+    end
+  end
+
+  defp provision(attrs) do
+    with :ok <- maybe_create(attrs[:issues_repo], attrs[:create_issues_repo]),
+         :ok <- maybe_create(attrs[:tickets_repo], attrs[:create_tickets_repo]),
+         :ok <- ensure_clone(attrs[:tickets_repo], attrs[:queue]) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:provisioning_failed, reason}}
+    end
+  end
+
+  defp maybe_create(repo, create?) when create? in [true, "true"], do: create_repo(repo, public: false)
+  defp maybe_create(_repo, _create?), do: :ok
+
+  defp commit_note(path) do
+    name = Path.basename(path)
+
+    with {:ok, _out, 0} <- Shell.run("git", ["-C", registry_dir(), "add", name], timeout: 10_000),
+         {:ok, _out, 0} <-
+           Shell.run(
+             "git",
+             ["-C", registry_dir(), "commit", "-m", "projects: add #{name}", "--", name],
+             timeout: 10_000
+           ) do
+      ["已在注册表仓库里提交（#{name}）"]
+    else
+      other ->
+        ["⚠️ 文件写了，但没提交到注册表仓库（#{inspect(other)}）—— 自己 `git -C #{registry_dir()} add -A && commit` 一下"]
+    end
+  end
 end
