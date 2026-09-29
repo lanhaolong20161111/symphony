@@ -222,6 +222,13 @@ configured roots and the caller is a language model -- and refuses when the tick
 workspace is missing. A misconfigured janitor block therefore fails loudly instead of publishing
 somewhere unexpected.
 
+**Order matters, and it was measured.** The first version of the workflow prompt put the call *after*
+setting the ticket to `in-review`, and the run never reached it: leaving the active states is what
+stops the agent (`Issue moved to non-active state ... stopping active agent`), so the sweep published
+that ticket instead (SYM-43, PR #35). The prompt and the tool description now say publish **first**,
+then `in-review`. A run that ignores the order still gets published -- that is what the sweep is for --
+but it cannot report the pull-request URL.
+
 ## Board conventions
 
 - `README.md` is the repository's landing page: a link bar with per-state counts, then the full table.

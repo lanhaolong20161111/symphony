@@ -20,9 +20,10 @@ defmodule SymphonyElixir.Janitor.AgentTool do
 
   @publish_description """
   Commit this ticket's workspace, push its branch and open the pull request, then report the branch
-  and the pull-request URL. Call it once, after the work and its validation are done and the ticket
-  is set to `in-review`. The host also publishes on its own, so a failure here is not fatal -- but
-  without this call the run cannot report the pull-request URL.
+  and the pull-request URL. Call it once, when the work and its validation are done, and call it
+  **before** setting the ticket to `in-review`: that state change is what stops your run, so anything
+  placed after it never happens. The host also publishes on its own, so a failure here is not fatal
+  -- but without this call the run cannot report the pull-request URL.
   """
 
   @publish_input_schema %{
