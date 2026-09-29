@@ -198,6 +198,34 @@ example a worktree whose `gitdir` lives outside the workspace, inside a `writabl
 a token handed to the child environment. Neither is in place, and the host-side janitor is what
 publishes instead.
 
+#### The two halves separate cleanly (measured, SYM-47)
+
+The `.git` half **is** reachable by configuration. In `codex-rs/protocol/src/permissions.rs` the
+protected names (`.git`, `.agents`, `.codex`) are a hard-coded constant, but the read carveout is
+suppressed when an explicit entry targets the same resolved path — and at equal depth write beats
+read. Measured on SYM-47 by adding that ticket's own `.git` to `writableRoots`:
+
+| probe | without the entry (SYM-46) | with the entry (SYM-47) |
+|---|---|---|
+| `icacls .git` | per-root SID `(DENY)(W,D,Rc,DC)` | no DENY; that SID has `(OI)(CI)(M)` |
+| write a file into `.git` | `Access ... is denied` | exit 0 |
+| `git checkout -b` | `cannot lock ref …` | `Switched to a new branch` |
+| `git commit` | `index.lock: Permission denied` | committed (`9f0e708`) |
+| `git push` | — | `schannel: SEC_E_NO_CREDENTIALS`, exit 128 |
+
+The `push` half is **not** a permission problem and no sandbox setting fixes it: the token lives in
+the invoking user's Windows Credential Manager (the sandbox account is a different local user,
+`CodexSandboxOnline`), `.ssh` is deliberately excluded from the sandbox's read roots, and the sandbox
+account has no usable credential context at all (`SEC_E_NO_CREDENTIALS`). A usable push needs a
+credential injected into the child environment (`GH_TOKEN`/`GITHUB_TOKEN`, a credential helper), which
+is the opposite of what this fork does on purpose: Symphony strips tracker secrets from the child.
+
+One practical catch for the `.git` half: the entry has to be the **exact** path, and our workspaces
+are per ticket (`workspace_root/<id>`), so a static `writableRoots` list cannot cover them. The shape
+that could is a `[permissions]` profile with explicit per-path `write` entries — which is an
+orchestrator feature (it must materialise the workspace path into the session config), not a workflow
+line. Until that exists, the host-side janitor stays the only publisher.
+
 ### 2. `hooks.after_run` does not fire on the path that matters
 
 `agent_runner.ex` wraps all turns in `try/after`, so `after_run` looks like the natural place to
