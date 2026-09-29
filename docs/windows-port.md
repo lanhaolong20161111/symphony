@@ -125,7 +125,10 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
    Linear's rule: gate while a blocker is unfinished **and** the ticket is in the first `active_states`
    entry (Linear hardcodes `Todo`, `client.ex:501-503`; here the list's order decides). This replaced
    "gate in every state", which is a deliberate behaviour change.
-7. `url` is derived when absent (`janitor.ex:929-931` already does this for tickets).
+7. `url` stays `nil` in the issue record unless the ticket declares one -- the SPEC allows `string or
+   null` and inventing a URL from a repository name would be the tracker guessing at a convention it
+   does not own. The janitor, which does know its repository, derives the URL for its own surfaces
+   (`janitor.ex:929-931`).
 8. `created_at`/`updated_at` come from front matter, RFC3339 or `nil`. Do **not** substitute file
    mtime: it flips on unrelated edits.
 9. Agent tool results keep `%{"success", "output", "contentItems"}` and the "unknown tool -> structured
@@ -135,9 +138,12 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 
 ### 4.2 Emulated, and labelled as emulation
 
-- **Comments** -> the reserved `## Discussion` section the janitor already writes, with a stable id,
-  author and timestamp per entry, editable in place, never rewriting the description. Linear keeps
-  comments and description separate; the file tracker's body *is* the description, so state that.
+- **Comments** -> the reserved `## Discussion` section, one line per comment carrying the author, the
+  timestamp and **the id GitHub gave the comment** (`id=<N>`, `id=0` when the URL carries none), so an
+  entry can be named and edited the way a Linear comment can. **Done in round 4.** Newlines are
+  flattened on the way in: a comment body must not be able to forge a `## Discussion` heading inside
+  the ticket. Linear keeps comments and description separate; the file tracker's body *is* the
+  description, and that stays the documented difference.
 - **Attachments / PR links** -> front-matter `links: [{url, title, kind: pr|url}]`, mirroring
   `attachmentLinkGitHubPR` / `attachmentLinkURL`. **Done in round 3**: when the host observes a pull
   request for a ticket -- whether it opened it or found it already open -- it records the link on the
@@ -147,9 +153,13 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 - **Assignee** -> `assignee_id` front matter, already parsed. `me` is unsupported: there is no viewer
   query analogue, so the honest emulation is a configured worker identity.
 - **State objects with ids** -> states stay the declared config lists; no ids in the issue record.
-- **Pagination / rate limits** -> not applicable; mirror the *error contract* instead, and pick one
-  malformed-record rule and document it (Linear drops one bad candidate record and fails a whole
-  id-refresh; the file tracker currently fails an entire fetch on one bad YAML file).
+- **Pagination / rate limits** -> not applicable; mirror the *error contract* instead. The
+  malformed-record rule is **deliberately the stricter one** and stays that way: Linear drops one bad
+  candidate record from a state-list read and fails a whole id-refresh
+  (`linear/client.ex:413-428, 419-421`), while the file tracker fails the entire fetch on one
+  unparseable YAML file (`tracker/file.ex`'s moduledoc says why -- a `.yaml` file is an explicit claim
+  to be a ticket, and a silently dropped ticket is the "empty backlog looks like no work" failure this
+  module exists to avoid). The difference is documented here rather than smoothed over.
 
 ### 4.3 Out of scope, deliberately
 
@@ -259,3 +269,10 @@ rounds, which are counted separately.
   alone rather than clobbered.
   Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then the
   remaining §4.1 items (comments with stable ids, derived `url`, the malformed-record rule).
+- **Round 5 (2026-09-29)**: comments became addressable -- each `## Discussion` entry now carries the
+  id GitHub gave the comment (`id=<N>`), with newlines flattened so a body cannot forge a section. The
+  remaining two parity questions were settled by decision rather than code: `url` stays `nil` unless
+  the ticket declares one (the tracker does not own that convention; the janitor derives it for its own
+  surfaces), and the malformed-record rule stays the stricter one, documented with its reason.
+  Next: the token decision (§3) and the prompt/skills/permission switch (§5 leg 2), which together are
+  the last thing between here and the end-to-end acceptance in §6.

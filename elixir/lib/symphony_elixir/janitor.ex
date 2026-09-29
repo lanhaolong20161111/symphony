@@ -436,15 +436,29 @@ defmodule SymphonyElixir.Janitor do
     end
   end
 
+  @doc """
+  One `## Discussion` entry for a GitHub comment.
+
+  Linear's comments are addressable objects -- an id, an author, a timestamp, editable in place -- and
+  a Markdown section is the closest a file ticket can get: the id GitHub gave the comment goes in the
+  entry, so a later reader (or a tool) can name one and edit exactly it. `id=0` means the comment's
+  URL carried no id, which is visible rather than silent.
+
+  Newlines are flattened because a ticket's front matter and body are line-oriented: a comment whose
+  body contains `---` or `## Discussion` must not be able to forge structure in the ticket.
+  """
+  @spec discussion_entry(map()) :: String.t()
+  def discussion_entry(comment) when is_map(comment) do
+    who = get_in(comment, ["author", "login"]) || "unknown"
+    body = (comment["body"] || "") |> String.replace(~r/\r?\n/, " ") |> String.trim()
+
+    "- **#{who}** (#{comment["createdAt"]}, id=#{comment_id(comment)}): #{body}"
+  end
+
   defp append_discussion(row, comments) do
     text = File.read!(row.path)
 
-    block =
-      Enum.map_join(comments, "\n", fn comment ->
-        who = get_in(comment, ["author", "login"]) || "unknown"
-        body = (comment["body"] || "") |> String.replace(~r/\r?\n/, " ") |> String.trim()
-        "- **#{who}** (#{comment["createdAt"]}): #{body}"
-      end)
+    block = Enum.map_join(comments, "\n", &discussion_entry/1)
 
     text =
       if Regex.match?(~r/^## Discussion/m, text) do

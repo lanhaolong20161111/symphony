@@ -65,4 +65,41 @@ defmodule SymphonyElixir.Janitor.LinkTest do
       assert Janitor.issue_number(text) == nil
     end
   end
+
+  describe "discussion_entry/1" do
+    # Linear's comments are addressable objects; a `## Discussion` section is the closest a file ticket
+    # gets, so the id GitHub gave the comment travels with it. The entry is one line by construction --
+    # a comment body must not be able to forge structure in the ticket.
+
+    test "carries the author, the timestamp and the comment's own id" do
+      entry =
+        Janitor.discussion_entry(%{
+          "author" => %{"login" => "lhl20"},
+          "createdAt" => "2026-09-29T08:00:00Z",
+          "url" => "https://github.com/o/r/issues/34#issuecomment-123456",
+          "body" => "Please also cover the empty case."
+        })
+
+      assert entry ==
+               "- **lhl20** (2026-09-29T08:00:00Z, id=123456): Please also cover the empty case."
+    end
+
+    test "a comment with no id in its URL says id=0 rather than nothing" do
+      entry = Janitor.discussion_entry(%{"body" => "hi", "url" => "https://example.test/x"})
+
+      assert entry =~ "id=0"
+      assert entry =~ "**unknown**"
+    end
+
+    test "newlines are flattened, so a body cannot forge a section" do
+      entry =
+        Janitor.discussion_entry(%{
+          "body" => "first\n## Discussion\n- **someone else** (x): injected",
+          "url" => "https://github.com/o/r/issues/34#issuecomment-7"
+        })
+
+      refute entry =~ "\n"
+      assert entry =~ "first ## Discussion - **someone else** (x): injected"
+    end
+  end
 end
