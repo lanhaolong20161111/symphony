@@ -86,14 +86,44 @@ The mechanism is now in place (both keys default off, so nothing changes until a
   `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*`, which is what makes git stop refusing with
   `fatal: detected dubious ownership` (the sandbox account is not the workspace's owner).
 
-Still open: the token itself, and the scope decision below. Until that lands, `symphony_publish` and
-the janitor remain the only publishers -- which is fine, they are idempotent with the agent doing it.
+Still open: the token itself, and the scope decision below.
+
+**The mechanism grew the two pieces a push actually needs (round 14, commit `ab5bb4c`).** An entry in
+`codex.child_env` is now either `"NAME"` or `"CHILD=SOURCE"`, and the mapping form is not decoration:
+`gh` prefers `GH_TOKEN` over the OS credential store, so naming it that in Symphony's own environment
+would move the janitor's GitHub calls onto the agent's narrower token and break the ticket mirror. So the
+workflow says `child_env: ["GH_TOKEN=BEEKEEPER_AGENT_TOKEN"]` -- the child gets `GH_TOKEN`, the value is
+read from `BEEKEEPER_AGENT_TOKEN` -- and when that source is absent the entry is simply omitted, which is
+why the line could be committed before the token existed. Passing a GitHub token also brings
+`credential.helper=!gh auth git-credential`, without which an HTTPS push from the sandbox account has no
+credential at all (that account has no credential store of its own).
+
+**And the behaviour without a token is measured, not assumed** (SYM-53, the first ticket to try
+pushing itself). The agent committed for itself (`d754576 | Symphony Agent | docs(readme): append
+symphony-agent-push marker for SYM-53`), tried `git push -u origin main`, and failed with the raw error
+it then reported through `ticket_comment`:
+
+```
+fatal: unable to access 'https://github.com/lanhaolong20161111/beekeeper/':
+schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)
+```
+
+It did not retry, called `symphony_publish` as the prompt says, and the host pushed the agent's commit
+and opened PR #55 -- so the fallback path is real, and the only thing missing for acceptance item 3 is
+the credential.
+
+**A sandbox limitation the same run exposed**: `mix precommit` **cannot start** inside the agent sandbox
+(`Mix.Sync.PubSub` dies), so the `push` skill demanding it would have blocked every push for a reason
+unrelated to the change. The skill now says to report that and continue with the check the ticket names
+(target repository `1df8639`); the repository gate is re-run where it can run.
 
 **This is the one place the port makes the machine weaker**, so it is stated plainly: the token
 available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
 repository it can see, and anything in the child's environment is readable by the agent. A
 fine-grained PAT limited to the target repository is the honest choice for `codex.child_env`;
-injecting the broad token is not.
+injecting the broad token is not. The decision taken: a fine-grained PAT with **Contents: Read and
+write** and **Pull requests: Read and write**, on `lanhaolong20161111/beekeeper` only, handed over as the
+User-scope variable `BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript).
 
 ## 4. The tracker: what "as consistent as Linear" means
 
@@ -383,3 +413,16 @@ rounds, which are counted separately.
   `symphony/SYM-52`, PR #53 was opened and the link recorded on the ticket. The deployment prompt gained
   one line pointing at the tool, so a run does not have to discover it from the tool list alone.
   Next: §3's credential decision, which is the last thing between here and acceptance item 3.
+- **Round 14 (2026-09-29)**: the credential channel is complete and the no-credential path is measured.
+  `codex.child_env` took the mapping form (`"GH_TOKEN=BEEKEEPER_AGENT_TOKEN"`) so the host process never
+  holds `GH_TOKEN` -- `gh` would otherwise move the janitor's own calls onto the agent's narrower token --
+  and passing a GitHub token now also brings git's `gh` credential helper, without which an HTTPS push
+  from the sandbox account has no credential at all (`ab5bb4c`). The deployment prompt moved to upstream's
+  order: the agent commits, pushes and opens the PR itself, with `symphony_publish` as the documented
+  fallback. SYM-53 measured that fallback: the agent's own commit `d754576`, then
+  `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` on its push, no retry, a call to
+  `symphony_publish`, and PR #55 from the host -- plus a `ticket_comment` reporting the raw error. The
+  same run found that `mix precommit` cannot start inside the sandbox, and the `push` skill now says so
+  (target repository `1df8639`). The target repository was pushed earlier in the round (`38fc8a2..e5de4c8`,
+  after merging two commits that were already on the remote), and the five skills are now on `main`.
+  Next: set `BEEKEEPER_AGENT_TOKEN` (User scope), then re-run one ticket to demonstrate acceptance item 3.
