@@ -16,17 +16,19 @@ Already true, and worth not redoing:
   process-tree kill, the escript build, the Phoenix endpoint, the janitor, the file tracker.
 - Publishing works end to end, **host-side**: the janitor commits, pushes and opens a PR, driven either
   by the ticket reaching `in-review` or by the agent calling `symphony_publish`. Measured: PRs
-  #35 (sweep), #37 (agent's tool call) and #39/#41/#43 (probe tickets).
+  #35 (sweep), #37 (agent's tool call) and #39/#41/#43 (probe tickets). Since SYM-57 the agent
+  publishes inside its own session too (§3, §6 item 3); the host path stays the documented fallback.
 - The tracker is a git repository of Markdown tickets, mirrored to GitHub Issues by the janitor.
 
-What is *not* true yet -- and it is the whole distance to upstream:
+What was not true when this file was first written -- the whole distance to upstream -- and where each
+one stands now:
 
 | gap | state |
 |---|---|
 | the agent can write git metadata (commit, branch) | **done** (`8000fdb`): `codex.git_metadata_writable` |
-| the agent can authenticate to push / open a PR | **not started**: needs a credential in the child environment |
-| the agent has the skills upstream's workflow assumes | **not started**: they are not delivered at all |
-| the file tracker matches Linear's capability surface | **not started**: gap list in §4 |
+| the agent can authenticate to push / open a PR | **done** (`9417b04`, `d4d6019`, `08a2a31`, §3): on SYM-57 the agent pushed the ticket's branch and opened PR #63 itself |
+| the agent has the skills upstream's workflow assumes | **done** (`934dbdc` in the target repository, §5): five skills, upstream's document as the spine |
+| the file tracker matches Linear's capability surface | **done** (rounds 3-6, §4): the ten items of §4.1 and the emulations of §4.2 |
 
 ## 2. Git metadata: why the agent could not commit
 
@@ -63,7 +65,7 @@ git commit --allow-empty       -> [probe/sym-47 9f0e708] probe-commit
 git push                       -> fatal: schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS
 ```
 
-## 3. Credentials: the remaining half of "the agent can publish"
+## 3. Credentials: how the token reaches git
 
 `git push` is not a permission problem and no sandbox setting fixes it. The token lives in the
 invoking user's Windows Credential Manager (`gh`'s `hosts.yml` on this machine has no `oauth_token`
@@ -71,8 +73,9 @@ line at all, by design: `gh auth status` reports the token as keyring-backed), a
 is a different local user with an empty vault. `.ssh` is excluded from the sandbox's read roots, so
 SSH is out too.
 
-The only supported routes are a credential **in the child environment** (`GH_TOKEN`/`GITHUB_TOKEN` plus
-`gh auth git-credential` as the git helper) or a login performed as the sandbox account itself.
+The only supported routes are a credential **in the child environment** (`GH_TOKEN`/`GITHUB_TOKEN`,
+which git then receives as an `Authorization` header) or a login performed as the sandbox account
+itself.
 
 The mechanism is now in place (both keys default off, so nothing changes until a workflow asks):
 
@@ -86,17 +89,31 @@ The mechanism is now in place (both keys default off, so nothing changes until a
   `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*`, which is what makes git stop refusing with
   `fatal: detected dubious ownership` (the sandbox account is not the workspace's owner).
 
-Still open: the token itself, and the scope decision below.
-
 **The mechanism grew the two pieces a push actually needs (round 14, commit `ab5bb4c`).** An entry in
 `codex.child_env` is now either `"NAME"` or `"CHILD=SOURCE"`, and the mapping form is not decoration:
 `gh` prefers `GH_TOKEN` over the OS credential store, so naming it that in Symphony's own environment
 would move the janitor's GitHub calls onto the agent's narrower token and break the ticket mirror. So the
 workflow says `child_env: ["GH_TOKEN=BEEKEEPER_AGENT_TOKEN"]` -- the child gets `GH_TOKEN`, the value is
 read from `BEEKEEPER_AGENT_TOKEN` -- and when that source is absent the entry is simply omitted, which is
-why the line could be committed before the token existed. Passing a GitHub token also brings
-`credential.helper=!gh auth git-credential`, without which an HTTPS push from the sandbox account has no
-credential at all (that account has no credential store of its own).
+why the line could be committed before the token existed. That change also brought
+`credential.helper=!gh auth git-credential`, since the sandbox account has no credential store of its own
+and some credential had to be supplied at all; `d4d6019` replaced the helper program with a config header
+instead. The token is the same one either way -- only the way git receives it changed.
+
+**The token reaches git, and that closes the chain (round 15).** Three commits did it. `9417b04` made
+the writable git dir keep the caller's spelling, because `Path.expand/1` lower-cases a Windows drive
+letter and codex compares that entry as text. `d4d6019` traded the credential-helper program for an
+`Authorization: Basic` config header and set `GIT_TERMINAL_PROMPT=0`, so a missing credential fails
+instead of prompting. `08a2a31` added `http.sslBackend=openssl`, and that is the one that mattered:
+SYM-56's agent reported what git actually saw, and its config *did* carry the header -- `git config --get
+http.https://github.com/.extraheader` returned it, 165 chars -- while the push still died with
+`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`. The failure is below the token:
+schannel wants a TLS client credential from CryptoAPI, and the sandbox account has no loaded profile to
+give it one, while the OpenSSL that Git for Windows ships needs none of that. The injected config also
+lost an empty-valued `credential.helper` entry, which orphaned its key. Measured on SYM-57, which is
+acceptance item 3: the agent pushed the ticket's branch (exit 0, `[new branch] symphony/SYM-57`), opened
+**PR #63 itself**, and the host's `symphony_publish` answered `pushed=false, committed=false` -- nothing
+left to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0.
 
 **And the behaviour without a token is measured, not assumed** (SYM-53, the first ticket to try
 pushing itself). The agent committed for itself (`d754576 | Symphony Agent | docs(readme): append
@@ -109,13 +126,14 @@ schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)
 ```
 
 It did not retry, called `symphony_publish` as the prompt says, and the host pushed the agent's commit
-and opened PR #55 -- so the fallback path is real, and the only thing missing for acceptance item 3 is
-the credential.
+and opened PR #55 -- so the fallback path is real, and it is what the fork kept as the documented
+fallback once the credential arrived (round 15).
 
-**A sandbox limitation the same run exposed**: `mix precommit` **cannot start** inside the agent sandbox
-(`Mix.Sync.PubSub` dies), so the `push` skill demanding it would have blocked every push for a reason
-unrelated to the change. The skill now says to report that and continue with the check the ticket names
-(target repository `1df8639`); the repository gate is re-run where it can run.
+**A sandbox limitation the same run exposed**: `mix precommit` **cannot compile** inside the agent
+sandbox (`Mix.Sync.PubSub`'s first compile dies; round 19 measured exactly where), so the `push` skill
+demanding it would have blocked every push for a reason unrelated to the change. The skill now says to
+report that and continue with the check the ticket names (target repository `1df8639`); the repository
+gate is re-run where it can run.
 
 **This is the one place the port makes the machine weaker**, so it is stated plainly: the token
 available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
@@ -123,7 +141,8 @@ repository it can see, and anything in the child's environment is readable by th
 fine-grained PAT limited to the target repository is the honest choice for `codex.child_env`;
 injecting the broad token is not. The decision taken: a fine-grained PAT with **Contents: Read and
 write** and **Pull requests: Read and write**, on `lanhaolong20161111/beekeeper` only, handed over as the
-User-scope variable `BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript).
+User-scope variable `BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript). That credential is now in
+place, and SYM-57's push is the measurement that it reaches git.
 
 ## 4. The tracker: what "as consistent as Linear" means
 
@@ -206,7 +225,7 @@ server query language; cursors, rate limits, retries and backoff (document "no r
 inventing one); webhooks; rich text, reactions, mentions. And do not make the file tracker depend on
 the GitHub mirror or the janitor: the Linear path has no such dependency.
 
-## 5. Skills: what the agent is missing, and where they have to live
+## 5. Skills: where they live, and the shape they now have
 
 Upstream's skills are **not an orchestration feature**. Neither upstream's nor this fork's `lib/`
 mentions `skills` at all; Codex discovers them per working directory, and upstream's agent works on
@@ -227,28 +246,42 @@ legs:
 
 1. **The files are repository content** of the repository the agent works on -- here
    `lanhaolong20161111/beekeeper` (locally `ai_beekeeper/.verify_elixir`), not this fork. Committed:
-   `.codex/skills/{commit,pull,push,land}/SKILL.md`, ported for this host (see the table below).
-2. **The deployment prompt references them by path**, the way upstream does. That belongs to the same
-   change as turning on `codex.git_metadata_writable` and `codex.child_env`, so that permissions,
-   prompt and skills switch together instead of leaving a run able to do something it is told not to.
+   `.codex/skills/{commit,push,pull,land,debug}/SKILL.md`, ported for this host (see the table below).
+2. **The deployment prompt references them by path**, the way upstream does. That was done as one
+   change together with `codex.git_metadata_writable` and `codex.child_env`, so that permissions,
+   prompt and skills switched together instead of leaving a run able to do something it is told not to.
 
 For a fresh clone to contain them, leg 1 has to be **pushed**: the workspace hook clones from the
 remote, so a local commit alone is invisible to the agent. (The app-server API can also declare extra
 skill roots per cwd via `skills/list`'s `perCwdExtraUserRoots`, but this fork never calls `skills/list`
 and neither does upstream -- that route is out of scope, not a fallback.)
 
-What to do with each file, from the port review:
+What is in each file now, and how far each one is from upstream's:
 
-| skill | disposition |
-|---|---|
-| `commit` | **port**: the capability is platform-neutral; change heredoc/temp-file to repeated `-m` (or `-F -` with UTF-8 no BOM), drop the `Co-authored-by: Codex` trailer, and never blanket `git add -A` |
-| `pull` | **port nearly verbatim**: only the `$(git branch --show-current)` and the gate command change, plus a line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) |
-| `push` | **port**: `make -C elixir all` -> `mix lint` + `mix test` from `elixir/`; `/tmp` + `mktemp` + `rm` -> `$env:TEMP` + `[IO.File]::WriteAllText`; no `&&`/`||` (PowerShell 5.1 cannot parse them); keep the PR title/body discipline |
-| `land` | **port a reduced version**: locate PR, mergeability, `gh pr checks --watch` + `$LASTEXITCODE`, `gh pr merge --squash`, and the reply-before-change discipline. Drop the Codex-review lore and `python3`. |
-| `debug` | **ported and retargeted (round 10)**: `.codex/skills/debug/SKILL.md` in the target repository starts with the queue rather than the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), reads the log `--logs-root` names, searches it with `rg`'s own `--glob` (rg does not expand a glob passed as a path), avoids `| sort -u` (PATH's `sort` is Windows `sort.exe`), and lists the lifecycle lines this host actually emits |
-| `release` | **drop**: it bumps/tags Symphony's own repo and watches Burrito on ubuntu-24.04 |
-| `linear` | **drop**: `linear_graphql` is bound only by the Linear adapter; the file tracker advertises `symphony_publish` instead |
-| `land/land_watch.py` | **drop**: its three signals are Symphony's (Codex review comments, autofix head moves); `gh pr checks --watch` covers "watch CI" with no Python. If it ever runs: `python` not `python3` (the `python3` on PATH is the Store stub) and `PYTHONUTF8=1` for non-ASCII review text |
+| skill | lines | state |
+|---|---|---|
+| `commit` | 96 | ported: the capability is platform-neutral; heredoc and temp files become repeated `-m` (or `-F -`), the `Co-authored-by: Codex` trailer is gone, and a run never blanket `git add -A` |
+| `pull` | 199 | ported: the conflict path, plus the line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) and the fresh-clone preconditions that executing it turned up |
+| `push` | 177 | ported: the gate is `mix precommit` from the repository root (this host has no `make`, and this repository has no `elixir/` subdirectory), `$env:TEMP` replaces `/tmp`, `&&`/`||` are unrolled because PowerShell 5.1 cannot parse them, the PR title/body discipline is kept -- and **a run never pushes `main`** |
+| `land` | 477 | ported **in full, not reduced**: the manual loop, the helper's five exit codes and `## Review Handling` are all here, because executing the skill is what showed which of upstream's steps are load-bearing |
+| `debug` | 270 | ported and retargeted (round 10): the queue before the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), `rg`'s own `--glob`, no `| sort -u` (PATH's `sort` is Windows `sort.exe`), and the lifecycle lines this host actually emits |
+| `release`, `linear` | -- | **still deliberately unported**: `release` bumps and watches upstream's own repository on ubuntu-24.04, and `linear_graphql` is bound only by the Linear adapter -- the file tracker advertises `symphony_publish` instead |
+| `land/land_watch.py` | -- | **not ported as Python, and not dropped either**: its signals are now `SymphonyElixir.Land` in this fork's own code (`c5a55f2`, `b06c82d`), which also runs inside the agent sandbox (round 19) |
+
+**All five now have one shape** (target repository `934dbdc`, with `fcbbc3a`/`1ebed53` folding `push`,
+`pull` and `land` back up to upstream's content first, then corrected by execution in `b0e8fd8`,
+`eba5c28`, `0b3e04a` and `1712c55`): upstream's document is the spine. Each file keeps upstream's
+section order and wording where it is host-neutral, puts a one-line `> **Differs from upstream:** ...`
+note directly above every changed instruction, and ends with `## Differences from upstream (this host)`,
+whose bullets index those notes; an upstream instruction that cannot work here is declared "not
+applicable, because ..." rather than deleted. The line counts above are the count at `1712c55`.
+
+**And the rule the SYM-57 run earned** (`b0e8fd8`): that run pushed `main` first, then noticed the
+convention, moved the commit to `symphony/SYM-57` and restored `main` with `--force-with-lease`
+(verified afterwards: `main` is back at `934dbdc`). `push` step 3 now says a run never pushes `main`,
+the Commands block carries an executable guard (`if ($branch -eq "main") { ... exit 1 }`), the Notes
+repeat it, and a differences bullet records the incident -- restoring a wrong push to a shared branch
+is an incident for the operator, not a recovery step to repeat.
 
 Other measured Windows facts the ported skills must respect: `make` and `jq` are absent; `gh` has
 built-in `--jq`; `rg` exists (and Codex bundles one); `curl` in PowerShell is an alias for
@@ -297,16 +330,46 @@ The port is done when, on this Windows machine, one real ticket run can show all
 6. `mix lint` and `mix test` are green, and this file plus `docs/fork-changes.md` describe what
    changed and how to get upstream behaviour back.
 
-**Where that stands after the 2026-09-29 work** (the rebuilt escript is live on 4001):
+**Where that stands after the 2026-09-29/30 work** (the running service carries the credential fix and
+the `land` CLI; SYM-57 and SYM-58 are the two runs that exercised this work):
 
 | # | state |
 |---|---|
 | 1 | **on and demonstrated**: `codex.git_metadata_writable: true` in the deployment; SYM-50's run committed in a sandbox that had refused exactly that before |
 | 2 | **demonstrated**: the agent wrote its own commit, on the ticket's branch, with a real message (`docs: append branch-fix smoke marker to README.md`) rather than the janitor's fixed `symphony/<id>: automated change` |
-| 3 | needs the credential decision (§3). Until then the split is: **the agent commits, the host pushes and opens the PR** -- measured on SYM-51, where the host moved the agent's commit onto `symphony/SYM-51` and opened PR #51 |
+| 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0 |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | every round: `mix lint` clean, suite green (613 at the time of writing) |
+| 6 | **the rule every round**: `mix lint` clean and the suite green (613 when it was last counted, before the `land` work). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+
+### The fork against upstream, audited
+
+An audit of the whole tree against upstream `main`, for the record. `elixir/lib`: 28 files identical,
+23 differ, 28 exist only here, **0 exist only upstream**; `elixir/test`: 19 identical, 9 differ, 29
+only here, 0 only upstream. Of the 32 files that differ, **no upstream feature, clause or capability
+was removed without a replacement** -- the differences are POSIX->Windows substitutions (bare
+`sh`/`bash`, `/tmp`, `make`), deliberate fork decisions, or clause collapses for Elixir 1.20. Of the 57
+files that exist only here, roughly 5% are upstream concerns lifted into their own modules
+(`land.ex` <- `land_watch.py`, `shell.ex`, `web/body_parser.ex`), ~75% predate the port
+(2026-09-21...09-28: the ACP/CommandCode backends, the file tracker, the MCP bridge, the janitor, the
+console), and ~19% were added by the port itself.
+
+### Open, found by that audit -- not fixed
+
+1. **`elixir/test/symphony_elixir/core_test.exs` lost its retry lower bound.**
+   `assert remaining_ms >= min_remaining_ms` went away when a flaky-window fix landed; only
+   `remaining_ms > -60_000` remains, so a retry scheduled *immediately* instead of after its backoff
+   now passes. The comment above it claims the lower edge is asserted by callers that compare two
+   attempts against each other, and there are no such callers in the file.
+2. **`ssh_test.exs` is excluded wholesale on Windows** by `@moduletag :needs_ssh`, which is
+   over-broad: those tests use a fake `ssh` script, and one of them is pure string logic.
+3. **`docs/fork-changes.md` is wrong about `granular`.** It says the `granular` approval-policy default
+   "is not a change made here" and cites a command whose path is wrong; the change is commit `84428e5`
+   (2026-09-21), so it *is* a fork change relative to upstream.
+4. **`orchestrator.ex`: while `paused`, `maybe_dispatch/1` returns early**, so
+   `reconcile_running_issues/1` and `reconcile_blocked_issues/1` -- both inside `dispatch_new_work/1` --
+   do not run. That contradicts the comment above it ("reconciliation below still runs") and
+   `orchestrator_pause_test.exs`'s claim; the test only asserts `claimed == 0`, so it cannot catch it.
 
 ## 7. Round log
 
@@ -416,13 +479,103 @@ rounds, which are counted separately.
 - **Round 14 (2026-09-29)**: the credential channel is complete and the no-credential path is measured.
   `codex.child_env` took the mapping form (`"GH_TOKEN=BEEKEEPER_AGENT_TOKEN"`) so the host process never
   holds `GH_TOKEN` -- `gh` would otherwise move the janitor's own calls onto the agent's narrower token --
-  and passing a GitHub token now also brings git's `gh` credential helper, without which an HTTPS push
-  from the sandbox account has no credential at all (`ab5bb4c`). The deployment prompt moved to upstream's
+  and passing a GitHub token first also brought git's `gh` credential helper, without which an HTTPS push
+  from the sandbox account seemed to have no credential at all (`ab5bb4c`; round 15's `d4d6019` replaced
+  that helper with a config header, because the helper was not enough). The deployment prompt moved to upstream's
   order: the agent commits, pushes and opens the PR itself, with `symphony_publish` as the documented
   fallback. SYM-53 measured that fallback: the agent's own commit `d754576`, then
   `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` on its push, no retry, a call to
   `symphony_publish`, and PR #55 from the host -- plus a `ticket_comment` reporting the raw error. The
-  same run found that `mix precommit` cannot start inside the sandbox, and the `push` skill now says so
+  same run found that `mix precommit` cannot compile inside the sandbox, and the `push` skill now says so
   (target repository `1df8639`). The target repository was pushed earlier in the round (`38fc8a2..e5de4c8`,
   after merging two commits that were already on the remote), and the five skills are now on `main`.
   Next: set `BEEKEEPER_AGENT_TOKEN` (User scope), then re-run one ticket to demonstrate acceptance item 3.
+- **Round 15 (2026-09-29)**: acceptance item 3. Three commits closed the credential chain -- `9417b04`
+  (the writable git dir keeps the caller's spelling, because codex compares that entry as text and
+  `Path.expand` lower-cases a drive letter), `d4d6019` (the `Authorization: Basic` config header and
+  `GIT_TERMINAL_PROMPT=0`, instead of a credential-helper program) and `08a2a31`
+  (`http.sslBackend=openssl`, plus the removal of an empty-valued `credential.helper` entry that
+  orphaned its key). SYM-56 separated the two failures: the header *was* in the agent's git config,
+  165 chars, and the push still died with `schannel: AcquireCredentialsHandle failed:
+  SEC_E_NO_CREDENTIALS`, a TLS client credential the sandbox account cannot be given -- below the
+  token. On SYM-57 the agent pushed (exit 0, `[new branch] symphony/SYM-57`), opened **PR #63 itself**,
+  and the host's `symphony_publish` answered `pushed=false, committed=false`;
+  `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0. The same run pushed `main` first
+  before correcting itself, which is the next round.
+  Next: the skills, which that run also showed to be too thin to read literally.
+- **Round 16 (2026-09-29)**: the five skills were rebuilt on upstream's document instead of on our
+  reading of it (`934dbdc` in the target repository, after `fcbbc3a` and `1ebed53` folded `push`, `pull`
+  and `land` back up to upstream's content). All five now share one shape: upstream's section order and
+  wording where host-neutral, a one-line `> **Differs from upstream:** ...` note above every changed
+  instruction, a closing `## Differences from upstream (this host)` that indexes them, and "not
+  applicable, because ..." for upstream instructions that cannot work here. The same round shipped the
+  rule SYM-57 earned (`b0e8fd8`): a run never pushes `main` -- step 3, an executable guard in the
+  Commands block, the Notes, and the incident recorded as a difference.
+  Next: execute `pull` and `land` for real instead of reading them.
+- **Round 17 (2026-09-29)**: `pull` and `land` were executed, not read. A verifier played the executor:
+  it built an actual conflict and ran `pull/SKILL.md` step by step, then ran `land/SKILL.md`'s manual
+  loop against a real open PR up to (not including) the merge. Both were unusable as written, and all
+  of it is now fixed in the skill text (`b0e8fd8`, `eba5c28`):
+  - `pull` step 7's bare `git commit` opened `core.editor` -- VS Code with `--wait` on this host -- so
+    the merge commit never happened; it is `--no-edit` now, with `git merge --continue` named as the
+    same code path.
+  - `pull` step 8 assumed a prepared checkout: a fresh clone stops at
+    `** (Mix) Can't continue due to errors on dependencies` until `mix setup` has run.
+  - A fresh clone has no committer identity here (the repository's identity is *local* config), so
+    `git commit` stops with `Author identity unknown`; that is a precondition now.
+  - `land`'s wait for a `## Codex Review` comment was an **unbounded loop placed before the check
+    step**, and this repository has no producer for that comment, so a literal run never reached CI or
+    the merge; it is bounded at 120s now.
+  - `land`'s `gh api ... --jq` program fails under PowerShell 5.1 (`gh: accepts 1 arg(s), received 3`);
+    the replacement uses `ConvertFrom-Json`. `## Review Handling`'s bare `{owner}`/`{repo}` are parsed
+    as a script block by PowerShell and needed quotes.
+  - `$bodyFile` was used by the merge command but never assigned; the `UNKNOWN` mergeability re-check
+    discarded its result and read only `mergeable` while the helper also uses `mergeStateStatus` (both
+    are assigned back and bounded now).
+  - The helper's documented invocation was wrong twice: `mix run` boots the application and died at
+    `** (EXIT) :missing_github_token` printing nothing (it needs `--no-start`), and the relative
+    `symphony\elixir` does not resolve from this repository -- it is a sibling of `ai_beekeeper`.
+  - The helper's exit 2 is broader than the manual loop's detector: on the clean, mergeable PR #63 it
+    reported 2 because a Codex bot's *usage-limit* notice counted as feedback.
+  Next: narrow exit 2 in the helper, and fix the promise the skill makes about it.
+- **Round 18 (2026-09-29/30)**: exit 2 was narrowed in code, and a promise was corrected instead
+  (`a784d98`; target repository `0b3e04a`). In `SymphonyElixir.Land`, when no `@codex review` request
+  has ever been made, a Codex-bot comment now counts only if it carries the `## Codex Review` marker
+  (`is_nil(request_at) -> codex_review?(comment)`) -- fail-closed both ways, with two new tests. Why it
+  was a deadlock: the filter compares only against `request_at`, so without one, whatever it kept was
+  permanent and no acknowledgement could ever age it out. The `land` skill's `## Review Handling` had
+  promised the opposite, in upstream's own words ("unresolved until a newer `[codex]` issue comment is
+  posted acknowledging the findings"); that sentence was corrected in the skill rather than in the
+  helper (`0b3e04a`), because an acknowledgement is written *before* the fix exists while a new review
+  request is written *after* the commits land -- so the request is the safer gate. Do not change the
+  helper back.
+  Next: the land watcher, still the last structural difference from upstream.
+- **Round 19 (2026-09-29/30)**: the land watcher moved inside the agent sandbox, which closes that last
+  structural difference (`42e7588`; skill `1712c55`): `main/1` on `SymphonyElixir.Land`, `mix.exs`
+  selecting the escript by `SYMPHONY_ESCRIPT=land`, a new `mix escript.land` task, and `bin/land` built.
+  Proven by a real run (SYM-58) and reproduced independently with `codex sandbox <cmd>`:
+  `escript C:\Users\lhl20\Desktop\android_cli_demos\symphony\elixir\bin\land` prints
+  `Waiting for CI checks...` on stdout and `land watch failed: gh exited 1: no pull requests found for
+  branch "main"` on stderr, exit 1. A bare `bin\land` cannot work (on Windows the file has no executable
+  extension); the no-build alternative is `elixir -pa
+  <fork>\elixir\_build\dev\lib\symphony_elixir\ebin -e SymphonyElixir.Land.cli()`. The skill's
+  "host-side only" claim is gone, and `host-side` no longer appears in it. The same round measured why
+  `mix` cannot compile in the sandbox, correcting two earlier guesses (TEMP permissions, and "dies
+  before any task runs"): `mix.bat --version` exits 0 and prints Mix 1.20.4, and it dies at the **first
+  compile**, in `Mix.Sync.PubSub` -> `Mix.Utils.detect_user_id!/0` -> `File.mkdir_p!/1` returning
+  `{:error, :enotdir}`, because `File.mkdir_p/1` walks up to the drive root and requires every ancestor
+  to stat as a directory, while in the sandbox `File.stat("C:\Users\lhl20")` is `{:error, :eacces}`.
+  TEMP itself is writable and carries a `Modify` ACE for `CodexSandboxUsers`, so **no TEMP redirect
+  helps** -- not even to a workspace path, which is under the same profile directory (SYM-55 set
+  `TEMP`/`TMP`/`TMPDIR` to a workspace directory and reproduced the same `not a directory`);
+  `MIX_OS_CONCURRENCY_LOCK=0` does not help either, because it disables `Mix.Sync.Lock`, not the PubSub
+  path. The escript and `elixir -pa` forms work because neither compiles, so neither calls
+  `File.mkdir_p`. `mix.ps1` is additionally blocked by PowerShell's execution policy, which is why
+  `mix.bat` is the form used.
+  Next: the audit of the whole tree against upstream, and whatever it finds.
+- **Round 20 (2026-09-30)**: the whole-tree audit against upstream `main` (numbers and evidence in §6's
+  "The fork against upstream, audited"), and the four open items it found, recorded there as open
+  rather than fixed. Two of the four are the port's own: `core_test.exs` lost its retry lower bound in
+  a flaky-window fix, and `ssh_test.exs` is excluded wholesale by `@moduletag :needs_ssh` although its
+  tests use a fake `ssh` script.
+  Next: the four items in §6 -- none of them is the credential path, which is closed.
