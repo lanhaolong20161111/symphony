@@ -248,14 +248,21 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     * the tracker's declared secrets are **removed** (`{name, false}`), which is what keeps a tracker
       token out of the agent's reach;
-    * variables a workflow names in `codex.child_env` are **passed through**: names only, values read
-      from Symphony's own environment, so no credential has to be written into a project file. A name
-      this process does not have is omitted rather than set empty, and a name that is also a declared
-      tracker secret is refused with a warning -- those two intents contradict each other, and
+    * variables a workflow names in `codex.child_env` are **passed through**: values read from
+      Symphony's own environment, so no credential has to be written into a project file. An entry is
+      either `"NAME"` (the child gets the same name) or `"CHILD=SOURCE"` (the child gets `CHILD`, the
+      value is read from `SOURCE`). The mapping form exists so the *host process* never has to hold a
+      variable named `GH_TOKEN`: `gh` prefers that name over the OS credential store, so putting it in
+      Symphony's own environment would silently move the janitor's own GitHub calls onto the agent's
+      token -- which is scoped to one repository and would break the ticket mirror. A source this
+      process does not have is omitted rather than set empty, and an entry naming a declared tracker
+      secret on either side is refused with a warning -- those intents contradict each other, and
       silently honouring one of them is how a token leaks;
-    * when the agent is allowed to write git metadata, git is told to trust the workspace
-      (`safe.directory=*`), because the sandbox runs as a different OS account and git otherwise
-      refuses every command with `fatal: detected dubious ownership`.
+    * git is told to trust the workspace (`safe.directory=*`) when the agent may write git metadata,
+      because the sandbox runs as a different OS account and git otherwise refuses every command with
+      `fatal: detected dubious ownership`. When a GitHub token is being passed through, git is also
+      given the `gh` credential helper, without which an HTTPS push has no credential at all: the
+      sandbox account has no credential store of its own.
 
   Local launches only. An SSH launch builds its environment on the remote host, and what those hosts
   should inherit is a separate decision from what this machine's child gets.
@@ -263,43 +270,86 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec child_env(Path.t() | nil, map()) :: [{charlist(), charlist() | false}]
   def child_env(_workspace, dynamic_tool_binding) do
     secrets = dynamic_tool_binding.secret_environment_names |> valid_environment_names()
+    passthrough = passthrough_env(secrets)
 
-    Enum.map(secrets, &{String.to_charlist(&1), false}) ++
-      passthrough_env(secrets) ++ git_trust_env()
+    Enum.map(secrets, &{String.to_charlist(&1), false}) ++ passthrough ++ git_config_env(passthrough)
   end
+
+  # The two names `gh` itself reads, and therefore the two that make git's credential helper work.
+  @gh_token_names ~w(GH_TOKEN GITHUB_TOKEN)
 
   defp passthrough_env(secrets) do
     Config.settings!().codex.child_env
-    |> valid_environment_names()
-    |> Enum.flat_map(fn name ->
-      cond do
-        name in secrets ->
-          Logger.warning(
-            "codex: child_env names #{name}, which is also a tracker secret; not passing it through"
-          )
-
-          []
-
-        value = System.get_env(name) ->
-          [{String.to_charlist(name), String.to_charlist(value)}]
-
-        true ->
-          # Absent here: omit it, so the child sees the same absence rather than an empty value that
-          # looks like a configured-but-blank credential.
-          []
-      end
-    end)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.flat_map(&passthrough_entry(&1, secrets))
   end
 
-  defp git_trust_env do
-    if Config.settings!().codex.git_metadata_writable do
-      [
-        {~c"GIT_CONFIG_COUNT", ~c"1"},
-        {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"},
-        {~c"GIT_CONFIG_VALUE_0", ~c"*"}
-      ]
-    else
-      []
+  defp passthrough_entry(spec, secrets) do
+    case env_spec(spec) do
+      nil ->
+        []
+
+      {_child, _source} = entry ->
+        {child, source} = entry
+
+        cond do
+          child in secrets or source in secrets ->
+            Logger.warning(
+              "codex: child_env #{inspect(spec)} names a tracker secret; not passing it through"
+            )
+
+            []
+
+          value = System.get_env(source) ->
+            [{String.to_charlist(child), String.to_charlist(value)}]
+
+          true ->
+            # Absent here: omit it, so the child sees the same absence rather than an empty value that
+            # looks like a configured-but-blank credential.
+            []
+        end
+    end
+  end
+
+  defp env_spec(spec) do
+    case String.split(spec, "=", parts: 2) do
+      [child, source] -> validate_env_spec(child, source)
+      [name] -> validate_env_spec(name, name)
+    end
+  end
+
+  defp validate_env_spec(child, source) do
+    case {valid_environment_names([String.trim(child)]), valid_environment_names([String.trim(source)])} do
+      {[child], [source]} -> {child, source}
+      _ -> nil
+    end
+  end
+
+  defp git_config_env(passthrough) do
+    child_names = Enum.map(passthrough, fn {name, _value} -> to_string(name) end)
+    gh_token? = Enum.any?(child_names, &(&1 in @gh_token_names))
+    trust? = Config.settings!().codex.git_metadata_writable
+
+    entries =
+      (if trust? or gh_token?, do: [{"safe.directory", "*"}], else: []) ++
+        (if gh_token?, do: [{"credential.helper", "!gh auth git-credential"}], else: [])
+
+    case entries do
+      [] ->
+        []
+
+      entries ->
+        pairs =
+          entries
+          |> Enum.with_index()
+          |> Enum.flat_map(fn {{key, value}, index} ->
+            [
+              {String.to_charlist("GIT_CONFIG_KEY_#{index}"), String.to_charlist(key)},
+              {String.to_charlist("GIT_CONFIG_VALUE_#{index}"), String.to_charlist(value)}
+            ]
+          end)
+
+        [{~c"GIT_CONFIG_COUNT", String.to_charlist(to_string(length(entries)))} | pairs]
     end
   end
 

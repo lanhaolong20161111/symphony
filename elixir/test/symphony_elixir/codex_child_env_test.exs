@@ -58,6 +58,55 @@ defmodule SymphonyElixir.CodexChildEnvTest do
     assert {~c"GIT_CONFIG_VALUE_0", ~c"*"} in env
   end
 
+  test "an entry may map a child name onto a differently named source", %{binding: binding} do
+    # The mapping form exists so the host process never holds a variable named GH_TOKEN: gh prefers
+    # that name over the OS credential store, and the janitor's own GitHub calls must keep using the
+    # credential store (the agent's token is scoped to one repository).
+    restore_env("SYMPHONY_AGENT_TOKEN", "scoped-token")
+    restore_env("GH_TOKEN", nil)
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["GH_TOKEN=SYMPHONY_AGENT_TOKEN"])
+
+    env = AppServer.child_env("/tmp/ws", binding)
+
+    assert {~c"GH_TOKEN", ~c"scoped-token"} in env
+  end
+
+  test "a GitHub token also brings the credential helper, which git needs to push", %{binding: binding} do
+    restore_env("SYMPHONY_AGENT_TOKEN", "scoped-token")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_git_metadata_writable: false,
+      codex_child_env: ["GH_TOKEN=SYMPHONY_AGENT_TOKEN"]
+    )
+
+    env = AppServer.child_env("/tmp/ws", binding)
+
+    assert {~c"GIT_CONFIG_COUNT", ~c"2"} in env
+    assert {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"} in env
+    assert {~c"GIT_CONFIG_KEY_1", ~c"credential.helper"} in env
+    assert {~c"GIT_CONFIG_VALUE_1", ~c"!gh auth git-credential"} in env
+  end
+
+  test "a tracker secret is refused by its source name too", %{binding: binding} do
+    restore_env("LINEAR_API_KEY", "tracker-token")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_child_env: ["GH_TOKEN=LINEAR_API_KEY"]
+    )
+
+    env = AppServer.child_env("/tmp/ws", binding)
+
+    assert {~c"LINEAR_API_KEY", false} in env
+    refute Enum.any?(env, fn {name, _} -> name == ~c"GH_TOKEN" end)
+  end
+
+  test "an entry with a malformed name is ignored", %{binding: binding} do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["not a name", "=ALSO_BAD"])
+
+    assert AppServer.child_env("/tmp/ws", binding) == [{~c"LINEAR_API_KEY", false}]
+  end
+
   test "nothing is passed through by default", %{binding: binding} do
     restore_env("SYMPHONY_CHILD_ENV_PROBE", "from-the-parent")
     write_workflow_file!(Workflow.workflow_file_path(), [])
