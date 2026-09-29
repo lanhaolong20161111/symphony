@@ -225,6 +225,9 @@ The port is done when, on this Windows machine, one real ticket run can show all
 
 ## 7. Round log
 
+These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
+rounds, which are counted separately.
+
 - **Round 1 (2026-09-29)**: git-metadata gap measured, fixed and tested (`8000fdb`); the same run found
   the credential half (`SEC_E_NO_CREDENTIALS`) and the separate-sandbox-account explanation, both
   recorded in `docs/fork-changes.md`; the retry-window flake that failed a gate run was fixed
