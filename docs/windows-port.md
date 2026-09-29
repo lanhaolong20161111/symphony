@@ -210,7 +210,7 @@ What to do with each file, from the port review:
 | `pull` | **port nearly verbatim**: only the `$(git branch --show-current)` and the gate command change, plus a line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) |
 | `push` | **port**: `make -C elixir all` -> `mix lint` + `mix test` from `elixir/`; `/tmp` + `mktemp` + `rm` -> `$env:TEMP` + `[IO.File]::WriteAllText`; no `&&`/`||` (PowerShell 5.1 cannot parse them); keep the PR title/body discipline |
 | `land` | **port a reduced version**: locate PR, mergeability, `gh pr checks --watch` + `$LASTEXITCODE`, `gh pr merge --squash`, and the reply-before-change discipline. Drop the Codex-review lore and `python3`. |
-| `debug` | **port the method, retarget it**: the log is where `--logs-root` says, not `log/symphony.log`; `rg pat 'dir/*.log'` fails on Windows (rg does not glob argv, PowerShell does not glob for native tools) -- use `rg -n --glob 'symphony.log*' <pattern> <dir>`; `| sort -u` is broken because PATH `sort` is Windows `sort.exe` |
+| `debug` | **ported and retargeted (round 10)**: `.codex/skills/debug/SKILL.md` in the target repository starts with the queue rather than the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), reads the log `--logs-root` names, searches it with `rg`'s own `--glob` (rg does not expand a glob passed as a path), avoids `| sort -u` (PATH's `sort` is Windows `sort.exe`), and lists the lifecycle lines this host actually emits |
 | `release` | **drop**: it bumps/tags Symphony's own repo and watches Burrito on ubuntu-24.04 |
 | `linear` | **drop**: `linear_graphql` is bound only by the Linear adapter; the file tracker advertises `symphony_publish` instead |
 | `land/land_watch.py` | **drop**: its three signals are Symphony's (Codex review comments, autofix head moves); `gh pr checks --watch` covers "watch CI" with no Python. If it ever runs: `python` not `python3` (the `python3` on PATH is the Store stub) and `PYTHONUTF8=1` for non-ASCII review text |
@@ -239,6 +239,14 @@ janitor's warning (`SYM-48.md looks wrong: [:bom, :no_front_matter]`) was the on
 working; `problems/1` still reports `:bom`, because whatever wrote it may have changed more than the
 BOM. On a POSIX host a BOM is exotic; on Windows it is one `Set-Content` away, which is exactly why
 this belongs in the port.
+
+**One dormant POSIX script, deliberately not "fixed".** This fork's own `.codex/worktree_init.sh` is
+`#!/usr/bin/env bash` and ends in `make setup`, which does not exist on this host -- and nothing in the
+repository references it (no workflow, doc or example calls it). It is left alone and recorded here
+instead of being ported: a script nothing runs is not a blocker, and rewriting it would have created the
+impression that the worktree path is supported here, which it is not (see §2's per-clone layout and the
+worktree discussion in `docs/fork-changes.md`). If a workflow ever does call it, the port is
+`mix setup` from `elixir/` -- `mise trust` already works.
 
 ## 6. Acceptance
 
@@ -336,3 +344,9 @@ rounds, which are counted separately.
   with `branch_name` **and** `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` in its front
   matter, which is acceptance item 4 demonstrated end to end.
   Next: §3's token decision and the two sandbox keys (items 1-3), then the rest of §6.
+- **Round 10 (2026-09-29)**: the `debug` skill is written for this deployment and committed in the
+  target repository (`beekeeper` `66d2e04`) -- it starts from the queue rather than the log, because the
+  BOM failure mode shows up as a run stopped mid-flight rather than as an error, and it carries the
+  lifecycle lines this host actually emits. The fork's own `.codex/worktree_init.sh` was checked:
+  nothing references it and it is POSIX-only, so it is recorded as dormant rather than ported.
+  Next: §3's token decision and the two sandbox keys (acceptance items 1-3), then the rest of §6.
