@@ -10,6 +10,9 @@ change made here:
 This file is the ledger for that rule: what changed, why, whether it moves a default, and how to
 get upstream behaviour back. Anything not listed here should be assumed unchanged.
 
+The Windows port has its own plan and record -- the gaps, the measurements behind them, and what is
+still missing to run upstream's agent-driven git workflow here: [`docs/windows-port.md`](windows-port.md).
+
 ## Behaviour that changed for a caller
 
 Only three engine-level changes are visible to a caller, plus the example workflow.

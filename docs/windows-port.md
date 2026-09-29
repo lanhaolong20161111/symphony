@@ -1,0 +1,207 @@
+# The Windows port
+
+What this fork needs to become a *Windows* port of upstream Symphony: the same architecture, the same
+agent-driven git workflow, with exactly one intended difference -- a file-backed tracker instead of
+Linear, and that tracker as close to Linear's capabilities as the data model can honestly carry.
+
+This file is the plan and the record. It is written so a session that has none of the history can work
+from it. Evidence is quoted with the measurement or the file it came from; anything unmeasured is
+marked as such.
+
+## 1. Where the port stands
+
+Already true, and worth not redoing:
+
+- The orchestrator runs on Windows: port scanning, `Shell` with a real deadline and a
+  process-tree kill, the escript build, the Phoenix endpoint, the janitor, the file tracker.
+- Publishing works end to end, **host-side**: the janitor commits, pushes and opens a PR, driven either
+  by the ticket reaching `in-review` or by the agent calling `symphony_publish`. Measured: PRs
+  #35 (sweep), #37 (agent's tool call) and #39/#41/#43 (probe tickets).
+- The tracker is a git repository of Markdown tickets, mirrored to GitHub Issues by the janitor.
+
+What is *not* true yet -- and it is the whole distance to upstream:
+
+| gap | state |
+|---|---|
+| the agent can write git metadata (commit, branch) | **done** (`8000fdb`): `codex.git_metadata_writable` |
+| the agent can authenticate to push / open a PR | **not started**: needs a credential in the child environment |
+| the agent has the skills upstream's workflow assumes | **not started**: they are not delivered at all |
+| the file tracker matches Linear's capability surface | **not started**: gap list in §4 |
+
+## 2. Git metadata: why the agent could not commit
+
+Codex's `workspace-write` sandbox makes a checkout's git metadata read-only **by path**. The names
+`.git`, `.agents` and `.codex` are a hard-coded set (`codex-rs/protocol/src/permissions.rs:36-45` at
+`rust-v0.155.1`), and Windows turns them into DENY ACEs on the workspace (`add_deny_write_ace`).
+
+Measured inside a real session (probe tickets SYM-45/SYM-46):
+
+```
+icacls .git                      S-1-5-21-…:(DENY)(W,D,Rc,DC)      (a per-root capability SID)
+Set-Content .git\permission-test.txt   -> Access to the path … is denied.
+git checkout -b probe/sym-47     -> fatal: cannot lock ref 'refs/heads/probe/sym-47': …
+git commit --allow-empty         -> fatal: Unable to create '…\.git\index.lock': Permission denied
+whoami                           -> CodexSandboxOnline
+```
+
+`whoami` is the part that explains everything else: on Windows the sandbox runs the agent as a
+**separate local account** (`CodexSandboxOnline`, `windows-sandbox-rs/src/setup.rs:52-53`), so the
+permission profile's `<special>:root access="read">` is not "read everything" -- a path is reachable
+only if that account was granted it. That is also why `gh` could not read `%APPDATA%\GitHub CLI`, and
+why neither `.ssh` nor the invoking user's Credential Manager is reachable (`.ssh` is in
+`USERPROFILE_ROOT_EXCLUSIONS`).
+
+The fix is per-path and it works: an explicit writable entry for the **same resolved path** suppresses
+the carveout for that path and nothing else. Measured on SYM-47 (entry added by hand) and then
+implemented as `codex.git_metadata_writable: true`, which adds the workspace's git dir **and** common
+dir -- asked of git, because a linked worktree keeps its metadata outside the workspace:
+
+```
+icacls .git   -> DENY gone       write into .git -> exit 0
+git checkout -b probe/sym-47   -> Switched to a new branch
+git commit --allow-empty       -> [probe/sym-47 9f0e708] probe-commit
+git push                       -> fatal: schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS
+```
+
+## 3. Credentials: the remaining half of "the agent can publish"
+
+`git push` is not a permission problem and no sandbox setting fixes it. The token lives in the
+invoking user's Windows Credential Manager (`gh`'s `hosts.yml` on this machine has no `oauth_token`
+line at all, by design: `gh auth status` reports the token as keyring-backed), and the sandbox account
+is a different local user with an empty vault. `.ssh` is excluded from the sandbox's read roots, so
+SSH is out too.
+
+The only supported routes are a credential **in the child environment** (`GH_TOKEN`/`GITHUB_TOKEN` plus
+`gh auth git-credential` as the git helper) or a login performed as the sandbox account itself.
+
+Design to implement (not yet written):
+
+- A workflow key that names environment variables to pass through to the agent's child process, e.g.
+  `codex.child_env: [GH_TOKEN]` -- **names only**, values read from Symphony's own environment at
+  launch, so no secret is ever written into the project file. This mirrors the existing
+  `secret_environment_names` machinery, which strips tracker secrets from that same child; child_env is
+  the deliberate opposite direction and must stay opt-in and documented as such.
+- `safe.directory` for the cross-user ownership check, which git reports as `fatal: detected dubious
+  ownership` because the sandbox account is not the owner. Cheapest form: `GIT_CONFIG_COUNT=1`,
+  `GIT_CONFIG_KEY_0=safe.directory`, `GIT_CONFIG_VALUE_0=*` in the same child environment.
+- A decision on token scope, because this is the one place the port makes the machine weaker: the
+  token available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to
+  every repository it can see. A fine-grained PAT limited to the target repository is the honest
+  choice; injecting that broad token is not.
+
+Until this lands, `symphony_publish` and the janitor remain the only publishers -- which is fine, they
+are idempotent with the agent doing it.
+
+## 4. The tracker: what "as consistent as Linear" means
+
+Reference inventory of the Linear path (fields, reads, tool, mutations, and the gap list) is §4.1-4.3.
+The target is not to clone Linear's transport -- it is to be consistent at the two layers that matter:
+the **normalized issue** and the **agent tool result shape**. A full GraphQL passthrough (`linear_graphql`)
+has nothing to be consistent *with* here: a file ticket's mutation API is editing the file.
+
+### 4.1 Must hold identically (this is the actual deliverable)
+
+1. Same normalized field set and presence rules: absent nullable field -> `nil`, absent collection ->
+   `[]`. Both reads return `{:ok, list} | {:error, term}`, and an empty input list returns `{:ok, []}`
+   **with no I/O**.
+2. `labels` normalize identically: trim, downcase, drop blanks, uniq (`linear/client.ex:607-616`). The
+   file tracker currently trims only -- a SPEC 1266-1267 deviation (`tracker/file.ex:310-321`).
+3. `state` verbatim; compared trimmed + downcased only.
+4. `priority` integer-or-null with Linear's 1..4-then-unknown dispatch rank. Today's file tracker
+   accepts numbers, numeric strings and floats (`file.ex:334-344`); pick one coercion and document it.
+5. `blocked_by` entries are `{id, identifier, state}` maps with each key nullable, as Linear produces
+   (`linear/client.ex:626-630`). Front matter should accept both the shorthand and the full form:
+   ```yaml
+   blocked_by: [SYM-1, SYM-2]                                  # shorthand, expanded against the directory
+   blocked_by: [{id: SYM-1, identifier: SYM-1, state: done}]   # Linear-shaped
+   ```
+   Shorthand ids resolve inside the ticket directory; an unresolved id becomes a ref with `nil` state,
+   which must block exactly as Linear's `nil` blocker state does (`client.ex:508-510`).
+6. `dispatchable` stays explicit and is never reconstructed by the scheduler. Extend it from
+   `blockers == []` to Linear's rule: hold back while any blocker is non-terminal **and** the ticket is
+   in the first active state -- with that state **configured** rather than hard-coded as Linear's
+   `"Todo"` (`client.ex:503`).
+7. `url` is derived when absent (`janitor.ex:929-931` already does this for tickets).
+8. `created_at`/`updated_at` come from front matter, RFC3339 or `nil`. Do **not** substitute file
+   mtime: it flips on unrelated edits.
+9. Agent tool results keep `%{"success", "output", "contentItems"}` and the "unknown tool -> structured
+   failure, the session continues" rule -- for every tracker, including one that advertises no tools.
+10. `secret_environment_names` stays a declared, enforced contract; `[]` for the file tracker is a
+    value, not an exemption.
+
+### 4.2 Emulated, and labelled as emulation
+
+- **Comments** -> the reserved `## Discussion` section the janitor already writes, with a stable id,
+  author and timestamp per entry, editable in place, never rewriting the description. Linear keeps
+  comments and description separate; the file tracker's body *is* the description, so state that.
+- **Attachments / PR links** -> front-matter `links: [{url, title, kind: pr|url}]`, mirroring
+  `attachmentLinkGitHubPR` / `attachmentLinkURL`. Today the PR URL only reaches the GitHub issue and is
+  never recorded on the ticket (`janitor.ex:733-749`).
+- **Assignee** -> `assignee_id` front matter, already parsed. `me` is unsupported: there is no viewer
+  query analogue, so the honest emulation is a configured worker identity.
+- **State objects with ids** -> states stay the declared config lists; no ids in the issue record.
+- **Pagination / rate limits** -> not applicable; mirror the *error contract* instead, and pick one
+  malformed-record rule and document it (Linear drops one bad candidate record and fails a whole
+  id-refresh; the file tracker currently fails an entire fetch on one bad YAML file).
+
+### 4.3 Out of scope, deliberately
+
+Workflow state ids/types, teams, projects/cycles/milestones, estimates, due dates, subscribers,
+parent/sub-issue hierarchy; provider identity and authorization (tokens, scopes, `viewer`/`me`); a
+server query language; cursors, rate limits, retries and backoff (document "no rate limit" rather than
+inventing one); webhooks; rich text, reactions, mentions. And do not make the file tracker depend on
+the GitHub mirror or the janitor: the Linear path has no such dependency.
+
+## 5. Skills: what the agent is missing, and where they have to live
+
+Upstream's skills are **not an orchestration feature**. Neither upstream's nor this fork's `lib/`
+mentions `skills` at all; Codex discovers them per working directory, and upstream's agent works on
+upstream's own repository, which contains `.codex/skills/`. Measured on a real session here: the skill
+roots are `~/.codex/skills`, `~/.agents/skills` and plugin caches -- the workspace is not among them,
+and none of the seven skills appeared in the session's 44-item skill list.
+
+So the delivery mechanism is: **commit the skills into the repository the agent works on**. In this
+deployment that is `lanhaolong20161111/beekeeper` (locally `ai_beekeeper/.verify_elixir`), not this
+fork.
+
+What to do with each file, from the port review:
+
+| skill | disposition |
+|---|---|
+| `commit` | **port**: the capability is platform-neutral; change heredoc/temp-file to repeated `-m` (or `-F -` with UTF-8 no BOM), drop the `Co-authored-by: Codex` trailer, and never blanket `git add -A` |
+| `pull` | **port nearly verbatim**: only the `$(git branch --show-current)` and the gate command change, plus a line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) |
+| `push` | **port**: `make -C elixir all` -> `mix lint` + `mix test` from `elixir/`; `/tmp` + `mktemp` + `rm` -> `$env:TEMP` + `[IO.File]::WriteAllText`; no `&&`/`||` (PowerShell 5.1 cannot parse them); keep the PR title/body discipline |
+| `land` | **port a reduced version**: locate PR, mergeability, `gh pr checks --watch` + `$LASTEXITCODE`, `gh pr merge --squash`, and the reply-before-change discipline. Drop the Codex-review lore and `python3`. |
+| `debug` | **port the method, retarget it**: the log is where `--logs-root` says, not `log/symphony.log`; `rg pat 'dir/*.log'` fails on Windows (rg does not glob argv, PowerShell does not glob for native tools) -- use `rg -n --glob 'symphony.log*' <pattern> <dir>`; `| sort -u` is broken because PATH `sort` is Windows `sort.exe` |
+| `release` | **drop**: it bumps/tags Symphony's own repo and watches Burrito on ubuntu-24.04 |
+| `linear` | **drop**: `linear_graphql` is bound only by the Linear adapter; the file tracker advertises `symphony_publish` instead |
+| `land/land_watch.py` | **drop**: its three signals are Symphony's (Codex review comments, autofix head moves); `gh pr checks --watch` covers "watch CI" with no Python. If it ever runs: `python` not `python3` (the `python3` on PATH is the Store stub) and `PYTHONUTF8=1` for non-ASCII review text |
+
+Other measured Windows facts the ported skills must respect: `make` and `jq` are absent; `gh` has
+built-in `--jq`; `rg` exists (and Codex bundles one); `curl` in PowerShell is an alias for
+`Invoke-WebRequest` (use `curl.exe`); `D:\Program Files\Git\usr\bin` is not on PATH, so Git-bash tools
+like `mktemp`/`sort`/`grep` only work as `/usr/bin/<x>`; `bash.exe` in System32 is WSL and cannot run
+Windows programs (the code already finds Git's `bash` -- `Shell.find_bash/0`).
+
+## 6. Acceptance
+
+The port is done when, on this Windows machine, one real ticket run can show all of:
+
+1. the session's sandbox lets the agent write git metadata (`codex.git_metadata_writable: true`),
+2. the agent writes a commit with a real message (not the janitor's fixed one),
+3. it pushes the branch and opens the pull request itself -- or, if the credential decision goes the
+   other way, the run reports precisely why it could not,
+4. the branch name and PR URL are recorded on the ticket,
+5. the tracker exposes Linear-parity fields (labels normalization, `blocked_by` refs, explicit
+   `dispatchable`, derived `url`, links),
+6. `mix lint` and `mix test` are green, and this file plus `docs/fork-changes.md` describe what
+   changed and how to get upstream behaviour back.
+
+## 7. Round log
+
+- **Round 1 (2026-09-29)**: git-metadata gap measured, fixed and tested (`8000fdb`); the same run found
+  the credential half (`SEC_E_NO_CREDENTIALS`) and the separate-sandbox-account explanation, both
+  recorded in `docs/fork-changes.md`; the retry-window flake that failed a gate run was fixed
+  (`2fa190a`); Linear and skills reference inventories collected (this file's §4 and §5). Next: the
+  child-environment pass-through (§3), then port the four skills into the target repository (§5), then
+  the tracker parity work (§4.1).
