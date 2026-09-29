@@ -37,6 +37,59 @@ defmodule SymphonyElixir.Janitor.TicketTest do
     end
   end
 
+  describe "add_link/4" do
+    # The file tracker's counterpart of Linear's attachmentLinkGitHubPR: the pull request a ticket
+    # produced belongs on the ticket, where the next reader finds it without asking GitHub.
+
+    test "records a link in the inline links list" do
+      updated = Ticket.add_link(@ticket, "https://github.com/o/r/pull/7", "PR 7", "pr")
+
+      {:ok, %{front_matter: fm}} = Ticket.split(updated)
+      assert Ticket.get(fm, "links") =~ ~s(url: "https://github.com/o/r/pull/7")
+      assert Ticket.get(fm, "links") =~ ~s(title: "PR 7")
+      assert Ticket.get(fm, "links") =~ "kind: pr"
+    end
+
+    test "is idempotent for the same link" do
+      once = Ticket.add_link(@ticket, "https://github.com/o/r/pull/7", "PR 7", "pr")
+      twice = Ticket.add_link(once, "https://github.com/o/r/pull/7", "PR 7", "pr")
+
+      assert twice == once
+    end
+
+    test "appends a second link instead of replacing the first" do
+      once = Ticket.add_link(@ticket, "https://github.com/o/r/pull/7", "PR 7", "pr")
+      twice = Ticket.add_link(once, "https://example.test/spec", "Spec", "url")
+
+      {:ok, %{front_matter: fm}} = Ticket.split(twice)
+      links = Ticket.get(fm, "links")
+
+      assert links =~ "pull/7"
+      assert links =~ "example.test/spec"
+      assert String.starts_with?(links, "[")
+      assert String.ends_with?(links, "]")
+    end
+
+    test "a block-form links list is left alone rather than clobbered" do
+      text = """
+      ---
+      id: SYM-7
+      links:
+        - url: "https://example.test/one"
+      ---
+
+      Body
+      """
+
+      assert Ticket.add_link(text, "https://github.com/o/r/pull/8", "PR 8", "pr") == text
+    end
+
+    test "a ticket with no front matter is returned untouched" do
+      assert Ticket.add_link("# notes\n", "https://github.com/o/r/pull/7", "PR 7", "pr") ==
+               "# notes\n"
+    end
+  end
+
   describe "get/2" do
     test "reads keys and strips quotes" do
       {:ok, %{front_matter: fm}} = Ticket.split(@ticket)

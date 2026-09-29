@@ -107,6 +107,54 @@ defmodule SymphonyElixir.Janitor.Ticket do
     end
   end
 
+  @doc """
+  Records a link in the ticket's front matter, in the inline `links:` list.
+
+  This is the file tracker's counterpart of Linear's `attachmentLinkGitHubPR` / `attachmentLinkURL`:
+  the ticket is the tracker, so a pull request that was opened on its behalf belongs on it, where the
+  next reader -- a person, or the next run -- finds it without asking GitHub.
+
+  Idempotent: a link that is already present changes nothing. Only the inline form (`links: [{...}]`)
+  is understood; a ticket whose `links:` is a block list comes back untouched rather than clobbered,
+  because guessing at YAML with a regex is how a ticket loses data.
+  """
+  @spec add_link(String.t(), String.t(), String.t(), String.t()) :: String.t()
+  def add_link(text, url, title, kind \\ "url") when is_binary(text) and is_binary(url) do
+    case split(text) do
+      {:ok, %{front_matter: front_matter}} ->
+        cond do
+          String.contains?(front_matter, url) -> text
+          block_links?(front_matter) -> text
+          true -> set_key(text, "links", merged_links(front_matter, url, title, kind))
+        end
+
+      :skip ->
+        text
+    end
+  end
+
+  # A `links:` line that is not a one-line list is a shape this module does not edit.
+  defp block_links?(front_matter) do
+    Regex.match?(~r/^\s*links\s*:/m, front_matter) and
+      not Regex.match?(~r/^\s*links\s*:\s*\[.*\]\s*$/m, front_matter)
+  end
+
+  defp merged_links(front_matter, url, title, kind) do
+    entry = link_entry(url, title, kind)
+
+    case get(front_matter, "links") do
+      "" -> "[" <> entry <> "]"
+      "[" <> existing -> "[" <> String.trim_trailing(existing, "]") <> ", " <> entry <> "]"
+      _unrecognised -> "[" <> entry <> "]"
+    end
+  end
+
+  defp link_entry(url, title, kind) do
+    ~s({url: "#{escape_link(url)}", title: "#{escape_link(title)}", kind: #{kind}})
+  end
+
+  defp escape_link(value), do: value |> to_string() |> String.replace("\"", "\\\"")
+
   @doc "Builds the text of a brand-new ticket."
   @spec build(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def build(id, title, issue_number, body) do

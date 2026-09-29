@@ -686,15 +686,37 @@ defmodule SymphonyElixir.Janitor do
   defp publish_pull_request(id, workspace, ticket_path, branch, cfg) do
     case existing_pull_request(branch, cfg) do
       {:ok, url} ->
+        record_pull_request(ticket_path, url)
         url
 
       :none ->
-        create_pull_request(id, workspace, ticket_path, branch, cfg)
+        case create_pull_request(id, workspace, ticket_path, branch, cfg) do
+          url when is_binary(url) ->
+            record_pull_request(ticket_path, url)
+            url
+
+          other ->
+            other
+        end
 
       {:error, reason} ->
         Logger.warning("janitor: #{id} cannot list pull requests for #{branch}: #{inspect(reason)}")
         nil
     end
+  end
+
+  # The ticket is the tracker, so the link goes on the ticket -- the counterpart of Linear's
+  # `attachmentLinkGitHubPR`, and the thing a later reader looks for. Written whether the pull request
+  # was opened now or already existed, and idempotent either way.
+  defp record_pull_request(ticket_path, url) do
+    text = File.read!(ticket_path)
+    updated = Ticket.add_link(text, url, "PR #{pull_request_number(url)}", "pr")
+
+    if updated == text, do: :ok, else: File.write!(ticket_path, updated)
+  end
+
+  defp pull_request_number(url) do
+    url |> String.split("/") |> List.last() |> to_string()
   end
 
   # `gh` must run with the workspace as its cwd: `--fill` would ask git for `main...branch`, and the

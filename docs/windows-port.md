@@ -139,8 +139,11 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
   author and timestamp per entry, editable in place, never rewriting the description. Linear keeps
   comments and description separate; the file tracker's body *is* the description, so state that.
 - **Attachments / PR links** -> front-matter `links: [{url, title, kind: pr|url}]`, mirroring
-  `attachmentLinkGitHubPR` / `attachmentLinkURL`. Today the PR URL only reaches the GitHub issue and is
-  never recorded on the ticket (`janitor.ex:733-749`).
+  `attachmentLinkGitHubPR` / `attachmentLinkURL`. **Done in round 3**: when the host observes a pull
+  request for a ticket -- whether it opened it or found it already open -- it records the link on the
+  ticket, idempotently. The inline list is the only form it edits: a block-form `links:` is left
+  untouched rather than clobbered, and a ticket that needs two pull requests at once (the multi-repo
+  case in §4.3) would need a list keyed by repository rather than by URL.
 - **Assignee** -> `assignee_id` front matter, already parsed. `me` is unsupported: there is no viewer
   query analogue, so the honest emulation is a configured worker identity.
 - **State objects with ids** -> states stay the declared config lists; no ids in the issue record.
@@ -247,3 +250,9 @@ The port is done when, on this Windows machine, one real ticket run can show all
   behaviour change: the file tracker used to gate in every state.
   Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then the
   remaining §4.1 items (comments with stable ids, `links`, derived `url`, the malformed-record rule).
+- **Round 4 (2026-09-29)**: §4.2's pull-request link done -- the janitor records `links: [{url, title,
+  kind: pr}]` on the ticket whenever it observes a PR for it, which is the file tracker's counterpart
+  of Linear's `attachmentLinkGitHubPR`; inline form only, idempotent, and a block-form `links:` is left
+  alone rather than clobbered.
+  Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then the
+  remaining §4.1 items (comments with stable ids, derived `url`, the malformed-record rule).

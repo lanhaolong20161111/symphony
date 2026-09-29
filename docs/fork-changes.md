@@ -268,6 +268,7 @@ have checked how the run is terminated.
 | `state`, `assignee_id`, discussion | the human, through the Issue | Issue -> janitor -> ticket file |
 | code changes, the PR | the agent, as files, then through `symphony_publish` | workspace -> janitor -> branch + PR |
 | `branch_name` | a person, or the janitor **once** when the ticket has none | ticket -> the branch, the push and the PR, every round after |
+| the pull-request link (`links:`) | the janitor, once per pull request it observes | branch -> ticket, and the same URL onto the issue |
 | the boards | the janitor alone | read-only for everyone else |
 
 The conflict rule for `state` is what makes that work: the janitor remembers the label it last wrote,
