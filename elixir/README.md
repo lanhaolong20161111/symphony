@@ -163,7 +163,15 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. On the
+  codex pinned here (0.155.1), the schema that binary generates for its own app-server protocol
+  (`codex app-server generate-json-schema`) accepts the strings `untrusted`, `on-request` and
+  `never`, or the object form
+  `{"granular":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}` used by the default
+  above; that object also takes two optional keys, `request_permissions` and `skill_approval`, both
+  defaulting to false. An earlier version of this line listed `on-failure` and object-form `reject`;
+  the codex pinned here accepts neither. Only 0.155.1 was checked, so another app-server version may
+  accept a different set.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local

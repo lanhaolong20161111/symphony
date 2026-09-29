@@ -15,7 +15,8 @@ still missing to run upstream's agent-driven git workflow here: [`docs/windows-p
 
 ## Behaviour that changed for a caller
 
-Only four engine-level changes are visible to a caller, plus the example workflow.
+Only four engine-level changes are visible to a caller -- rows 1, 2, 4 and 5 -- plus the example
+workflow in row 3.
 
 | # | area | change | why | affects a default? | back to upstream |
 |---|---|---|---|---|---|
