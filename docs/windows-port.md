@@ -113,17 +113,18 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 4. `priority` integer-or-null with Linear's 1..4-then-unknown dispatch rank. Today's file tracker
    accepts numbers, numeric strings and floats (`file.ex:334-344`); pick one coercion and document it.
 5. `blocked_by` entries are `{id, identifier, state}` maps with each key nullable, as Linear produces
-   (`linear/client.ex:626-630`). Front matter should accept both the shorthand and the full form:
+   (`linear/client.ex:626-630`). **Done in round 3**: front matter accepts both the shorthand and the
+   full form, and the shorthand is expanded by reading the blocker's own file:
    ```yaml
    blocked_by: [SYM-1, SYM-2]                                  # shorthand, expanded against the directory
    blocked_by: [{id: SYM-1, identifier: SYM-1, state: done}]   # Linear-shaped
    ```
-   Shorthand ids resolve inside the ticket directory; an unresolved id becomes a ref with `nil` state,
-   which must block exactly as Linear's `nil` blocker state does (`client.ex:508-510`).
-6. `dispatchable` stays explicit and is never reconstructed by the scheduler. Extend it from
-   `blockers == []` to Linear's rule: hold back while any blocker is non-terminal **and** the ticket is
-   in the first active state -- with that state **configured** rather than hard-coded as Linear's
-   `"Todo"` (`client.ex:503`).
+   An unresolved id keeps a `nil` state, which blocks exactly as Linear's `nil` blocker state does
+   (`client.ex:508-510`).
+6. `dispatchable` stays explicit and is never reconstructed by the scheduler. **Done in round 3**, on
+   Linear's rule: gate while a blocker is unfinished **and** the ticket is in the first `active_states`
+   entry (Linear hardcodes `Todo`, `client.ex:501-503`; here the list's order decides). This replaced
+   "gate in every state", which is a deliberate behaviour change.
 7. `url` is derived when absent (`janitor.ex:929-931` already does this for tickets).
 8. `created_at`/`updated_at` come from front matter, RFC3339 or `nil`. Do **not** substitute file
    mtime: it flips on unrelated edits.
@@ -238,3 +239,11 @@ The port is done when, on this Windows machine, one real ticket run can show all
   content plus a prompt that names the file by path.
   Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then
   §4.1 item 5.
+- **Round 3 (2026-09-29)**: §4.1 items 2 and 5 done -- labels normalize like Linear's (previous round)
+  and `blocked_by` is now Linear's ref shape (`{id, identifier, state}`, each nullable) with the same
+  dispatch rule: a blocker gates only while the ticket sits in the workflow's **first** `active_states`
+  entry, a blocker whose state cannot be seen blocks, and the shorthand `blocked_by: [T-1]` is expanded
+  by reading the blocker's own file through this module's normal decode path. That is a deliberate
+  behaviour change: the file tracker used to gate in every state.
+  Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then the
+  remaining §4.1 items (comments with stable ids, `links`, derived `url`, the malformed-record rule).

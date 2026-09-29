@@ -94,8 +94,49 @@ defmodule SymphonyElixir.FileTrackerTest do
       write_ticket(dir, "T-1.md", markdown("id: T-1\nstate: open\nblocked_by: [T-0]", "Body\n"))
 
       assert {:ok, [issue]} = FileTracker.tickets(settings(dir))
-      assert issue.blocked_by == ["T-0"]
+
+      # Linear's shape (`linear/client.ex:626-630`): a ref, with a nullable state. T-0 does not exist,
+      # so the state stays nil -- and a blocker we cannot see blocks.
+      assert issue.blocked_by == [%{id: "T-0", identifier: "T-0", state: nil}]
       refute issue.dispatchable
+    end
+
+    test "a blocker that is finished stops blocking", %{dir: dir} do
+      write_ticket(dir, "T-0.md", markdown("id: T-0\nstate: done", "Body\n"))
+      write_ticket(dir, "T-1.md", markdown("id: T-1\nstate: open\nblocked_by: [T-0]", "Body\n"))
+
+      assert {:ok, issues} = FileTracker.tickets(settings(dir))
+      blocked = Enum.find(issues, &(&1.id == "T-1"))
+
+      # The state is resolved from the blocker's own file, through this module's normal decode path.
+      assert blocked.blocked_by == [%{id: "T-0", identifier: "T-0", state: "done"}]
+      assert blocked.dispatchable
+    end
+
+    test "a blocker written in Linear's full form is accepted as-is", %{dir: dir} do
+      write_ticket(
+        dir,
+        "T-1.md",
+        markdown(~s(id: T-1\nstate: open\nblocked_by: [{id: T-0, identifier: T-0, state: open}]), "Body\n")
+      )
+
+      assert {:ok, [issue]} = FileTracker.tickets(settings(dir))
+      assert issue.blocked_by == [%{id: "T-0", identifier: "T-0", state: "open"}]
+      refute issue.dispatchable
+    end
+
+    test "a blocker only gates the workflow's first active state", %{dir: dir} do
+      # Linear's rule (`linear/client.ex:501-503`): a blocked issue is held back only while it sits in
+      # the first state (their `Todo`); once work has started, an unfinished blocker cannot freeze it.
+      # Here `active_states` is [open, ready], so `open` gates and `ready` does not.
+      write_ticket(dir, "T-0.md", markdown("id: T-0\nstate: open", "Body\n"))
+      write_ticket(dir, "T-1.md", markdown("id: T-1\nstate: open\nblocked_by: [T-0]", "Body\n"))
+      write_ticket(dir, "T-2.md", markdown("id: T-2\nstate: ready\nblocked_by: [T-0]", "Body\n"))
+
+      assert {:ok, issues} = FileTracker.tickets(settings(dir))
+
+      refute Enum.find(issues, &(&1.id == "T-1")).dispatchable
+      assert Enum.find(issues, &(&1.id == "T-2")).dispatchable
     end
   end
 

@@ -28,12 +28,26 @@ defmodule SymphonyElixir.Tracker.File do
   Defaults: `id`/`identifier` fall back to the file name, `title` to the identifier, `state` to
   `"open"`, `description` to the Markdown body.
 
+  `blocked_by` takes both shapes, and they mean the same thing:
+
+      blocked_by: [T-1, T-2]                                     # shorthand
+      blocked_by: [{id: T-1, identifier: T-1, state: done}]      # the ref shape Linear produces
+
+  The shorthand is expanded by looking each blocker up beside this ticket, so the blocker's `state` is
+  read from its own file. A blocker that cannot be found keeps a `nil` state, and a blocker whose state
+  cannot be seen blocks -- the same answer Linear gives for an absent blocker state.
+
   ## Which tickets get dispatched
 
-  `dispatchable` is derived, not declared: a ticket is dispatchable when it has no `blocked_by`
-  entries. The orchestrator only ever asks for tickets in the configured `active_states`, so a
-  ticket that is returned but still carries blockers is deliberately held back rather than
-  dropped -- it shows up as blocked instead of silently disappearing.
+  `dispatchable` is derived, not declared, and it follows Linear's rule rather than "any blocker at
+  all": a ticket is held back while a blocker is unfinished **and** the ticket is in the workflow's
+  first `active_states` entry. Linear hardcodes that first state as `Todo`; here it is whatever the
+  list names first, which makes the order of `active_states` load-bearing. Once work has started, an
+  unfinished blocker stops gating, so it cannot freeze a ticket that is already in progress.
+
+  The orchestrator only ever asks for tickets in the configured `active_states`, so a ticket that is
+  returned but still carries blockers is deliberately held back rather than dropped -- it shows up as
+  blocked instead of silently disappearing.
 
   Moving work along is editing one line of one file (`state: ready` -> `state: done`), which the
   agent can do itself, or a human can do in an editor. Nothing else in Symphony has to change:
@@ -145,16 +159,53 @@ defmodule SymphonyElixir.Tracker.File do
   """
   @spec tickets(map()) :: {:ok, [Issue.t()]} | {:error, term()}
   def tickets(tracker_settings) when is_map(tracker_settings) do
-    with {:ok, path} <- resolve_path(tracker_settings) do
-      cond do
-        File.dir?(path) -> read_directory(path)
-        File.regular?(path) -> read_ticket_file(path)
-        true -> {:error, {:file_tracker_path_not_found, path}}
-      end
+    with {:ok, path} <- resolve_path(tracker_settings),
+         {:ok, issues} <- read_tickets_at(path) do
+      {:ok, Enum.map(issues, &apply_dispatch_gate(&1, tracker_settings))}
     end
   end
 
   def tickets(_tracker_settings), do: {:error, :invalid_file_tracker_settings}
+
+  defp read_tickets_at(path) do
+    cond do
+      File.dir?(path) -> read_directory(path)
+      File.regular?(path) -> read_ticket_file(path)
+      true -> {:error, {:file_tracker_path_not_found, path}}
+    end
+  end
+
+  # Linear holds a blocked ticket back only while it sits in the workflow's **first** state -- its code
+  # hardcodes `Todo` for that (`linear/client.ex:501-503`) -- and once work has started the blocker
+  # stops gating, so an unfinished blocker cannot freeze a ticket that is already in progress. Here the
+  # first entry of `active_states` plays that role, which makes the order of that list load-bearing. A
+  # blocker whose state cannot be seen blocks, exactly as Linear treats an absent blocker state
+  # (`client.ex:508-510`).
+  defp apply_dispatch_gate(issue, tracker_settings) do
+    blockers = issue.blocked_by || []
+
+    blocked? =
+      blockers != [] and gating_state?(issue.state, tracker_settings) and
+        Enum.any?(blockers, &(not terminal_state?(&1, tracker_settings)))
+
+    %{issue | dispatchable: not blocked?}
+  end
+
+  defp gating_state?(state, %{active_states: [first | _]}) when is_binary(first) do
+    normalize_state(state) == normalize_state(first)
+  end
+
+  defp gating_state?(_state, _tracker_settings), do: false
+
+  defp terminal_state?(%{state: state}, tracker_settings) when is_binary(state) do
+    terminal = Map.get(tracker_settings, :terminal_states) || []
+
+    terminal
+    |> Enum.map(&normalize_state/1)
+    |> Enum.member?(normalize_state(state))
+  end
+
+  defp terminal_state?(_blocker, _tracker_settings), do: false
 
   # ── Path resolution ─────────────────────────────────────────────────────────
 
@@ -255,29 +306,25 @@ defmodule SymphonyElixir.Tracker.File do
     {:ok,
      decoded
      |> Enum.with_index(1)
-     |> Enum.map(fn {ticket, index} -> to_issue(ticket, body, "#{stem}-#{index}") end)}
+     |> Enum.map(fn {ticket, index} -> to_issue(ticket, body, "#{stem}-#{index}", path) end)}
   end
 
   defp to_issues(path, decoded, body) when is_map(decoded) do
     if blank_map?(decoded) do
       {:error, {:file_tracker_empty_ticket, path}}
     else
-      {:ok, [to_issue(decoded, body, file_stem(path))]}
+      {:ok, [to_issue(decoded, body, file_stem(path), path)]}
     end
   end
 
   defp to_issues(path, _decoded, _body), do: {:error, {:file_tracker_invalid_ticket, path}}
 
-  defp to_issue(ticket, body, fallback_identifier) when is_map(ticket) do
+  defp to_issue(ticket, body, fallback_identifier, path) when is_map(ticket) do
     identifier =
       to_string_value(ticket["identifier"]) ||
         to_string_value(ticket["id"]) || fallback_identifier
 
-    blockers =
-      ticket
-      |> Map.get("blocked_by", [])
-      |> List.wrap()
-      |> Enum.map(&to_string/1)
+    blockers = blockers(ticket, Path.dirname(path))
 
     %Issue{
       id: to_string_value(ticket["id"]) || identifier,
@@ -293,7 +340,9 @@ defmodule SymphonyElixir.Tracker.File do
       created_at: to_datetime(ticket["created_at"]),
       updated_at: to_datetime(ticket["updated_at"]),
       blocked_by: blockers,
-      dispatchable: blockers == [],
+      # Decided in `tickets/1`, where the tracker settings are in hand: whether a blocker holds this
+      # ticket back depends on the configured state lists, not on the ticket alone.
+      dispatchable: true,
       # Per-task agent route. Read here because the ticket file is where a person's choice is
       # written; `AgentIdentity.for_issue/2` decides how far it is allowed to go.
       adapter: to_string_value(ticket["adapter"]),
@@ -301,7 +350,63 @@ defmodule SymphonyElixir.Tracker.File do
     }
   end
 
-  defp to_issue(_ticket, _body, _fallback_identifier), do: %Issue{}
+  defp to_issue(_ticket, _body, _fallback_identifier, _path), do: %Issue{}
+
+  # SPEC 187-191, and the same shape Linear produces (`linear/client.ex:626-630`): a blocker is a ref
+  # -- `{id, identifier, state}` with each key nullable -- not a bare name, because the only thing the
+  # dispatcher needs from it is whether it is finished. Front matter may write the shorthand
+  # (`blocked_by: [SYM-1, SYM-2]`), which is expanded here by looking the blocker up beside this ticket.
+  defp blockers(ticket, dir) do
+    ticket
+    |> Map.get("blocked_by", [])
+    |> List.wrap()
+    |> Enum.map(&blocker_ref(&1, dir))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp blocker_ref(value, dir) do
+    case normalize_blocker(value) do
+      nil ->
+        nil
+
+      %{identifier: identifier, state: stated} ->
+        %{id: identifier, identifier: identifier, state: stated || blocker_state(identifier, dir)}
+    end
+  end
+
+  defp normalize_blocker(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      identifier -> %{identifier: identifier, state: nil}
+    end
+  end
+
+  defp normalize_blocker(%{} = value) do
+    identifier = to_string_value(value["identifier"]) || to_string_value(value["id"])
+
+    if identifier do
+      %{identifier: identifier, state: to_string_value(value["state"])}
+    else
+      nil
+    end
+  end
+
+  defp normalize_blocker(_value), do: nil
+
+  # Reuses this module's own decoding path rather than peeking at the file, so a blocker's state means
+  # exactly what a ticket's state means. `nil` when there is no such ticket: the caller blocks on that,
+  # which is what Linear does with a blocker state it cannot see.
+  defp blocker_state(identifier, dir) do
+    path = Path.join(dir, identifier <> ".md")
+
+    with true <- File.regular?(path),
+         {:ok, issues} <- read_ticket_file(path),
+         %Issue{state: state} <- List.first(issues) do
+      to_string_value(state)
+    else
+      _ -> nil
+    end
+  end
 
   defp file_stem(path), do: Path.basename(path, Path.extname(path))
 
