@@ -1053,6 +1053,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    triggered_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -1061,7 +1062,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, triggered_at_ms, 1_000, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1094,6 +1095,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    triggered_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -1101,7 +1103,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, triggered_at_ms, 40_000, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1133,6 +1135,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    triggered_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -1140,7 +1143,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, triggered_at_ms, 10_000, 10_500)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -1260,28 +1263,35 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  # The bounds are wall clock, but the measurement happens after an unbounded amount of VM and OS
-  # scheduling: the retry is scheduled, then the test sleeps, reads the state and computes the
-
-  # A retry that has already come due by the time the assertion runs is **not** a bug: the remainder
-  # is measured after an unbounded amount of VM and OS scheduling, so "still in the future" is not a
-  # property the scheduler can promise. Successive runs on this machine measured 87ms, 804ms, and then
-  # past due -- -455ms, and -1606ms while a full suite was running. What *is* worth failing on is the
-  # upper bound (a retry scheduled later than configured) and the schedule being wrong by orders of
-  # magnitude rather than by scheduler delay, which is what the wide lower net catches.
+  # Wall-clock bounds, anchored to the clock the test reads *before* it triggers the exit that arms
+  # the retry (`triggered_at_ms`), not to a clock read taken after the `Process.sleep/1` that
+  # follows. That is what makes the lower edge exact again -- with no margin at all:
   #
-  # `min_remaining_ms` is the window's lower edge. It is asserted where it can be measured honestly: by
-  # the callers that compare two attempts against each other, not against a clock read taken afterwards.
-  @schedule_slack_ms 60_000
-
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
+  #   * lower: the orchestrator arms the retry only once it sees the exit, and the monotonic clock
+  #     never runs backwards, so `clock_at_arming >= triggered_at_ms` and
+  #     `due_at_ms - triggered_at_ms >= delay_ms` holds by construction. The sleep and the VM/OS
+  #     scheduling between arming and this assertion all happen *after* the retry is armed, so they
+  #     can only add to that difference, never erode it. Reading the clock after the sleep instead --
+  #     what the deleted bound did -- measures the test's own latency: here the 1s continuation retry
+  #     came out at `remaining_ms` = -205 running this file alone, so that lower edge is not a
+  #     property the schedule has, and no margin can bound it (the earlier commits measured -1606ms
+  #     under load and then chased it with a 1s, then a 60s constant).
+  #   * upper: a retry armed `delay_ms` ahead can never show more than `delay_ms` remaining, whenever
+  #     the clock is read.
+  #
+  # The numbers come from this measurement (2026-09-30): `due_at_ms - triggered_at_ms` came out
+  # 1000/10003/40001 for the 1s continuation, 10s first-failure and 40s third-failure retries in a
+  # full suite, and 1000/10025/40000 running this file alone -- the orchestrator armed them 0-25ms
+  # after the trigger. The edge is tight, not decorative: a probe that raised this bound by 1ms failed
+  # with `left: 1000, right: 1001`. So arming 1ms early fails, and a retry armed immediately (<=25ms
+  # after the trigger) fails by ~975ms on that test. That is the property those three tests are here
+  # for -- a retry does not fire immediately, nor before its backoff.
+  defp assert_due_in_range(due_at_ms, triggered_at_ms, min_delay_ms, max_delay_ms) do
     assert is_integer(due_at_ms)
-    assert max_remaining_ms >= min_remaining_ms
+    assert max_delay_ms >= min_delay_ms
 
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-
-    assert remaining_ms <= max_remaining_ms
-    assert remaining_ms > -@schedule_slack_ms
+    assert due_at_ms - triggered_at_ms >= min_delay_ms
+    assert due_at_ms - System.monotonic_time(:millisecond) <= max_delay_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
