@@ -254,6 +254,17 @@ The port is done when, on this Windows machine, one real ticket run can show all
 6. `mix lint` and `mix test` are green, and this file plus `docs/fork-changes.md` describe what
    changed and how to get upstream behaviour back.
 
+**Where that stands after the 2026-09-29 work** (the rebuilt escript is live on 4001):
+
+| # | state |
+|---|---|
+| 1 | implemented, default off -- turning it on is part of the switch, with 2 and 3 |
+| 2 | mechanism ready (the `commit` skill is in the target repository); needs 1 and 3 |
+| 3 | needs the credential decision (§3) |
+| 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
+| 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
+| 6 | every round: `mix lint` clean, suite green (613 at the time of writing) |
+
 ## 7. Round log
 
 These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
@@ -318,3 +329,10 @@ rounds, which are counted separately.
   `symphony_publish`, then changed the state, and PR #45 was opened -- and after the BOM was stripped the
   ticket was re-dispatched and finished on its own.
   Next: §3's token decision and the two sandbox keys, then §6's end-to-end acceptance.
+- **Round 9 (2026-09-29)**: the accumulated code changes went live -- escript rebuilt and the service
+  restarted (4001, four pages 200). Two things were then verified on real tickets rather than in tests:
+  a ticket written **with a deliberate BOM** (bytes `EF BB BF` first) was dispatched and completed
+  (SYM-49, PR #47), which is the BOM fix working in the running system; and that same ticket came back
+  with `branch_name` **and** `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` in its front
+  matter, which is acceptance item 4 demonstrated end to end.
+  Next: §3's token decision and the two sandbox keys (items 1-3), then the rest of §6.
