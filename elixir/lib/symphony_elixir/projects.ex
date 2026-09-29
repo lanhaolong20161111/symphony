@@ -927,7 +927,24 @@ defmodule SymphonyElixir.Projects do
   """
   @spec warnings(map()) :: [String.t()]
   def warnings(attrs) do
-    credential_warnings(attrs) ++ workspace_warnings(attrs)
+    credential_warnings(attrs) ++ workspace_warnings(attrs) ++ multi_repo_warnings(attrs)
+  end
+
+  # Several code repositories is a shape the form accepts and the workspace hook handles (one
+  # subdirectory each), but **publishing is written for one**: `publish_ticket/2` requires the
+  # workspace root itself to be a work tree, and with clones in subdirectories it is not -- so the
+  # ticket would sit in `in-review` and no pull request would appear.
+  #
+  # Saying so beats letting a project be created that quietly never finishes. The real fix is not a
+  # loop: a ticket touching two repositories has **two** pull requests, so "the PR" has to become a
+  # list first, and that is a change to the publish design rather than to this function.
+  defp multi_repo_warnings(attrs) do
+    case length(attrs[:repos] || []) do
+      0 -> []
+      1 -> []
+      count -> ["⚠️ 这个项目声明了 #{count} 个代码仓库 ⇒ 它们会被 clone 进各自子目录 ✓，" <>
+          "但**发布那步是按单仓库写的** ✗ ⇒ 这张票不会自动出 PR（会停在 in-review）"]
+    end
   end
 
   # One warning per missing credential, rather than one expression that tries to say both.

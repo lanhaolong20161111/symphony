@@ -282,5 +282,16 @@ defmodule SymphonyElixir.ProjectsCreateTest do
       assert Enum.any?(problems, &(&1 =~ "环境准备里有非 ASCII"))
       assert Enum.any?(problems, &(&1 =~ "invalid_unicode"))
     end
+
+    test "several code repositories warns that publishing is written for one" do
+      # Accepted, and the hook handles it (one subdirectory each) -- but `publish_ticket/2` needs the
+      # workspace root itself to be a work tree, so the ticket would never get a pull request.
+      one = Projects.warnings(attrs(%{repos: ["me/only"]}))
+      refute Enum.any?(one, &(&1 =~ "发布那步"))
+
+      many = Projects.warnings(attrs(%{repos: ["me/api", "me/web"]}))
+      assert Enum.any?(many, &(&1 =~ "2 个代码仓库"))
+      assert Enum.any?(many, &(&1 =~ "不会自动出 PR"))
+    end
   end
 end
