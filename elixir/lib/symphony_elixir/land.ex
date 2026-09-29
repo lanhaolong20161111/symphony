@@ -833,6 +833,18 @@ defmodule SymphonyElixir.Land do
   defp verdict_messages(5, _checks, _check_runs), do: [@conflict_message]
 
   @doc """
+  The escript entrypoint, so the watcher can run without Mix.
+
+  `mix escript.land` builds `bin/land` with this module as its `main_module`, and an escript
+  calls `main/1` on startup. The watcher takes its options from the caller rather than from
+  the command line, so argv is ignored and this is exactly `cli/0` -- one entrypoint, not a
+  second set of defaults. That matters because the reason to have it is a sandbox where `mix`
+  cannot start at all, and `bin/land` is what starts there.
+  """
+  @spec main([String.t()]) :: no_return()
+  def main(_args), do: cli()
+
+  @doc """
   The command line the skill runs: prints the watcher's messages, then halts with
   the skill's exit code.
 

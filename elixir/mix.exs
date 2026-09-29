@@ -110,17 +110,35 @@ defmodule SymphonyElixir.MixProject do
     [
       setup: ["deps.get"],
       build: ["escript.build"],
+      build_land: ["escript.land"],
       lint: ["specs.check", "credo --strict"]
     ]
   end
 
+  # Two escripts out of one project, and Mix only builds one: `escript.build` reads the
+  # `:escript` key from `Mix.Project.config()`, which is evaluated once when `mix` loads this
+  # file. So the target is chosen here, by an environment variable that `mix escript.land`
+  # (lib/mix/tasks/escript.land.ex) sets before re-pushing the project -- the re-push is what
+  # makes Mix re-read this function. With no variable set, nothing changes: the default is
+  # still the `bin/symphony` server, which is what `mix build` and CI build.
   defp escript do
-    [
-      app: nil,
-      main_module: SymphonyElixir.CLI,
-      name: "symphony",
-      path: "bin/symphony"
-    ]
+    case System.get_env("SYMPHONY_ESCRIPT") do
+      "land" ->
+        [
+          app: nil,
+          main_module: SymphonyElixir.Land,
+          name: "land",
+          path: "bin/land"
+        ]
+
+      _other ->
+        [
+          app: nil,
+          main_module: SymphonyElixir.CLI,
+          name: "symphony",
+          path: "bin/symphony"
+        ]
+    end
   end
 
   defp releases do
