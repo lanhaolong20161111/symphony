@@ -221,6 +221,16 @@ built-in `--jq`; `rg` exists (and Codex bundles one); `curl` in PowerShell is an
 like `mktemp`/`sort`/`grep` only work as `/usr/bin/<x>`; `bash.exe` in System32 is WSL and cannot run
 Windows programs (the code already finds Git's `bash` -- `Shell.find_bash/0`).
 
+**Correction to an earlier note: non-ASCII front matter is not the problem; the encoding is.** This
+deployment's project file carries Chinese comments *inside* its YAML front matter, and it parses --
+measured directly: `workflow parsed: prompt template 6323 chars`, with `tracker.kind`, the janitor
+paths and the codex keys all resolved from it. What actually failed earlier was the **writing**: a BOM
+from `Set-Content -Encoding UTF8`, or UTF-16 from `>`, produces a file the loader rejects, and the error
+was blamed on the Chinese. The rule to keep is "write UTF-8 **without a BOM**" (use the editor tool, or
+`[IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))`), not "keep the front matter
+ASCII" -- that belief would ban legitimate comments, and one validator in this fork enforces exactly
+that mistake.
+
 ## 6. Acceptance
 
 The port is done when, on this Windows machine, one real ticket run can show all of:
@@ -284,3 +294,10 @@ rounds, which are counted separately.
   §4.2's emulations are all either implemented or documented as a deliberate decision.
   Next: §3's token decision and §5's switch (prompt + permissions + paths), then §6's end-to-end
   acceptance.
+- **Round 7 (2026-09-29)**: §5's second leg done -- the deployment prompt (registry commit `2c2eb9d`)
+  now states both cases, so it does not have to be rewritten on the day the sandbox keys are turned on:
+  call the publish tool when the session advertises one, otherwise own the commit and the push by
+  reading `.codex/skills/{commit,push,pull,land}/SKILL.md` in the repository, by path. While proving
+  the prompt's own file still loads, an earlier note was corrected: non-ASCII front matter parses
+  (`prompt template 6323 chars`), and the real hazard is the encoding a Windows shell writes.
+  Next: §3's token decision and enabling the two sandbox keys, then §6's end-to-end acceptance.
