@@ -173,9 +173,23 @@ defmodule SymphonyElixirWeb.Layouts do
   instance serves -- and only while it is up, because a link to a page nobody is serving is worse
   than no link. Those routes take no project parameter: there is no page on *this* console that shows
   another project's tickets or settings, so nothing here pretends otherwise.
+
+  ## Control, and the one row that has none
+
+  A row offers `Start` when nothing answers on its port, and `Stop` when the hub recorded starting it
+  **and** its own state route answered -- the decision is made in `InstanceRegistry.action/1` and
+  arrives here as `@controls`. The row this page is served by is marked `this instance` and gets no
+  stop action at all: the hub never stops the instance it is running in, so there is no button to
+  offer. A stop is confirmed in the browser with the pid it is about to kill and the agent counts
+  from the last probe, because that is the moment a person would want to know what they are ending.
+
+  A failure from either action stays **in the row** (`@outcomes`), never on the page: one project
+  that will not start must not take the table down with it.
   """
   attr(:projects, :list, required: true)
   attr(:conflicts, :map, default: %{})
+  attr(:controls, :map, default: %{})
+  attr(:outcomes, :map, default: %{})
 
   @spec project_overview(map()) :: Phoenix.LiveView.Rendered.t()
   def project_overview(assigns) do
@@ -199,7 +213,7 @@ defmodule SymphonyElixirWeb.Layouts do
         </p>
       <% else %>
         <div class="table-wrap">
-          <table class="data-table" style="min-width: 1150px;">
+          <table class="data-table" style="min-width: 1250px;">
             <thead>
               <tr>
                 <th>project</th>
@@ -210,6 +224,7 @@ defmodule SymphonyElixirWeb.Layouts do
                 <th>queue</th>
                 <th>issues / tickets</th>
                 <th>pages</th>
+                <th>control</th>
               </tr>
             </thead>
             <tbody>
@@ -232,6 +247,14 @@ defmodule SymphonyElixirWeb.Layouts do
                 <td class="mono event-meta">{queue_line(project)}</td>
                 <td class="mono event-meta">{repos_line(project)}</td>
                 <td><.project_links project={project} /></td>
+                <td>
+                  <.project_control
+                    project={project}
+                    status={status(project)}
+                    action={Map.get(@controls, project.name)}
+                    outcome={Map.get(@outcomes, project.name)}
+                  />
+                </td>
               </tr>
             </tbody>
           </table>
@@ -338,6 +361,89 @@ defmodule SymphonyElixirWeb.Layouts do
 
   defp status(_project),
     do: %{state: :unreachable, counts: nil, detail: "no state was read for this row"}
+
+  # The control column: one action per row, decided in `InstanceRegistry.action/1`. A caller that did
+  # not ask for controls (`@controls == %{}`) gets no buttons rather than a guessed one -- the same
+  # rule `status/1` follows one function up.
+  attr(:project, :map, required: true)
+  attr(:status, :map, required: true)
+  attr(:action, :atom, default: nil)
+  attr(:outcome, :any, default: nil)
+
+  defp project_control(assigns) do
+    ~H"""
+    <div class="detail-stack">
+      <%= case @action do %>
+        <% :stop -> %>
+          <button
+            type="button"
+            class="subtle-button"
+            phx-click="stop_instance"
+            phx-value-project={@project.name}
+            data-confirm={stop_confirm(@project, @status)}
+          >Stop</button>
+        <% :start -> %>
+          <button
+            type="button"
+            class="subtle-button"
+            phx-click="start_instance"
+            phx-value-project={@project.name}
+          >Start</button>
+        <% :own -> %>
+          <span class="muted event-meta">the hub never stops the instance it is running in</span>
+        <% :observe -> %>
+          <span class="muted event-meta">answering, not started by this hub</span>
+        <% _unasked -> %>
+          <span class="muted event-meta">-</span>
+      <% end %>
+
+      <%= if @project[:hub] do %>
+        <span class="muted event-meta">
+          hub pid {@project.hub.pid} on {@project.hub.port}{hub_port_note(@project)}
+        </span>
+      <% end %>
+
+      <%= if @outcome do %>
+        <span class={outcome_class(@outcome)}>{outcome_text(@outcome)}</span>
+      <% end %>
+    </div>
+    """
+  end
+
+  # What a stop would end, said before it happens: the pid is the whole process tree's root, so the
+  # pid alone is not enough -- the counts say whether that tree is currently running agents. They are
+  # the last probe's numbers, which is exactly as fresh as this page's other columns.
+  defp stop_confirm(project, status) do
+    "Stop #{project.name}? This kills pid #{project[:hub][:pid]} and its whole process tree" <>
+      carried(status) <> ". Work in flight is lost."
+  end
+
+  defp carried(%{counts: %{running: running, retrying: retrying, blocked: blocked}}) do
+    " (#{running} running, #{retrying} retrying, #{blocked} blocked -- from the last probe)"
+  end
+
+  defp carried(_status), do: " (its agent counts are unknown: it did not report them)"
+
+  # A hub-assigned port is not the declared one whenever the declared one was held, and a row that
+  # silently showed 4002 where the file says 4001 would be the page lying about where the instance is.
+  defp hub_port_note(%{declared_port: declared, port: assigned})
+       when is_integer(declared) and is_integer(assigned) and declared != assigned do
+    " (the file declares #{declared}: it was taken, so the hub assigned #{assigned})"
+  end
+
+  defp hub_port_note(%{declared_port: declared, port: assigned})
+       when is_integer(assigned) and declared in [nil, ""] do
+    " (the file declares no server.port)"
+  end
+
+  defp hub_port_note(_project), do: ""
+
+  defp outcome_class({:error, _message}), do: "error-copy"
+  defp outcome_class(_outcome), do: "muted event-meta"
+
+  defp outcome_text({:error, message}), do: "✗ " <> to_string(message)
+  defp outcome_text({:ok, message}), do: "✓ " <> to_string(message)
+  defp outcome_text(other), do: to_string(other)
 
   # The other instance serves these routes itself (the router is the same in every instance), which is
   # why the link is absolute and only drawn while it is up.

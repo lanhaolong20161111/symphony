@@ -9,6 +9,17 @@ defmodule SymphonyElixir.CLI do
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, mcp: :boolean]
 
+  @doc """
+  The switch an unattended instance must be started with, exactly as it appears on a command line.
+
+  Public because something other than a person now builds that command line:
+  `InstanceRegistry.command/2` starts an instance the hub supervises, and it must pass the same
+  switch this parser insists on. Deriving it from the parsed name is what keeps one string from
+  becoming two.
+  """
+  @spec acknowledgement_switch() :: String.t()
+  def acknowledgement_switch, do: "--" <> String.replace(to_string(@acknowledgement_switch), "_", "-")
+
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
           file_regular?: (String.t() -> boolean()),

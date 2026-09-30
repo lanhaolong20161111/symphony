@@ -19,6 +19,8 @@ defmodule SymphonyElixir.Application do
 
   use Application
 
+  require Logger
+
   @dialyzer {:nowarn_function, start_burrito_cli: 0}
 
   @impl true
@@ -34,6 +36,7 @@ defmodule SymphonyElixir.Application do
   @spec start_runtime() :: Supervisor.on_start()
   def start_runtime do
     :ok = SymphonyElixir.LogFile.configure()
+    reconcile_instances()
 
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
@@ -58,6 +61,23 @@ defmodule SymphonyElixir.Application do
   def stop(_state) do
     SymphonyElixir.StatusDashboard.render_offline_status()
     :ok
+  end
+
+  # The hub's first act, and the only one it takes on its own: a recorded pid that is gone is stale,
+  # so its record goes. This **starts nothing** -- a fleet does not come back by itself after a
+  # reboot, which is a boundary rather than an oversight (see `InstanceRegistry`). It also never
+  # fails the boot: `reconcile/1` answers `%{kept: [], dropped: []}` for a state file it cannot read.
+  defp reconcile_instances do
+    case SymphonyElixir.InstanceRegistry.reconcile() do
+      %{dropped: []} ->
+        :ok
+
+      %{dropped: dropped} ->
+        Logger.warning(
+          "instance registry: dropped #{length(dropped)} stale record(s) with no live pid: " <>
+            Enum.join(dropped, ", ")
+        )
+    end
   end
 
   defp start_burrito_cli do

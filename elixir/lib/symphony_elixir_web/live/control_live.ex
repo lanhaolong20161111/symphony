@@ -15,11 +15,25 @@ defmodule SymphonyElixirWeb.ControlLive do
   navigate the browser to a JSON body. The buttons call the same orchestrator functions the controller
   calls, and re-read the payload afterwards so the state shown is the state the orchestrator reports
   rather than the one the click assumed.
+
+  ## Starting and stopping other instances
+
+  The project table's `Start` / `Stop` buttons are the two events that change something outside this
+  process, so they are the two that must not be able to break this page. Both go through
+  `InstanceRegistry`, which answers `{:ok, _}` or `{:error, reason}` and refuses the hub's own
+  instance outright; whatever comes back is put **in that row** (`@instance_outcomes`), and the page
+  re-reads the panels afterwards so the row shows the state that resulted rather than the state the
+  click assumed. Nothing here can raise a page: the call is wrapped even though the registry already
+  answers reasons rather than raising.
+
+  The event carries a **project name**, never a path: `InstanceRegistry.start_instance/2` looks the
+  name up in the registry, which is what makes "start an arbitrary file" unrepresentable rather than
+  merely discouraged.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Orchestrator, Projects, ProjectStatus, RecorderClient, Settings, TaskComposer}
+  alias SymphonyElixir.{InstanceRegistry, Orchestrator, Projects, ProjectStatus, RecorderClient, Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
 
   @impl true
@@ -29,7 +43,8 @@ defmodule SymphonyElixirWeb.ControlLive do
     {:ok,
      socket
      |> assign_panels()
-     |> assign(:control_error, nil)}
+     |> assign(:control_error, nil)
+     |> assign(:instance_outcomes, %{})}
   end
 
   @impl true
@@ -45,8 +60,14 @@ defmodule SymphonyElixirWeb.ControlLive do
 
   @impl true
   def handle_event("refresh", _params, socket) do
-    {:noreply, socket |> assign_panels() |> assign(:control_error, nil)}
+    {:noreply, socket |> assign_panels() |> assign(:control_error, nil) |> assign(:instance_outcomes, %{})}
   end
+
+  @impl true
+  def handle_event("start_instance", %{"project" => name}, socket), do: instance_action(socket, name, :start)
+
+  @impl true
+  def handle_event("stop_instance", %{"project" => name}, socket), do: instance_action(socket, name, :stop)
 
   @impl true
   def render(assigns) do
@@ -213,7 +234,12 @@ defmodule SymphonyElixirWeb.ControlLive do
         <% end %>
       </section>
 
-      <Layouts.project_overview projects={@projects} conflicts={@queue_conflicts} />
+      <Layouts.project_overview
+        projects={@projects}
+        conflicts={@queue_conflicts}
+        controls={@instance_controls}
+        outcomes={@instance_outcomes}
+      />
 
       <%= if @site do %>
         <Layouts.site_card site={@site} />
@@ -327,17 +353,6 @@ defmodule SymphonyElixirWeb.ControlLive do
     _error -> []
   end
 
-  # The rows come from the registry read **once** -- `Projects.list/1` parses every workflow file --
-  # and their status comes from every instance at once, over its own `GET /api/v1/state`. The registry
-  # read and the state read are the same list of projects, so it is one registry read, not two, and
-  # the http client is injectable for the same reason the orchestrator is: a page test must not open a
-  # socket.
-  defp load_projects do
-    ProjectStatus.list(client: project_status_client(), timeout: project_status_timeout_ms())
-  rescue
-    _error -> []
-  end
-
   defp project_status_client, do: Endpoint.config(:project_status_client)
 
   defp project_status_timeout_ms, do: Endpoint.config(:project_status_timeout_ms) || 1_500
@@ -347,14 +362,98 @@ defmodule SymphonyElixirWeb.ControlLive do
   #
   # Two projects on one queue is not a display detail either way: both instances would race for the
   # same tickets and both janitors would mirror one ticket repository.
+  #
+  # Every row is then overlaid with what the hub knows about it (`InstanceRegistry.overlay/2`): a
+  # project the hub started is probed on the port the hub **assigned** it, and each row's control
+  # action is decided from the state that probe came back with -- so "up" and "the hub's to stop" are
+  # two different facts and neither is assumed from the other.
   defp assign_site_projects(socket) do
-    projects = load_projects()
+    records = InstanceRegistry.records(instance_opts())
+    rows = InstanceRegistry.overlay(Projects.list(probe: false), records)
+
+    projects =
+      ProjectStatus.list(
+        projects: rows,
+        client: project_status_client(),
+        timeout: project_status_timeout_ms()
+      )
 
     socket
     |> assign(:projects, projects)
+    |> assign(:instance_controls, Map.new(projects, &{&1.name, InstanceRegistry.action(&1)}))
     |> assign(:queue_conflicts, Projects.queue_conflicts(projects))
   rescue
-    _error -> socket |> assign(:projects, []) |> assign(:queue_conflicts, %{})
+    _error ->
+      socket
+      |> assign(:projects, [])
+      |> assign(:instance_controls, %{})
+      |> assign(:queue_conflicts, %{})
+  end
+
+  # What a start or a stop did, put in the row it belongs to and nowhere else -- and wrapped, because
+  # "the page renders" outranks "the page explains": a stub that raises must produce a row with a
+  # reason in it, exactly like `ProjectStatus.attach/2` treats a client that raises.
+  defp instance_action(socket, name, action) do
+    outcome = safe_instance_outcome(name, action, instance_opts())
+
+    {:noreply,
+     socket
+     |> assign(:instance_outcomes, Map.put(socket.assigns[:instance_outcomes] || %{}, name, outcome))
+     |> assign_panels()
+     |> put_unroutable_outcome(name, outcome)}
+  end
+
+  # An outcome lives in a row, so it needs a row to live in. An event naming something the registry
+  # does not list -- a crafted `phx-value-project`, or a project deleted while the page was open --
+  # has no row, and its refusal would otherwise be invisible. It goes to the page's own error card
+  # instead, which is where failures that are not about one row already land.
+  defp put_unroutable_outcome(socket, name, {:error, reason}) do
+    if Enum.any?(socket.assigns[:projects] || [], &(&1.name == name)) do
+      socket
+    else
+      assign(socket, :control_error, "#{name}: #{reason}")
+    end
+  end
+
+  defp put_unroutable_outcome(socket, _name, _outcome), do: socket
+
+  defp safe_instance_outcome(name, :start, opts) do
+    case InstanceRegistry.start_instance(name, opts) do
+      {:ok, record} ->
+        {:ok, "started pid #{record.pid} on port #{record.port} (logs: #{record.logs_root})"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, "the hub raised: #{Exception.message(error)}"}
+  catch
+    kind, reason -> {:error, "the hub exited: #{kind} #{inspect(reason)}"}
+  end
+
+  defp safe_instance_outcome(name, :stop, opts) do
+    case InstanceRegistry.stop_instance(name, opts) do
+      :ok -> {:ok, "stopped"}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error -> {:error, "the hub raised: #{Exception.message(error)}"}
+  catch
+    kind, reason -> {:error, "the hub exited: #{kind} #{inspect(reason)}"}
+  end
+
+  # The four functions the hub would otherwise have to spawn a process, open a socket or kill one to
+  # answer, injected the same way `:project_status_client` is. `nil` means "use the real one", which
+  # is what every environment except a test wants.
+  defp instance_opts do
+    [
+      launcher: Endpoint.config(:instance_launcher),
+      held?: Endpoint.config(:instance_port_held?),
+      alive?: Endpoint.config(:instance_alive?),
+      kill: Endpoint.config(:instance_kill),
+      own_port: Endpoint.config(:instance_own_port)
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp orchestrator do

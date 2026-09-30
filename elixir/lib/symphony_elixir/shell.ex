@@ -194,7 +194,7 @@ defmodule SymphonyElixir.Shell do
   # this module exists to prevent.
   defp kill(port) do
     case Port.info(port, :os_pid) do
-      {:os_pid, pid} -> kill_tree(pid)
+      {:os_pid, pid} -> _ = kill_tree(pid)
       _ -> :ok
     end
   catch
@@ -203,17 +203,36 @@ defmodule SymphonyElixir.Shell do
     safe_close(port)
   end
 
-  defp kill_tree(pid) do
+  @doc """
+  Kills `pid` **and the whole process tree under it**.
+
+  The one call that reaches children on Windows is `taskkill /PID <pid> /T /F`; elsewhere the
+  direct child goes away with the port and `pkill -TERM -P <pid>` collects what it left behind.
+
+  Public for the same reason it exists at all: a deadline is not the only thing that owns a process
+  tree. `InstanceRegistry.stop_instance/2` owns the tree of an instance it started, and it has to
+  kill it the same way -- a second implementation of "kill the tree" is how one of them ends up only
+  killing the direct child.
+  """
+  @spec kill_tree(non_neg_integer()) :: :ok | {:error, term()}
+  def kill_tree(pid) when is_integer(pid) and pid > 0 do
+    {output, status} = kill_command(pid)
+
+    if status == 0 do
+      :ok
+    else
+      {:error, {:kill_exit, status, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:kill_raised, Exception.message(error)}}
+  end
+
+  defp kill_command(pid) do
     if windows?() do
       System.cmd("taskkill", ["/PID", Integer.to_string(pid), "/T", "/F"], stderr_to_stdout: true)
     else
-      # Closing the port terminates the direct child; this collects the descendants a shell-based
-      # command leaves behind. Both are best effort -- a missing `pkill` must not turn a timeout
-      # into a crash.
       System.cmd("pkill", ["-TERM", "-P", Integer.to_string(pid)], stderr_to_stdout: true)
     end
-  rescue
-    _ -> :ok
   end
 
   defp safe_close(port) do

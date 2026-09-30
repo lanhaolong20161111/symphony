@@ -39,6 +39,11 @@ if config_env() == :test do
   config :symphony_elixir,
     workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__)
 
+  # The instance registry is a file full of real pids and the hub reconciles it on boot. Under test
+  # it points somewhere nothing else uses, so a test run can never prune the state file of the
+  # machine's actual fleet. `/tmp` is gitignored, so nothing here lands in the repository.
+  config :symphony_elixir, instances_file: Path.expand("../tmp/test-instances.json", __DIR__)
+
   # Tests rewrite the workflow file constantly, so a reload that changes server.port would ask the
   # supervisor to bounce a real endpoint in the middle of the suite. Off here; on everywhere else.
   config :symphony_elixir, restart_endpoint_on_workflow_change: false
