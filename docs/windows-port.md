@@ -1184,10 +1184,13 @@ first real use); the rest are unfinished, and none of them should be read as tho
    switched **off** rather than removed: the mirror's `tickets_repo` line is commented in the registry
    with its reason written beside it (`f941278`, 2026-10-01 03:35:34), while `issues_repo`, the tickets
    repository and the boards are untouched. The order the rest happens in is written down as a
-   rehearsed procedure (`docs/ticket-service-spec.md:242`): **switch the main deployment to the service
-   tracker** -- which needs a plan for the tickets that live in the file queue -- **then remove the
-   queue, then delete the second parser**. It stays semi-irreversible, and the specification's own
-   precondition (slice 4 before slice 6) holds (`docs/ticket-service-spec.md:158-165`).
+   rehearsed procedure (`docs/ticket-service-spec.md:242`), and round 29 executed its first half on the
+   live service: steps 0-3 are done -- the queue's two tickets were imported and now stand in the
+   service as `SYM-3` and `SYM-4` (round 29, §19) -- so what remains is step 4, **switch the main
+   deployment to the service tracker**, and then step 5, remove the queue and delete the second parser.
+   That half stays semi-irreversible and changes the deployment the operator uses, so it waits on the
+   operator rather than on a plan for the queue; the specification's own precondition (slice 4 before
+   slice 6) holds (`docs/ticket-service-spec.md:158-165`).
 6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
    credential replaced them and no workflow in the registry names them any more, so revocation is the
    operator's call rather than a prerequisite for anything.
@@ -1216,9 +1219,10 @@ first real use); the rest are unfinished, and none of them should be read as tho
     service adapter is a reader by design (`ticket_service.ex:10-11`), so whether a service-backed
     tracker should advertise **writer** tools is a decision that still nobody has made (§13.1).
 11. **The throwaway projects and their instances are still there** (`e2e-alpha.md`, `e2e-beta.md` and
-    `svcprobe.md`, all three untracked in the registry root). The `svcprobe` instance is up on 4021 with
-    the SYM-1/SYM-2 pair in the service (both `probe`, both `in-review`); the two `e2e` instances,
-    started by hand on 4002 and 4003 for the 2026-09-30 four-ticket run, are not up now -- measured:
+    `svcprobe.md`, all three untracked in the registry root). The `svcprobe` instance is up on 4021, and
+    the service now holds **four** tickets -- its own `probe` pair (SYM-1, SYM-2, both `in-review`) plus
+    the two round 29 imported from the file queue (SYM-3, SYM-4, both `in-review`). The two `e2e`
+    instances, started by hand on 4002 and 4003 for the 2026-09-30 four-ticket run, are not up now -- measured:
     4001, 4020 and 4021 are the only loopback listeners. Nothing about them has been cleaned up, and
     `svcprobe.md` is also the file this batch's gate measurement was made with, so it is a probe that
     grew a history rather than a scratch file.
@@ -1760,3 +1764,66 @@ rounds, which are counted separately.
   then the decision item 10 leaves open (whether a service-tracked tracker advertises **writer** tools);
   then a policy for the landing sweep; and then the registry's two still-untracked project files
   (`svcprobe.md`, `e2e-alpha.md`, `e2e-beta.md`).
+- **Round 29 (2026-10-01)**: the cutover procedure was corrected twice from measurement, then partly
+  executed -- its steps 0-3 are done on the live service, and the half that changes the main deployment
+  was deliberately left for the operator.
+  - **Two corrections to `docs/ticket-service-spec.md` §10, both from measurements.** `125a52e`
+    replaced the advice to keep the queue "read-only for a few rounds", which was **harmful**: a ticket
+    page's write actions still submit to the janitor, and the janitor writes at `janitor.tickets_path`,
+    so a stale queue beside a service-backed deployment means a write silently edits a file the service
+    never reads, under the same identifier; the step now says to move the queue out of reach. `0f0938d`
+    -- an amendment of `f5c2b3c`, which is still reachable in the reflog (`main@{1}`) and whose inserted
+    paragraph carried three leading spaces, so it would have rendered as a code block -- refined that
+    again: do **not** rename the queue away, because a path that no longer exists can fail a
+    deployment's own validation at boot and take the hub down with it, while `janitor.tickets_path`
+    pointed at a **fresh empty directory** makes every stray write refuse loudly (`no_such_ticket`) and
+    leaves the old queue intact as the record and the rollback. `1c21b49` rewrote step 2: the service
+    assigns its own identifiers, so a ticket already in it cannot collide with an import, and a ticket
+    already in the service may be the very one whose pull request is waiting to be landed -- nothing
+    needs deleting to make room, and the service does not need stopping. One thing in §10 is still
+    inconsistent with its own refinement, and is recorded rather than edited here: step 5
+    (`docs/ticket-service-spec.md:292`) still says "**Move the queue out of reach** -- rename the
+    directory", the wording `0f0938d` replaced in step 4.
+  - **Step 3 was executed on the live service, additively.** The file queue `~/code/symphony-work` held
+    two real tickets -- SYM-1 `Agent self-push with the new token` and SYM-2 `Which credential is the
+    agent actually using?`, both `state: in-review`, measured: a **non-active** state, so the engine
+    touches them either way -- and both were imported through `POST /tickets` with the body in a
+    **file**, the `--data-binary @file` form §10 prescribes rather than JSON built by interpolation
+    (the mistake §10 warns about at `:268`, which this project has made twice). The round's own request
+    bodies survive as `%TEMP%\q-import-SYM-1.json` (3,269 bytes) and `q-import-SYM-2.json` (2,984
+    bytes), UTF-8 without a BOM, written 06:19:38; the command line itself was not captured, so the
+    bodies, the stored tickets and the timestamps are what is measured. The service assigned **SYM-3**
+    (description 2,469 characters) and **SYM-4** (2,113), both `started`/`in-review`, created
+    06:19:38.664 and .724 (+08:00) -- the second the service's database was last written
+    (`~/.symphony-tickets/tickets.db`, 86,016 bytes). The service now holds **four** tickets: the two
+    earlier `probe` tickets plus these two. Nothing was deleted, and the two queue files were not
+    touched: SYM-1.md's mtime is 01:32:29 and SYM-2.md's 01:32:35, and the queue repository is clean.
+  - **Fidelity was proved, not assumed.** The service's own export
+    (`mix symphony_tickets.export --out DIR`, `3e0ad76` in `symphony-tickets`) was run against the live
+    database and answered **4 written, 0 unchanged, 0 failed**; for each imported ticket its body was
+    compared with the queue's original file, and the export's body for SYM-3 equals the queue's SYM-1
+    body byte for byte and SYM-4's equals SYM-2's -- **29 and 30 lines**, `-ceq` True -- once the one
+    blank line the export writes after the front matter is dropped. The description the service
+    actually stores is that body minus the file's single final newline: 2,469 characters against the
+    file's 2,470, and 2,113 against 2,114, and the difference is that one LF. Two independent exports
+    agree byte for byte on all four tickets (the round's own `%TEMP%\svc-export-r78` and a re-run made
+    while writing this entry). One honest difference stays on the record: the queue file's
+    `## Discussion` section was imported as part of the **description**, because that is what §10's step
+    3 says to import -- the content is provably intact, but it is not structured as the service's
+    comment rows (both imported tickets answer `comments: []`, measured). Parsing those sections into
+    comments is a separate small slice, and it was not done.
+  - **Steps 4-5 are not done, and the reason is the operator, not the code.** Switching the main
+    deployment's `tracker.kind` to `ticket_service`, re-pointing `janitor.tickets_path` at a fresh empty
+    directory, restarting the hub, verifying and only then retiring the queue and the janitor's second
+    parser all change the deployment the operator uses from the phone; the registry still says what it
+    said -- `symphony.md`'s `tracker.kind: file` with `provider.path:
+    C:/Users/lhl20/code/symphony-work` (`:21-26`, measured). Unchanged with it: two pull requests still
+    waiting to be landed (#3 `symphony/SYM-1` and #4 `symphony/SYM-2`, both `OPEN` in
+    `lanhaolong20161111/symphony-e2e-beta`, measured), no unattended-merge policy (item 9), no
+    auto-start on boot (item 8), the throwaway projects and instances still present (item 11), and
+    `GET /tickets` with no state still answering `{"tickets":[]}` -- measured, and the reason every read
+    this round named its states; whether an unfiltered list should answer everything rather than
+    nothing is still nobody's decision.
+  Next: the operator's word on §10's steps 4-5, which are the only ones left in that procedure; then
+  the decision item 10 leaves open (whether a service-tracked tracker advertises **writer** tools); then
+  parsing the imported `## Discussion` sections into comment rows; then a policy for the landing sweep.
