@@ -187,3 +187,40 @@ Each slice is independently verifiable and ends with `mix lint` and `mix test` g
 - The agent tool list is known to be three tools in the file adapter and is otherwise unread. `[open]`
 - Whether the service should speak to the recorder (which already owns a SQLite database on port
   4010 and is not running) is not decided. `[open]`
+
+## 9. Answers to the open questions (decided by the operator, 2026-09-30)
+
+The questions in section 7 were put to the operator; these are the answers, and they supersede the
+recommendations recorded there.
+
+1. **Standalone service or embedded?** **Standalone.** Its own application, its own SQLite, its own
+   port (4020). The fork gains no database dependency, and a crashed service cannot take the
+   orchestrator down with it. The recorder is the precedent on this machine: same shape, same
+   operating model.
+2. **Do issues still need to exist on GitHub?** **The mirror goes away.** The console becomes the
+   surface. This is the decision that removes the whole family of accidents this document opens
+   with: no mirrored files, no tickets repository, no second writer, no link that has to be
+   guessed or dropped. Work still reaches GitHub where it belongs -- as branches and pull requests
+   on the code repository.
+3. **What happens to the janitor's second parser of the ticket file format?** **It is deleted with
+   slice 6**, not left reading a directory nothing writes to.
+4. **Does `tracker.secret_environment_names` get fixed here?** **Yes, in this work.** The field is
+   declared and silently discarded, while the specification calls it a must; it is small, and it
+   sits directly on the credential boundary this project cares about.
+5. **Which state names survive as the human-facing vocabulary?** **Both.** The internal vocabulary
+   stays English and machine-facing (the Linear-style type plus a stable name), and the console
+   carries a Chinese display name alongside it: the Chinese copy that exists today stays as it is,
+   and an English name is available for anyone who wants it. The scheduler branches on the type,
+   never on the display name.
+
+### What this changes in the earlier sections
+
+- Section 6's slice 5 (markdown export) no longer carries the mirror; it is export only, for the
+  offline and diffable property.
+- Section 6's slice 6 now includes retiring the tickets repository and the janitor's file parser,
+  not just the file tracker.
+- Section 6's slice 2 targets port 4020, and slice 3's adapter talks to it over HTTP.
+- The state model in D3 gains a display-name field; nothing else in D1-D10 changes.
+- Section 0's first unresolved item stands: the research citations are still marked carried rather
+  than verified, and whoever builds slice 1 should re-derive them from the code as they go rather
+  than trusting a citation that was never in this file.
