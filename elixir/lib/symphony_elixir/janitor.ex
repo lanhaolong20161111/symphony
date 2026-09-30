@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Janitor do
   Five jobs, in order:
 
     1. receive  a newly opened GitHub issue labelled `agent-task` becomes a ticket
-    2. mirror   ticket <-> issue: state as a plain-language label, comments into the ticket,
+    2. mirror   ticket <-> issue: state as an ASCII state label, comments into the ticket,
                 assignee into the ticket; closing the issue means the ticket is done
     3. boards   regenerate README.md and BOARD-<state>.md
     4. sync     commit ticket changes, pull, push
@@ -60,6 +60,12 @@ defmodule SymphonyElixir.Janitor do
   @command_timeout 120_000
   @terminal_states ~w(done cancelled)
 
+  # A label of ours has to exist in the repository before it can be put on an issue, and every
+  # argument below is argv -- so the color and the description are ASCII for the same reason the
+  # label names are (`Janitor.Labels` has the measurement).
+  @label_color "1D76DB"
+  @label_description "symphony ticket state"
+
   # Where `publish: direct` commits and pushes. A literal, and the same name `create_pull_request/5`
   # already passes as `--base`: the project's own branch is the one the pull request path treats as
   # the trunk, and discovering it per-round (`origin/HEAD`) would let a workspace that an agent had
@@ -78,6 +84,14 @@ defmodule SymphonyElixir.Janitor do
   @howto_marker "<!-- symphony:how-to -->"
   @advice_window_days 7
 
+  @typedoc """
+  Runs one `gh` invocation.
+
+  Handed the **argv list** (no executable, no options) and answers what `Shell.run/3` answers:
+  `{:ok, output, status} | {:error, reason}`.
+  """
+  @type gh_runner :: ([String.t()] -> {:ok, String.t(), non_neg_integer()} | {:error, term()})
+
   @typedoc "Everything the janitor needs to know about where things live."
   @type config :: %{
           tickets: String.t(),
@@ -87,14 +101,15 @@ defmodule SymphonyElixir.Janitor do
           state_file: String.t(),
           interval_seconds: pos_integer(),
           isolation: String.t(),
-          publish: String.t()
+          publish: String.t(),
+          runner: gh_runner() | nil
         }
 
   @doc """
   Builds the configuration, filling in this machine's defaults.
 
   Options: `:tickets`, `:workspace_root`, `:repo`, `:tickets_repo`, `:state_file`,
-  `:interval_seconds`, `:isolation`, `:publish`.
+  `:interval_seconds`, `:isolation`, `:publish`, `:runner`.
 
   The paths have defaults because they are this machine's own directories; **the two repositories do
   not**, because one is a name somebody else owns. A deployment that does not declare `:repo` gets
@@ -107,6 +122,10 @@ defmodule SymphonyElixir.Janitor do
   the janitor's options carry only `janitor.*` keys, and every entry point (the supervised server,
   the agent tool, the mix task, the sweep) builds its configuration through here, so resolving them
   in this one place is what keeps those callers from disagreeing about the mode.
+
+  `:runner` replaces the command every `gh` call in this module runs, and it is absent in production:
+  `Projects.create_repo/2` and `Land.run_gh/2` expose the same seam for the same reason, so a test can
+  pin the argv of the mirror -- label names included -- with no `gh` on the machine and no socket.
   """
   @spec config(keyword()) :: config()
   def config(opts \\ []) do
@@ -115,8 +134,7 @@ defmodule SymphonyElixir.Janitor do
 
     %{
       tickets: Keyword.get(opts, :tickets, Path.join([home, "code", "symphony-tickets"])),
-      workspace_root:
-        Keyword.get(opts, :workspace_root, Path.join([home, "code", "symphony-file-workspaces"])),
+      workspace_root: Keyword.get(opts, :workspace_root, Path.join([home, "code", "symphony-file-workspaces"])),
       # No repository default, deliberately: "not declared" means "do not guess". A built-in name
       # would make an undeclared deployment mirror into, link to and open pull requests against a
       # repository it never named -- which is what a default here did until it was removed.
@@ -125,7 +143,8 @@ defmodule SymphonyElixir.Janitor do
       state_file: Keyword.get(opts, :state_file, Path.join([home, "code", "symphony-janitor-state.json"])),
       interval_seconds: Keyword.get(opts, :interval_seconds, 30),
       isolation: Keyword.get(opts, :isolation) || project_isolation(project),
-      publish: Keyword.get(opts, :publish) || project_publish(project)
+      publish: Keyword.get(opts, :publish) || project_publish(project),
+      runner: Keyword.get(opts, :runner)
     }
   end
 
@@ -247,10 +266,9 @@ defmodule SymphonyElixir.Janitor do
   # left blank the agent derives one itself and writes it down, so the person is never blocked on
   # knowing a command.
   defp receive_issues(rows, cfg) do
-    args = ["issue", "list", "--repo", cfg.repo, "--label", @task_label,
-            "--state", "open", "--json", "number,title,body", "--limit", "50"]
+    args = ["issue", "list", "--repo", cfg.repo, "--label", @task_label, "--state", "open", "--json", "number,title,body", "--limit", "50"]
 
-    case gh_json(args) do
+    case gh_json(args, cfg) do
       {:ok, issues} ->
         known = MapSet.new(rows, & &1.issue)
         Enum.each(issues, &receive_issue(&1, known, cfg))
@@ -272,10 +290,9 @@ defmodule SymphonyElixir.Janitor do
   defp advise_unlabelled(cfg) do
     since = Date.utc_today() |> Date.add(-@advice_window_days) |> Date.to_iso8601()
 
-    args = ["issue", "list", "--repo", cfg.repo, "--state", "open", "--limit", "50",
-            "--search", "created:>=#{since}", "--json", "number,labels,comments"]
+    args = ["issue", "list", "--repo", cfg.repo, "--state", "open", "--limit", "50", "--search", "created:>=#{since}", "--json", "number,labels,comments"]
 
-    case gh_json(args) do
+    case gh_json(args, cfg) do
       {:ok, issues} -> Enum.each(issues, &advise_issue(&1, cfg))
       {:error, reason} -> Logger.warning("janitor: cannot scan for unlabelled issues: #{inspect(reason)}")
     end
@@ -284,7 +301,7 @@ defmodule SymphonyElixir.Janitor do
   defp advise_issue(issue, cfg) do
     if needs_advice?(issue) do
       number = to_string(issue["number"])
-      gh(["issue", "comment", number, "--repo", cfg.repo, "--body", advice_text(cfg)])
+      gh(["issue", "comment", number, "--repo", cfg.repo, "--body", advice_text(cfg)], cfg)
       Logger.info("janitor: issue ##{number} has no #{@task_label} label; posted how-to")
     end
   end
@@ -348,7 +365,9 @@ defmodule SymphonyElixir.Janitor do
     state =
       Enum.reduce(rows, state, fn row, acc ->
         case sync_issue(row, acc, cfg) do
-          {:ok, updated} -> updated
+          {:ok, updated} ->
+            updated
+
           {:error, reason} ->
             Logger.warning("janitor: mirror failed for #{row.id}: #{inspect(reason)}")
             acc
@@ -402,8 +421,11 @@ defmodule SymphonyElixir.Janitor do
   defp sync_issue(row, state, cfg) do
     entry = Map.get(state, row.id, %{"state" => nil, "comment" => 0})
 
-    with {:ok, issue} <- gh_json(["issue", "view", row.issue, "--repo", cfg.repo,
-                                       "--json", "state,labels,assignees,comments"]) do
+    with {:ok, issue} <-
+           gh_json(
+             ["issue", "view", row.issue, "--repo", cfg.repo, "--json", "state,labels,assignees,comments"],
+             cfg
+           ) do
       labels = Enum.map(issue["labels"] || [], & &1["name"])
 
       decision =
@@ -436,16 +458,9 @@ defmodule SymphonyElixir.Janitor do
   defp adopt_issue(row, state, cfg) do
     path = Path.join(cfg.tickets, "#{row.id}.md")
 
-    args = ["issue", "create", "--repo", cfg.repo, "--title", "[#{row.id}] #{row.title}",
-            "--body", body_for_issue(row, cfg), "--label", @managed_label]
+    args = ["issue", "create", "--repo", cfg.repo, "--title", "[#{row.id}] #{row.title}", "--body", body_for_issue(row, cfg)] ++ adopt_labels(row.state, cfg)
 
-    args =
-      case Labels.friendly(row.state) do
-        nil -> args
-        label -> args ++ ["--label", label]
-      end
-
-    case Shell.run("gh", args, timeout: @command_timeout) do
+    case gh(args, cfg) do
       {:ok, output, 0} ->
         case Regex.run(~r{/issues/(\d+)}, output) do
           [_, number] ->
@@ -462,6 +477,27 @@ defmodule SymphonyElixir.Janitor do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # The labels a new issue should carry: the marker that says the janitor looks after this issue, plus
+  # the ticket's own state label. Both are *created first if the repository does not have them*.
+  #
+  # This is the call that produced the warning this change exists to remove: `gh issue create`
+  # refuses the whole issue over one label it cannot find ("could not add label: ... not found"), so a
+  # fresh repository -- or a label name that arrived mangled through the ANSI code page -- meant the
+  # issue was never created and the same warning was logged every round. An issue that was never
+  # created is a ticket with no human surface at all, so a label that cannot be ensured is left off
+  # with one line saying so instead; the next round's mirror adds it, because by then the issue exists.
+  defp adopt_labels(state, cfg) do
+    [@managed_label | List.wrap(Labels.friendly(state))]
+    |> Enum.flat_map(&adopt_label(&1, cfg))
+  end
+
+  defp adopt_label(label, cfg) do
+    case ensure_label(label, cfg) do
+      :ok -> ["--label", label]
+      :skipped -> []
     end
   end
 
@@ -553,6 +589,16 @@ defmodule SymphonyElixir.Janitor do
   # Ticket -> issue: keep the labels in step with the ticket, which is the single source of truth.
   # `row` here is the row *after* the pull steps, so a ticket the person just closed stays `done`
   # instead of having its previous label written back over it.
+  #
+  # The label text is ASCII (`Janitor.Labels`) and the label is created on demand, because on this
+  # host a non-ASCII label arrives at `gh` as a different string and a label the repository does not
+  # have is refused outright.
+  #
+  # Nothing here fails the mirror, and that is a deliberate difference from `gh_json(["issue", "view"],
+  # ...)` above. This runs *after* this round's comments were appended to the ticket, so returning an
+  # error here would drop the bookkeeping that stops those same comments being pulled again -- the
+  # ticket would grow duplicate discussion entries on the next round. Instead each step says what it
+  # could not do and the round continues, which is this module's stated rule.
   defp push_label(row, labels, entry, cfg) do
     desired = Labels.friendly(row.state)
     stale = Enum.filter(labels, &(Labels.internal(&1) != nil and &1 != desired))
@@ -565,17 +611,84 @@ defmodule SymphonyElixir.Janitor do
         entry
 
       true ->
-        unless desired in labels do
-          gh(["issue", "edit", row.issue, "--repo", cfg.repo, "--add-label", desired])
-        end
+        push_desired_label(row, desired, stale, entry, cfg)
+    end
+  end
 
-        Enum.each(stale, fn label ->
-          gh(["issue", "edit", row.issue, "--repo", cfg.repo, "--remove-label", label])
-        end)
+  defp push_desired_label(row, desired, stale, entry, cfg) do
+    with :ok <- ensure_label(desired, cfg),
+         :ok <- add_label(row, desired, cfg) do
+      remove_stale_labels(row, stale, cfg)
+      # Record the internal state we just put on the issue, so the next round's read of that same
+      # label is recognised as ours rather than as a person's instruction.
+      Map.put(entry, "state", row.state)
+    else
+      :skipped -> entry
+      {:error, reason} -> report_missing_label(row, desired, reason, entry)
+    end
+  end
 
-        # Record the internal state we just put on the issue, so the next round's read of that same
-        # label is recognised as ours rather than as a person's instruction.
-        Map.put(entry, "state", row.state)
+  # Creates one of our labels when the repository does not have it yet.
+  #
+  # `--force` is what makes this safe to call before an add: it *updates* the label when it already
+  # exists instead of failing, so there is no `gh` error text to parse and no "have I created it
+  # already?" state to keep. Every round therefore behaves the same, and a repository that has never
+  # seen these labels is fixed by the first state change rather than failing every round.
+  #
+  # `:skipped` is the honest answer when the label cannot be created at all (no push access, no
+  # network): the label's absence says nothing about the mirror, and the ticket's real state is still
+  # on the ticket. One line says so, and the next round tries again -- there is no retry loop here,
+  # and nothing else is retried.
+  defp ensure_label(label, cfg) do
+    args = ["label", "create", label, "--repo", cfg.repo, "--color", @label_color, "--description", @label_description, "--force"]
+
+    case gh(args, cfg) do
+      {:ok, _output, 0} ->
+        :ok
+
+      {:ok, output, status} ->
+        label_unavailable(label, cfg, {:exit, status, output})
+
+      {:error, reason} ->
+        label_unavailable(label, cfg, reason)
+    end
+  end
+
+  defp label_unavailable(label, cfg, reason) do
+    Logger.warning(
+      "janitor: label #{label} is not in #{cfg.repo} and could not be created: #{inspect(reason)}; " <>
+        "leaving the label off"
+    )
+
+    :skipped
+  end
+
+  defp add_label(row, label, cfg) do
+    case gh(["issue", "edit", row.issue, "--repo", cfg.repo, "--add-label", label], cfg) do
+      {:ok, _output, 0} -> :ok
+      {:ok, output, status} -> {:error, {:exit, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp report_missing_label(row, label, reason, entry) do
+    Logger.warning("janitor: #{row.id} label #{label} was not added: #{inspect(reason)}")
+    entry
+  end
+
+  # Removal is quieter than adding on purpose: the label was on the issue a moment ago, so the worst
+  # case is that it is still there next round -- cosmetic, and not worth losing this round's record of
+  # what was pulled.
+  defp remove_stale_labels(_row, [], _cfg), do: :ok
+
+  defp remove_stale_labels(row, stale, cfg) do
+    Enum.each(stale, fn label -> remove_label(row, label, cfg) end)
+  end
+
+  defp remove_label(row, label, cfg) do
+    case gh(["issue", "edit", row.issue, "--repo", cfg.repo, "--remove-label", label], cfg) do
+      {:ok, _output, 0} -> Logger.info("janitor: #{row.id} label #{label} removed")
+      other -> Logger.warning("janitor: #{row.id} could not remove label #{label}: #{inspect(other)}")
     end
   end
 
@@ -706,25 +819,35 @@ defmodule SymphonyElixir.Janitor do
   assigns the id (`local-1`, `local-2`, ...), because GitHub's comment ids belong to the entries the
   janitor mirrors in from the issue and the two spaces should stay distinguishable.
 
+  The entry is signed with `:author`, `agent` by default -- that is the caller that has existed all
+  along (`Janitor.AgentTool`). A caller that is *not* the agent names itself, because two `agent`
+  entries are indistinguishable to the reader the discussion exists for, and the ticket's own history
+  is the only place that can say who wrote one.
+
   Fails closed on the same things `publish_now/2` does: an `id` that is not a plain ticket name, or a
   ticket file that does not exist. A ticket whose bytes are not valid UTF-8 is refused too
   (`{:error, {:ticket_not_utf8, id}}`), and for a stronger reason than tidiness: every writer here
   hands the file's own bytes back unchanged, and bytes that are not text cannot be handed back
   unchanged -- a writer that accepts them only carries the damage onward. See `set_ticket_state/3`
-  for the measurement.
+  for the measurement. The `:author` is held to the same rule as the body, for the same reason.
   """
+  @agent_author "agent"
+
   @spec comment_on_ticket(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def comment_on_ticket(id, body, opts \\ []) when is_binary(id) and is_binary(body) do
+    author = opts |> Keyword.get(:author, @agent_author) |> to_string()
+
     with :ok <- validate_id(id),
          cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
          ticket_path = Path.join(cfg.tickets, "#{id}.md"),
          {:ok, text} <- read_ticket_text(ticket_path, id),
-         :ok <- writable_text?(text, body, id) do
+         :ok <- writable_text?(text, body, id),
+         :ok <- writable_text?(text, author, id) do
       comment_id = Ticket.next_local_id(text)
 
-      File.write!(ticket_path, Ticket.append_comment(text, "agent", body, comment_id))
+      File.write!(ticket_path, Ticket.append_comment(text, author, body, comment_id))
 
-      {:ok, %{ticket: id, comment: %{id: comment_id, author: "agent"}}}
+      {:ok, %{ticket: id, comment: %{id: comment_id, author: author}}}
     end
   end
 
@@ -1169,11 +1292,15 @@ defmodule SymphonyElixir.Janitor do
   # `gh` must run with the workspace as its cwd: `--fill` would ask git for `main...branch`, and the
   # janitor's own cwd is the tickets repository, which has neither. An explicit title and body
   # removes the dependency on git context entirely.
+  #
+  # This one call stays on `Shell.run/3` rather than going through `runner/1`: it needs `cd:`, and the
+  # injected runner is argv-only on purpose (that is the shape `Projects.create_repo/2` and
+  # `Land.run_gh/2` take too). Its label is an ASCII literal and its title and body are built here, so
+  # there is nothing non-ASCII in this argv.
   defp create_pull_request(id, workspace, ticket_path, branch, cfg) do
     body = "Automated by symphony for ticket #{id}." <> ticket_reference(id, cfg)
 
-    args = ["pr", "create", "--repo", cfg.repo, "--head", branch, "--base", "main",
-            "--label", @managed_label, "--title", "symphony/#{id}: automated change", "--body", body]
+    args = ["pr", "create", "--repo", cfg.repo, "--head", branch, "--base", "main", "--label", @managed_label, "--title", "symphony/#{id}: automated change", "--body", body]
 
     case Shell.run("gh", args, cd: workspace, timeout: @command_timeout) do
       {:ok, output, 0} ->
@@ -1204,7 +1331,7 @@ defmodule SymphonyElixir.Janitor do
          number when is_binary(number) <- issue_number(File.read!(ticket_path)) do
       body = "干完了，改动在这里：#{url}"
 
-      case gh(["issue", "comment", number, "--repo", cfg.repo, "--body", body]) do
+      case gh(["issue", "comment", number, "--repo", cfg.repo, "--body", body], cfg) do
         {:ok, _output, 0} ->
           Logger.info("janitor: #{id} PR link posted to issue ##{number}")
 
@@ -1263,8 +1390,10 @@ defmodule SymphonyElixir.Janitor do
   # `--state all` on purpose: a *closed* pull request for this branch still means the branch was
   # published, so neither the sweep nor the tool should open a second one for it.
   defp existing_pull_request(branch, cfg) do
-    case gh_json(["pr", "list", "--repo", cfg.repo, "--head", branch, "--state", "all",
-                  "--json", "url", "--limit", "1"]) do
+    case gh_json(
+           ["pr", "list", "--repo", cfg.repo, "--head", branch, "--state", "all", "--json", "url", "--limit", "1"],
+           cfg
+         ) do
       {:ok, [%{"url" => url} | _]} when is_binary(url) -> {:ok, url}
       {:ok, _none} -> :none
       {:error, reason} -> {:error, reason}
@@ -1388,8 +1517,35 @@ defmodule SymphonyElixir.Janitor do
 
   # ── gh / git ──────────────────────────────────────────────────────────────────
 
-  defp gh_json(args), do: Shell.run_json("gh", args, timeout: @command_timeout)
-  defp gh(args), do: Shell.run("gh", args, timeout: @command_timeout)
+  # One runner for every `gh` call in this module.
+  #
+  # `cfg.runner` wins when it is set -- the same seam `Projects.create_repo/2` and `Land.run_gh/2`
+  # offer -- so the mirror (label argv included) can be pinned in a test with no `gh` on the machine
+  # and no socket. Unset, this is exactly the `Shell.run("gh", ...)` it has always been.
+  defp gh(args, cfg), do: runner(cfg).(args)
+
+  # The JSON half of the same runner. `Shell.run_json/3` cannot be handed an injected command, so the
+  # decode it performs lives here instead: the runner has to see the argv, and the shape of the answer
+  # (`{:ok, term} | {:error, {:exit, _, _} | {:bad_json, _}}`) is the one it has always returned.
+  defp gh_json(args, cfg) do
+    case runner(cfg).(args) do
+      {:ok, output, 0} ->
+        case JSON.decode(output) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, _reason} -> {:error, {:bad_json, output}}
+        end
+
+      {:ok, output, status} ->
+        {:error, {:exit, status, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp runner(cfg), do: cfg.runner || (&gh_command/1)
+  defp gh_command(args), do: Shell.run("gh", args, timeout: @command_timeout)
+
   defp git(cfg_or_dir, args)
 
   defp git(%{tickets: tickets}, args), do: Shell.run("git", args, cd: tickets, timeout: @command_timeout)

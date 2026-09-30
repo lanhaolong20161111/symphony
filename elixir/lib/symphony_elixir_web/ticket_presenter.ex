@@ -3,7 +3,10 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   Reads the queue's tickets for the control plane's ticket view.
 
   Read-only on purpose: state changes and comments are made by the agent and the host (the janitor),
-  not by this UI, so nothing here writes a ticket.
+  not by this UI, so nothing here writes a ticket. It does answer the two questions a page that offers
+  a write has to ask first -- which states the workflow declares (`declared_states/1`) and where a write
+  to *this* queue has to land (`write_options/1`) -- because both answers come from the same tracker
+  settings this module already resolves, and a second resolver would be a second place to disagree.
 
   ## Where each field comes from
 
@@ -78,7 +81,82 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   end
 
   @doc """
-  A short, printable form of a read error, for a page that must still render.
+  The states the queue's workflow declares: its `active_states`, then its `terminal_states`.
+
+  Never a list written here. Those two lists are the scheduler's dispatch vocabulary -- the
+  orchestrator only ever asks the tracker for tickets in `active_states`, and a ticket parked in a
+  state nobody declared is one nothing will pick up again -- so a page that offered `ready` to a
+  project whose workflow says `Todo` would be offering a state that strands the ticket. Read from the
+  same resolved tracker settings as `list/1`, which is also why a project whose vocabulary is not this
+  machine's is offered its own words.
+
+  Takes the same `:project` option as `list/1`, and answers with the same errors, so a page that could
+  read a ticket can also read the words it may be moved between.
+  """
+  @spec declared_states(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def declared_states(opts \\ []) do
+    with {:ok, tracker} <- tracker_settings(opts) do
+      {:ok, vocabulary(tracker)}
+    end
+  end
+
+  # Active states first, in declared order: the first of them is the one that gates a blocked ticket
+  # (`tracker/file.ex`), so it is the entry a person is likeliest to want. Deduplicated because a
+  # workflow that lists one state in both lists should not offer it twice.
+  defp vocabulary(tracker) do
+    [Map.get(tracker, :active_states), Map.get(tracker, :terminal_states)]
+    |> Enum.flat_map(&List.wrap/1)
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
+  Options a write to this page's queue must be handed, for `Janitor.set_ticket_state/3` and
+  `Janitor.comment_on_ticket/3`.
+
+  Empty for this instance's own queue, deliberately: the janitor's own configuration already names the
+  directory the host writes tickets in, and a page must not second-guess where the host keeps them.
+
+  A **named** project is the whole reason this exists. The janitor's default directory is *this*
+  instance's queue, so a write made while reading `?project=<name>` would land in the wrong project's
+  files -- editing whichever ticket happens to share an identifier, which is the one mistake this seam
+  has to make impossible. The named project's own workflow declares the directory it reads tickets
+  from, and that is where a write goes.
+
+  A named project whose workflow declares no file queue is `{:error, {:no_writable_queue, name}}`
+  rather than this instance's queue.
+  """
+  @spec write_options(keyword()) :: {:ok, keyword()} | {:error, term()}
+  def write_options(opts \\ []) do
+    case project_name(opts) do
+      nil -> {:ok, []}
+      name -> project_write_options(name, opts)
+    end
+  end
+
+  defp project_write_options(name, opts) do
+    with {:ok, tracker} <- tracker_settings(opts) do
+      write_target(provider_path(tracker), name)
+    end
+  end
+
+  # A write has a target only when the project's workflow names the directory it reads tickets from.
+  defp write_target(nil, name), do: {:error, {:no_writable_queue, name}}
+  defp write_target(path, _name), do: {:ok, [tickets: path]}
+
+  defp project_name(opts) do
+    case Keyword.get(opts, :project) do
+      name when is_binary(name) and name != "" -> name
+      _own -> nil
+    end
+  end
+
+  @doc """
+  A short, printable form of a read or write error, for a page that must still render.
+
+  A write path's refusal keeps its own atom in the sentence (`ticket_not_utf8`, `no_such_ticket`, ...):
+  prose alone would leave a reader with nothing to search for, and the atom is exactly what the host
+  returned.
   """
   @spec describe(term()) :: String.t()
   def describe({:ticket_read_failed, message}) when is_binary(message), do: message
@@ -91,6 +169,28 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   def describe({:project_workflow_unreadable, name, reason}) do
     "the workflow file of project #{name} cannot be read: #{workflow_reason(reason)}"
+  end
+
+  # The host's write refusals, in the words the host used. Each one names its own reason atom, because
+  # that is what the janitor returned and what a reader would have to look up to find the rule.
+  def describe({:ticket_not_utf8, id}) do
+    "the ticket file of #{id} is not valid UTF-8, so the host refuses to write over it (ticket_not_utf8)"
+  end
+
+  def describe({:value_not_utf8, id}) do
+    "the value to write is not valid UTF-8, so the host refuses to write it (#{id}: value_not_utf8)"
+  end
+
+  def describe({:no_such_ticket, id}) do
+    "there is no ticket named #{id} in the queue (no_such_ticket)"
+  end
+
+  def describe({:invalid_ticket_id, id}) do
+    "that is not a plain ticket identifier: #{inspect(id)} (invalid_ticket_id)"
+  end
+
+  def describe({:no_writable_queue, name}) do
+    "the workflow file of project #{name} declares no ticket directory a write could go to (no_writable_queue)"
   end
 
   def describe(reason), do: inspect(reason)
