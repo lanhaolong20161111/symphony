@@ -156,8 +156,14 @@ defmodule SymphonyElixir.Tracker.File do
   @doc """
   The janitor's three tools, and only those.
 
-  The gate tool is deliberately **not** here. Running the project's gate is a property of the
-  project, not of this tracker, so it is composed at the tracker boundary
+  A file ticket is changed by editing it, so this tracker has never needed a provider API. What it
+  does need is a publisher: the agent cannot commit, push or open a pull request (see
+  `SymphonyElixir.Janitor`), so the janitor -- this tracker's host-side caretaker -- offers
+  `symphony_publish` and the agent calls it when the work is done. `ticket_comment` and `ticket_state`
+  are there because the host owns every write to a ticket file.
+
+  The gate tool is deliberately **not** here. Running the project's gate is a property of the project,
+  not of this tracker, so it is composed at the tracker boundary
   (`SymphonyElixir.Tracker.compose_agent_tool_specs/1`) and advertised whatever the kind is.
   Composing it here is exactly what left a service-backed project with no tools at all: a project
   whose tickets come from the service does not run this adapter, so the gate it declares was never

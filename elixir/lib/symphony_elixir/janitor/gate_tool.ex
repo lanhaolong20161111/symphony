@@ -12,6 +12,11 @@ defmodule SymphonyElixir.Janitor.GateTool do
   permissions. This tool is that surface pointed at the gate. It runs the command the project declared
   **on the host**, in the calling ticket's workspace, and answers with the exit code and the tail.
 
+  It is advertised by `SymphonyElixir.Tracker.compose_agent_tool_specs/1` -- beside whatever the
+  configured adapter offers, and for **every** tracker kind -- because running a gate is a property of
+  the project, not of where its tickets come from. Advertising it from the file tracker's adapter is
+  what left a service-backed project with no agent tools at all.
+
   ## The command is declared, never supplied
 
   A call may name a ticket. It may not name a command, an argument, a shell operator, or a script to

@@ -469,9 +469,7 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
       # Reached through the boundary with no ticket and no session: the gate tool's own refusal, which
       # is a value -- not the adapter's "unsupported tool". Nothing runs, so the runner is never used.
       response =
-        Tracker.execute_bound_agent_tool(binding, "symphony_gate", %{},
-          runner: recording_runner(:never_used)
-        )
+        Tracker.execute_bound_agent_tool(binding, "symphony_gate", %{}, runner: recording_runner(:never_used))
 
       refute response["success"]
       assert failure_of(response)["message"] =~ "needs a ticket identifier"
@@ -500,6 +498,7 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
         binding = DynamicTool.bind()
 
         assert binding.adapter == adapter
+
         assert spec_names(binding.tool_specs) == tools,
                "#{kind} advertises something extra for a project that declares no gate"
       end)
@@ -510,9 +509,7 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
       assert DynamicTool.bind().tool_specs == []
 
       response =
-        Tracker.execute_bound_agent_tool(DynamicTool.bind(), "symphony_gate", %{},
-          runner: recording_runner(:never_used)
-        )
+        Tracker.execute_bound_agent_tool(DynamicTool.bind(), "symphony_gate", %{}, runner: recording_runner(:never_used))
 
       refute response["success"]
       assert failure_of(response)["message"] =~ "declares no gate"
