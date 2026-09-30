@@ -40,6 +40,55 @@ defmodule SymphonyElixir.Config.Schema do
     def dump(_value), do: :error
   end
 
+  # `tracker.secret_environment_names` names the variables that must be *unset* in an agent's child
+  # process, so a tracker credential never reaches a run with no business holding it (SPEC.md calls
+  # the setting a MUST). The only shape that can mean anything is a list of names, so anything else is
+  # refused rather than emptied: a bare string reads like one name but is not a list, a blank entry
+  # names no variable at all, and a value silently coerced to `[]` is precisely the failure this
+  # setting exists to prevent -- the credential stays in the child's environment and nothing says so.
+  #
+  # Messages carry no field name of their own: `format_errors/1` prefixes the setting they were raised
+  # on, so a workflow author reads `tracker.secret_environment_names must contain only ...`.
+  defmodule SecretEnvironmentNames do
+    @moduledoc false
+    @behaviour Ecto.Type
+
+    @type t :: [String.t()]
+
+    @not_a_list "must be a list of environment variable names"
+    @bad_name "must contain only non-empty environment variable names"
+
+    @spec type() :: {:array, :string}
+    def type, do: {:array, :string}
+
+    @spec embed_as(term()) :: :self
+    def embed_as(_format), do: :self
+
+    @spec equal?(term(), term()) :: boolean()
+    def equal?(left, right), do: left == right
+
+    @spec cast(term()) :: {:ok, t()} | {:error, keyword()}
+    def cast(names) when is_list(names) do
+      if Enum.all?(names, &valid_name?/1) do
+        {:ok, names}
+      else
+        {:error, [message: @bad_name]}
+      end
+    end
+
+    def cast(_value), do: {:error, [message: @not_a_list]}
+
+    @spec load(term()) :: {:ok, t()} | :error
+    def load(names) when is_list(names), do: {:ok, names}
+    def load(_value), do: :error
+
+    @spec dump(term()) :: {:ok, t()} | :error
+    def dump(names) when is_list(names), do: {:ok, names}
+    def dump(_value), do: :error
+
+    defp valid_name?(name), do: is_binary(name) and String.trim(name) != ""
+  end
+
   defmodule Tracker do
     @moduledoc false
     use Ecto.Schema
@@ -54,7 +103,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:provider, :map, default: %{})
-      field(:secret_environment_names, {:array, :string}, default: [])
+      field(:secret_environment_names, SecretEnvironmentNames, default: [])
       field(:required_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string})
       field(:terminal_states, {:array, :string})
@@ -72,6 +121,7 @@ defmodule SymphonyElixir.Config.Schema do
           :project_slug,
           :assignee,
           :provider,
+          :secret_environment_names,
           :required_labels,
           :active_states,
           :terminal_states
@@ -750,7 +800,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     provider = normalize_optional_map(settings.tracker.provider) || %{}
 
-    {api_key, assignee, provider, secret_environment_names} =
+    {api_key, assignee, provider, derived_environment_names} =
       case settings.tracker.kind do
         "linear" ->
           linear_provider =
@@ -796,7 +846,8 @@ defmodule SymphonyElixir.Config.Schema do
         project_slug: Map.get(provider, "project_slug", settings.tracker.project_slug),
         assignee: assignee,
         provider: provider,
-        secret_environment_names: Enum.uniq(secret_environment_names),
+        secret_environment_names:
+          merge_secret_environment_names(derived_environment_names, settings.tracker.secret_environment_names),
         active_states: active_states,
         terminal_states: terminal_states
     }
@@ -814,6 +865,21 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  # Two parties have something to say about which variables must be unset in an agent's child process:
+  # the selected tracker adapter derives the names the credential it needs would arrive under
+  # (`LINEAR_API_KEY` for a linear tracker), and the workflow may name further variables of its own.
+  # The derived names are a safety property -- this tracker's credential must not reach a run with no
+  # business holding it -- and the configured names are an addition to it, never a replacement, so the
+  # field is their union. De-duplicated, because a name both parties mention is one variable, and
+  # blank-free, because a blank entry is not a variable and would otherwise be handed to the child as
+  # one. The unconfigured path is untouched: with nothing configured the union is the derived list.
+  defp merge_secret_environment_names(derived, configured) do
+    (derived ++ List.wrap(configured))
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
   end
 
   defp normalize_keys(value) when is_map(value) do

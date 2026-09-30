@@ -1247,6 +1247,132 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
+  # `tracker.secret_environment_names` is a MUST in the spec, and it is the *union* of the names the
+  # selected adapter derives (a safety property: this tracker's credential must not reach a run with no
+  # business holding it) and the names a workflow configures on top of them. Before this test the
+  # configured names were silently dropped -- absent from the tracker embed's cast list, then
+  # overwritten by the adapter-derived value in `finalize_settings/1` -- so a workflow could write the
+  # setting, get none of it, and see no error, which is the very failure the MUST exists to prevent.
+  test "tracker secret environment names combine the configured and the adapter-derived names" do
+    assert {:ok, configured_only} =
+             Schema.parse(%{
+               tracker: %{kind: "file", secret_environment_names: ["SYMPHONY_CONFIGURED_SECRET"]}
+             })
+
+    assert configured_only.tracker.secret_environment_names == ["SYMPHONY_CONFIGURED_SECRET"]
+
+    # Nothing configured: the derived value at the config layer is exactly what it was before, for
+    # every kind -- linear's credential name is the safety property, and every other kind derives
+    # nothing here because its adapter derives its own names from the provider settings it owns.
+    for {kind, derived} <- [
+          {"linear", ["LINEAR_API_KEY"]},
+          {"file", []},
+          {"memory", []},
+          {"github", []},
+          {"gitlab", []},
+          {"jira", []},
+          {"asana", []}
+        ] do
+      assert {:ok, settings} = Schema.parse(%{tracker: %{kind: kind}})
+      assert settings.tracker.secret_environment_names == derived, kind
+    end
+
+    # And the adapters' own unconfigured answers, which the config layer must not have changed.
+    for {kind, adapter_derived} <- [
+          {"linear", ["LINEAR_API_KEY"]},
+          {"file", []},
+          {"memory", []},
+          {"github", ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"]},
+          {"gitlab", ["GITLAB_PAT", "GITLAB_ACCESS_TOKEN", "GITLAB_TOKEN", "OAUTH_TOKEN"]},
+          {"jira", ["JIRA_API_TOKEN"]},
+          {"asana", ["ASANA_PAT"]}
+        ] do
+      assert {:ok, settings} = Schema.parse(%{tracker: %{kind: kind}})
+
+      assert {:ok, adapter} = Tracker.adapter_for_kind(kind)
+      assert adapter.secret_environment_names(settings.tracker) == adapter_derived, kind
+    end
+
+    # Both: the union, de-duplicated, with the derived names still first.
+    assert {:ok, both} =
+             Schema.parse(%{
+               tracker: %{
+                 kind: "linear",
+                 api_key: "token",
+                 secret_environment_names: ["SYMPHONY_CONFIGURED_SECRET", "LINEAR_API_KEY"]
+               }
+             })
+
+    assert both.tracker.secret_environment_names == ["LINEAR_API_KEY", "SYMPHONY_CONFIGURED_SECRET"]
+
+    # A name the workflow made the credential come from (`"$VAR"`) is derived too, and joins the union.
+    assert {:ok, provider_reference} =
+             Schema.parse(%{
+               tracker: %{
+                 kind: "linear",
+                 provider: %{api_key: "$SYMPHONY_PROVIDER_TOKEN"},
+                 secret_environment_names: ["SYMPHONY_CONFIGURED_SECRET"]
+               }
+             })
+
+    assert provider_reference.tracker.secret_environment_names == [
+             "LINEAR_API_KEY",
+             "SYMPHONY_PROVIDER_TOKEN",
+             "SYMPHONY_CONFIGURED_SECRET"
+           ]
+  end
+
+  test "config refuses tracker secret environment names that are not a list of names" do
+    for invalid <- ["SYMPHONY_CONFIGURED_SECRET", ["SYMPHONY_CONFIGURED_SECRET", 1], ["", "A"], ["   "]] do
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{tracker: %{kind: "linear", secret_environment_names: invalid}})
+
+      assert message =~ "tracker.secret_environment_names", inspect(invalid)
+    end
+
+    # The same refusal, through a workflow file: this is the text a workflow author reads.
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      tracker:
+        kind: linear
+        api_key: token
+        project_slug: project
+        secret_environment_names: "SYMPHONY_CONFIGURED_SECRET"
+      ---
+      """
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "tracker.secret_environment_names"
+  end
+
+  test "a configured tracker secret name reaches the agent child environment" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      tracker:
+        kind: linear
+        api_key: token
+        project_slug: project
+        secret_environment_names: ["SYMPHONY_CONFIGURED_SECRET"]
+      ---
+      """
+    )
+
+    assert Config.settings!().tracker.secret_environment_names ==
+             ["LINEAR_API_KEY", "SYMPHONY_CONFIGURED_SECRET"]
+
+    # The whole path, not just the config layer: the binding an app-server session captures, and the
+    # child environment built from it. Both names must be *unset* there.
+    assert {:ok, env} = AppServer.child_env(nil, Tracker.bind_agent_tools())
+
+    assert {~c"LINEAR_API_KEY", false} in env
+    assert {~c"SYMPHONY_CONFIGURED_SECRET", false} in env
+  end
+
   test "schema preserves adapter-owned provider config while keeping linear aliases compatible" do
     assert {:ok, settings} =
              Schema.parse(%{
