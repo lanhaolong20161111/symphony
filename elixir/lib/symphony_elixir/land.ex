@@ -36,6 +36,12 @@ defmodule SymphonyElixir.Land do
   @check_time_keys ["completed_at", "started_at", "run_started_at", "created_at"]
   @review_time_keys ["submitted_at", "created_at"]
 
+  # How long a check is given to show up at all before its absence is a verdict of its own. Named
+  # here because two callers ask the same rule: `verdict/1` compares against it, and the one-shot
+  # `land/3` below reports a pull request whose checks never appeared as already past it, since it
+  # does not wait.
+  @checks_absent_deadline_seconds 120
+
   @doc """
   Summarizes a pull request's check runs.
 
@@ -431,7 +437,8 @@ defmodule SymphonyElixir.Land do
     is_map(checks) and (present?(Map.get(checks, :failed)) or present?(Map.get(checks, "failed")))
   end
 
-  defp absent_too_long?(seconds), do: is_integer(seconds) and seconds >= 120
+  defp absent_too_long?(seconds),
+    do: is_integer(seconds) and seconds >= @checks_absent_deadline_seconds
 
   ## Shared helpers
 
@@ -537,7 +544,7 @@ defmodule SymphonyElixir.Land do
 
   alias SymphonyElixir.Shell
 
-  @gh_pr_fields "number,url,headRefOid,mergeable,mergeStateStatus"
+  @gh_pr_fields "number,url,headRefOid,headRefName,mergeable,mergeStateStatus"
   @gh_per_page 100
   @gh_command_timeout 60_000
   @gh_max_attempts 5
@@ -550,6 +557,7 @@ defmodule SymphonyElixir.Land do
   @waiting_message "Waiting for CI checks..."
   @passed_message "Checks passed"
   @failed_message "Checks failed:"
+  @pending_message "Checks are still running, so nothing was merged; run land again when they finish."
   @feedback_message "Review comments detected. Address before merge."
   @head_message "PR head updated; pull/amend/force-push to retrigger CI"
   @conflict_message "PR has merge conflicts. Resolve/rebase against main and push before running land_watch again."
@@ -560,6 +568,12 @@ defmodule SymphonyElixir.Land do
   or it could not observe the pull request at all.
   """
   @type watch_result :: {:ok, map()} | {:verdict, 2 | 3 | 4 | 5, [String.t()]} | {:error, term()}
+
+  @typedoc """
+  What landing one pull request did: it merged, the skill's verdict stopped it
+  (with the skill's own reasons), or it could not be observed or merged at all.
+  """
+  @type land_result :: {:ok, map()} | {:refused, 2 | 3 | 4 | 5, [String.t()]} | {:error, term()}
 
   @doc """
   Runs `gh` and reports how it went instead of raising.
@@ -633,7 +647,24 @@ defmodule SymphonyElixir.Land do
   """
   @spec pr_info(keyword()) :: {:ok, map()} | {:error, term()}
   def pr_info(opts \\ []) do
-    with {:ok, output} <- run_gh(["pr", "view", "--json", @gh_pr_fields], opts),
+    view_pr(["pr", "view"], opts)
+  end
+
+  @doc """
+  One pull request by URL, number or branch, as `gh pr view` reports it.
+
+  `pr_info/1` asks about the branch that happens to be checked out; this asks
+  about the pull request a ticket recorded, which is the one the console has to
+  judge and the one no `git checkout` has to happen for. The answer is the same
+  map, from the same `--json` field list, so both callers judge the same facts.
+  """
+  @spec pr_view(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def pr_view(target, opts \\ []) when is_binary(target) do
+    view_pr(["pr", "view", target], opts)
+  end
+
+  defp view_pr(command, opts) do
+    with {:ok, output} <- run_gh(command ++ ["--json", @gh_pr_fields], opts),
          {:ok, pr} when is_map(pr) <- decode(output) do
       {:ok, pr}
     else
@@ -841,6 +872,113 @@ defmodule SymphonyElixir.Land do
   defp verdict_messages(2, _checks, _check_runs), do: [@feedback_message]
   defp verdict_messages(4, _checks, _check_runs), do: [@head_message]
   defp verdict_messages(5, _checks, _check_runs), do: [@conflict_message]
+
+  @doc """
+  Lands one pull request: judges it with `verdict/1` and squash-merges it when the
+  verdict says to.
+
+  This is the watcher's judgement asked **once** instead of in a loop, for a
+  caller that already knows which pull request it means and cannot spend thirty
+  minutes waiting for an answer. The facts are the watcher's own -- they are read
+  the way `watch/1` reads them, and `verdict/1` decides -- and the three
+  differences that follow from asking once are each one fail-closed:
+
+    * **the head is read twice.** A single read has nothing to compare against,
+      so the pull request is read, its checks are fetched for *that* head, and it
+      is read again; a head that moved between the two reads judges 4 exactly as
+      the loop judges it;
+    * **a check that is still running refuses (3)** rather than going round
+      again. Nothing here waits, so "we have not heard yet" must not come out as
+      "it passed" -- the same rule the loop asks in `clear/4`;
+    * **checks that never appeared are already past the deadline** the watcher
+      waits out: this does not wait 120 seconds to learn that nothing reported.
+
+  The pull request is named by `pr_url` and the branch the ticket records for it
+  by `branch`. A pull request whose head is some other branch than the one the
+  ticket names is not the pull request the ticket is talking about, so it is
+  refused rather than merged -- nothing is guessed at, and nothing is searched
+  for. The merge itself is `gh pr merge <number> --squash --delete-branch` and
+  nothing else: no `--force`, no `--admin`, no `--auto`. Its subject and body are
+  left to `gh`, which uses the pull request's own title and body -- what the
+  skill passes explicitly, without a temporary body file, which is the one thing
+  the skill warns about on this host (a PowerShell redirect writes UTF-16).
+
+  Returns `{:ok, %{number: ..., url: ...}}` when it merged, `{:refused, code,
+  messages}` for the skill's exit codes 2 to 5 -- `messages` are the skill's own
+  lines -- and `{:error, reason}` when the pull request could not be observed, is
+  not the one the ticket names, or could not be merged.
+
+  Options are the fetchers': `:run_gh` replaces the command, and `:backoff_base_ms`
+  shortens the retry's first wait, so this can be driven from a script.
+  """
+  @spec land(String.t(), String.t(), keyword()) :: land_result()
+  def land(pr_url, branch, opts \\ []) when is_binary(pr_url) and is_binary(branch) do
+    with {:ok, pr} <- pr_view(pr_url, opts),
+         :ok <- recorded_branch?(pr, branch),
+         {:ok, _landable} <- judge_once(pr, opts) do
+      merge(pr, opts)
+    end
+  end
+
+  defp recorded_branch?(pr, branch) do
+    case Map.get(pr, "headRefName") do
+      ^branch -> :ok
+      other -> {:error, {:branch_mismatch, branch, other}}
+    end
+  end
+
+  defp judge_once(pr, opts) do
+    number = Map.get(pr, "number")
+
+    with {:ok, check_runs} <- check_runs(Map.get(pr, "headRefOid"), opts),
+         {:ok, issue} <- issue_comments(number, opts),
+         {:ok, review} <- review_comments(number, opts),
+         {:ok, reviews} <- reviews(number, opts),
+         {:ok, head} <- pr_view(Map.get(pr, "url"), opts) do
+      judge(pr, head, check_runs, %{issue: issue, review: review, reviews: reviews})
+    end
+  end
+
+  defp judge(pr, head, check_runs, comments) do
+    checks = checks(check_runs)
+
+    facts = %{
+      conflicting: conflicting?(pr),
+      head_moved: Map.get(head, "headRefOid") != Map.get(pr, "headRefOid"),
+      feedback: feedback?(comments),
+      checks: checks,
+      checks_absent_seconds: one_shot_absent_seconds(check_runs)
+    }
+
+    case verdict(facts) do
+      :ok -> landable(pr, checks)
+      code -> {:refused, code, verdict_messages(code, checks, check_runs)}
+    end
+  end
+
+  # The watch gives checks `@checks_absent_deadline_seconds` to appear and then refuses; this does not
+  # wait, so a pull request whose checks have not been reported at all is already past that deadline.
+  defp one_shot_absent_seconds([]), do: @checks_absent_deadline_seconds
+  defp one_shot_absent_seconds(_check_runs), do: 0
+
+  # The loop keeps polling while a check is still running; there is no next turn here, so one that has
+  # not finished is a refusal rather than a pass. This is `clear/4`'s own rule, asked once.
+  defp landable(_pr, %{pending: true}), do: {:refused, 3, [@pending_message]}
+  defp landable(pr, _checks), do: {:ok, pr}
+
+  # `--squash` and `--delete-branch` are the skill's own flags; the missing `--subject`/`--body-file`
+  # are its prepared merge message, which a page has none of -- `gh` falls back to the pull request's
+  # title and body, which is what the skill hands it explicitly.
+  @merge_flags ["--squash", "--delete-branch"]
+
+  defp merge(pr, opts) do
+    number = Map.get(pr, "number")
+
+    case run_gh(["pr", "merge", to_string(number)] ++ @merge_flags, opts) do
+      {:ok, _output} -> {:ok, %{number: number, url: Map.get(pr, "url")}}
+      {:error, reason} -> {:error, {:merge_failed, reason}}
+    end
+  end
 
   @doc """
   The escript entrypoint, so the watcher can run without Mix.

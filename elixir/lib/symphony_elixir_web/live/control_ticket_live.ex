@@ -4,11 +4,12 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   the janitor mirrored into `## Discussion`, the `links:` entries (where the pull request is
   recorded), the branch name, the blockers and the agent route.
 
-  Read-only except for the two writes an issue page cannot do without: a state picker and a comment box.
-  Everything else is an affordance to read -- links out to the ticket file on disk, to the issue it
-  mirrors and to the pull request -- plus a refresh of the file being shown.
+  Read-only except for the three writes an issue page cannot do without: a state picker, a comment
+  box, and the last step of the loop this system runs -- landing the ticket's pull request. Everything
+  else is an affordance to read -- links out to the ticket file on disk, to the issue it mirrors and to
+  the pull request -- plus a refresh of the file being shown.
 
-  ## The two writes go through the host, not through this page
+  ## The writes go through the host, not through this page
 
   `SymphonyElixir.Janitor.set_ticket_state/3` replaces the ticket's `state` key and
   `SymphonyElixir.Janitor.comment_on_ticket/3` appends one `## Discussion` entry; neither is done here.
@@ -23,14 +24,36 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
     * a comment is signed **operator**, not `agent`: the entry is what the ticket's own history shows,
       and who said it is the one thing a flattened discussion line can still carry.
 
+  ## Landing: the `land` skill's judgement, and its merge
+
+  The loop ends with a pull request that somebody has to merge. This page offers that one step: it
+  takes the pull request the ticket records -- the `links:` entry the janitor wrote when it opened it,
+  and the branch name beside it -- judges it through the same core the watcher uses
+  (`SymphonyElixir.Land.land/3`, which asks `Land.verdict/1`), and squash-merges it with the branch
+  deleted only when that judgement says to land.
+
+  The operation is looked up rather than called by name (`land_operation/0`), so a test can put its own
+  function in the endpoint config and drive every answer this page has without one `gh` call ever being
+  made. What it is handed is only what the ticket records: a ticket that records no pull request, or no
+  branch, is told so -- this page does not go looking for a pull request on the ticket's behalf.
+
+  A refusal writes **nothing**: the four verdicts that stop a landing (conflict, checks, feedback, a
+  moved head) are rendered with the skill's own reason, and the ticket file is left byte for byte as it
+  was. A merge is what moves the ticket on, and a merge always leaves a trace -- the workflow's own
+  terminal state, and a `## Discussion` entry naming who asked, the verdict and what the merge did.
+
   ## A refused write changes nothing
 
   A state the workflow does not declare, an empty comment, or the write path's own `{:error, reason}`
   (including `{:ticket_not_utf8, id}`, should a ticket ever be damaged) is rendered in the page and
-  leaves the file byte for byte as it was. Nothing is written unless one of the two forms is submitted.
-  A write that succeeded re-reads the ticket, so the new state or comment is on the page without a
-  manual refresh; a write that failed re-reads nothing, so the page still shows the ticket and the
-  reason it was refused.
+  leaves the file byte for byte as it was. Nothing is written unless one of the three forms is
+  submitted. A write that succeeded re-reads the ticket, so the new state or comment is on the page
+  without a manual refresh; a write that failed re-reads nothing, so the page still shows the ticket and
+  the reason it was refused.
+
+  A landing that merged and then failed to record it is the one case the page reports in two halves,
+  because both halves happened: the merge is announced, and the reason the ticket does not yet say so is
+  rendered beside it. Losing either half would be the page lying about the state of the world.
 
   ## Whose ticket this is: `?project=<name>`
 
@@ -46,6 +69,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.Janitor
+  alias SymphonyElixir.Land
   alias SymphonyElixirWeb.{Layouts, TicketPresenter}
 
   # What a comment written from this page is signed with. Not the agent's name: the agent reads this
@@ -61,6 +85,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
        ticket: nil,
        error: nil,
        action_error: nil,
+       landed: nil,
        states: [],
        project: nil
      )}
@@ -89,6 +114,14 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   @impl true
   def handle_event("comment", params, socket) do
     {:noreply, submit_comment(socket, params["comment"])}
+  end
+
+  # Landing takes no field: the pull request and the branch are the ticket's own, so the submit is the
+  # whole request. That is also why the handler takes no params -- there is nothing a form could say
+  # that would change what is landed.
+  @impl true
+  def handle_event("land", _params, socket) do
+    {:noreply, submit_land(socket)}
   end
 
   @impl true
@@ -123,6 +156,17 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
         <section class="error-card">
           <h2 class="error-title">That change was not written</h2>
           <p class="error-copy"><%= @action_error %></p>
+        </section>
+      <% end %>
+
+      <%= if @landed do %>
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">The pull request was landed</h2>
+              <p class="section-copy"><%= @landed %></p>
+            </div>
+          </div>
         </section>
       <% end %>
 
@@ -253,6 +297,34 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Land the pull request</h2>
+              <p class="section-copy">
+                Judges the pull request this ticket records with the `land` skill's own rules -- the
+                same core the watcher runs -- and, only when that judgement says to land, squash-merges
+                it with its branch deleted. Any other answer merges nothing and writes nothing on this
+                ticket; the reason is shown here.
+              </p>
+            </div>
+          </div>
+
+          <%= if landable?(@ticket) do %>
+            <form class="task-form" phx-submit="land">
+              <span class="form-hint">
+                The pull request is taken from this ticket's <span class="mono">links:</span> entry and
+                the branch from its <span class="mono">branch_name</span>, never searched for: a
+                ticket that records neither is not landed from here.
+              </span>
+
+              <button type="submit" class="task-submit">Land pull request</button>
+            </form>
+          <% else %>
+            <p class="empty-state"><%= unlandable(@ticket) %></p>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Blocked by</h2>
               <p class="section-copy">
                 A blocker holds this ticket back only while it is unfinished and this ticket is still in
@@ -352,7 +424,12 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   end
 
   defp load_ticket(socket, id) do
-    socket = assign(socket, :ticket_id, id) |> assign(:ticket, nil) |> assign(:error, nil)
+    socket =
+      socket
+      |> assign(:ticket_id, id)
+      |> assign(:ticket, nil)
+      |> assign(:error, nil)
+      |> assign(:landed, nil)
 
     case TicketPresenter.fetch(id, project: socket.assigns.project) do
       {:ok, ticket} -> socket |> assign(:ticket, ticket) |> assign_states()
@@ -432,11 +509,152 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   # write is still a filesystem call, and on Windows a ticket file another writer holds open makes
   # `File.write!/2` raise `File.Error`. A LiveView that came down over that would lose the ticket it was
   # showing, so an unexpected raise is turned into the same shape as a refusal and rendered like one.
+  # The land operation is wrapped in the same call for the same reason: it shells out to `gh`, which can
+  # fail in ways no `{:error, _}` of ours describes.
   defp host_write(write) do
     write.()
   rescue
     error -> {:error, {:write_raised, Exception.message(error)}}
   end
+
+  ## Landing
+
+  # The one call this page makes that acts on another system, looked up rather than named so that a
+  # test can put its own function in the endpoint config -- the same place this application keeps the
+  # rest of the settings this page reads -- and no `gh` is ever run. It is handed a pull request URL
+  # and a branch, and nothing else: those two are what the ticket records, and a caller that cannot
+  # name both is refused before this is reached.
+  defp land_operation do
+    :symphony_elixir
+    |> Application.get_env(SymphonyElixirWeb.Endpoint, [])
+    |> Keyword.get(:ticket_land, &Land.land/2)
+  end
+
+  defp landable?(%{pr_url: pr_url, branch_name: branch}), do: is_binary(pr_url) and is_binary(branch)
+
+  defp unlandable(%{pr_url: pr_url}) when not is_binary(pr_url), do: no_pull_request()
+  defp unlandable(_ticket), do: no_branch()
+
+  defp no_pull_request do
+    "This ticket records no pull request, so there is nothing to land. The janitor records one as a " <>
+      "links: entry when it opens it; nothing was searched for and nothing was merged."
+  end
+
+  defp no_branch do
+    "This ticket records no branch for its pull request, so the pull request it names cannot be " <>
+      "confirmed as the one that was opened for it. Nothing was merged."
+  end
+
+  defp submit_land(%{assigns: %{ticket: nil}} = socket), do: socket
+
+  defp submit_land(%{assigns: %{ticket: ticket}} = socket) do
+    cond do
+      not is_binary(ticket.pr_url) -> assign(socket, :action_error, no_pull_request())
+      not is_binary(ticket.branch_name) -> assign(socket, :action_error, no_branch())
+      true -> land_ticket(socket, ticket)
+    end
+  end
+
+  defp land_ticket(socket, ticket) do
+    operation = land_operation()
+
+    case host_write(fn -> operation.(ticket.pr_url, ticket.branch_name) end) do
+      {:ok, merged} -> record_landing(socket, merged)
+      {:refused, code, messages} -> assign(socket, :action_error, refused_landing(code, messages))
+      {:error, reason} -> assign(socket, :action_error, land_failed(reason))
+    end
+  end
+
+  # A merge is the only thing that moves the ticket, so this is reached only when a merge happened.
+  # The state first, then the comment, because the state is what the scheduler reads: if only one of
+  # the two can be written, the one that decides whether the ticket is picked up again is the one that
+  # has to land.
+  defp record_landing(socket, merged) do
+    with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
+         {:ok, terminal} <- TicketPresenter.terminal_state(project: socket.assigns.project) do
+      apply_landing(socket, merged, terminal, options)
+    else
+      {:error, reason} ->
+        landed_page(socket, merged, "The ticket was not updated: " <> TicketPresenter.describe(reason))
+    end
+  end
+
+  defp apply_landing(socket, merged, terminal, options) do
+    case host_write(fn -> Janitor.set_ticket_state(socket.assigns.ticket_id, terminal, options) end) do
+      {:ok, _result} -> comment_landing(socket, merged, terminal, options)
+      {:error, reason} -> landed_page(socket, merged, not_moved(terminal, reason))
+    end
+  end
+
+  defp comment_landing(socket, merged, terminal, options) do
+    note = landing_note(merged, terminal)
+
+    case host_write(fn ->
+           Janitor.comment_on_ticket(socket.assigns.ticket_id, note, [author: @operator] ++ options)
+         end) do
+      {:ok, _result} -> landed_page(socket, merged, nil)
+      {:error, reason} -> landed_page(socket, merged, not_recorded(terminal, reason))
+    end
+  end
+
+  defp not_moved(terminal, reason) do
+    "The pull request was merged, but the ticket was not moved to #{terminal}: " <>
+      TicketPresenter.describe(reason)
+  end
+
+  defp not_recorded(terminal, reason) do
+    "The pull request was merged and the ticket was moved to #{terminal}, but the outcome was not " <>
+      "written on it: " <> TicketPresenter.describe(reason)
+  end
+
+  # Both halves of a landing that did not finish: the merge happened, and the ticket does not (yet) say
+  # so. The ticket is re-read first, because `reload/1` is what clears the previous reason.
+  defp landed_page(socket, merged, reason) do
+    socket
+    |> reload()
+    |> assign(:landed, landed_message(merged))
+    |> assign(:action_error, reason)
+  end
+
+  defp landed_message(merged) do
+    "Pull request #{merged.number} was squash-merged with its branch deleted."
+  end
+
+  # The ticket's own record of a landing: who asked, what the judgement was, and what the merge did.
+  # One line, because `Ticket.append_comment/4` flattens newlines -- a comment here cannot be a
+  # document, so it says the three things a reader would otherwise have to ask for.
+  defp landing_note(merged, terminal) do
+    "#{@operator} asked to land pull request #{merged.number} (#{merged.url}). " <>
+      "Land verdict: ok (exit 0). Result: squash-merged with the branch deleted. " <>
+      "This ticket was moved to #{terminal}."
+  end
+
+  defp refused_landing(code, messages) do
+    "The land verdict is #{verdict_name(code)} (exit #{code}), so nothing was merged and nothing was " <>
+      "written on this ticket: #{Enum.join(messages, " ")}"
+  end
+
+  # The skill's own names for its codes, so a reader who knows the skill recognises the answer without
+  # looking the number up.
+  defp verdict_name(2), do: "feedback"
+  defp verdict_name(3), do: "checks"
+  defp verdict_name(4), do: "head moved"
+  defp verdict_name(5), do: "conflict"
+
+  defp land_failed(reason) do
+    "The pull request could not be landed: #{land_reason(reason)}. Nothing was merged and nothing was " <>
+      "written on this ticket."
+  end
+
+  defp land_reason({:merge_failed, reason}), do: "gh refused the merge: " <> land_reason(reason)
+
+  defp land_reason({:branch_mismatch, recorded, actual}) do
+    "the pull request's head branch is #{actual}, not the #{recorded} this ticket records"
+  end
+
+  defp land_reason({:not_a_pull_request, other}), do: "gh did not answer with a pull request: #{land_reason(other)}"
+  defp land_reason(reason) when is_binary(reason), do: reason
+  defp land_reason(reason), do: inspect(reason)
 
   # After a write that succeeded: the ticket is re-read, so the new state or comment is on the page
   # without a manual refresh.

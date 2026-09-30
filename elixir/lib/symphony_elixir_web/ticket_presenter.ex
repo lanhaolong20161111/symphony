@@ -3,10 +3,11 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   Reads the queue's tickets for the control plane's ticket view.
 
   Read-only on purpose: state changes and comments are made by the agent and the host (the janitor),
-  not by this UI, so nothing here writes a ticket. It does answer the two questions a page that offers
-  a write has to ask first -- which states the workflow declares (`declared_states/1`) and where a write
-  to *this* queue has to land (`write_options/1`) -- because both answers come from the same tracker
-  settings this module already resolves, and a second resolver would be a second place to disagree.
+  not by this UI, so nothing here writes a ticket. It does answer the questions a page that offers a
+  write has to ask first -- which states the workflow declares (`declared_states/1`), where a write to
+  *this* queue has to land (`write_options/1`) and, for a ticket that has just been merged, which
+  state it belongs in (`terminal_state/1`) -- because all of those come from the same tracker settings
+  this module already resolves, and a second resolver would be a second place to disagree.
 
   ## Where each field comes from
 
@@ -105,9 +106,41 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   # workflow that lists one state in both lists should not offer it twice.
   defp vocabulary(tracker) do
     [Map.get(tracker, :active_states), Map.get(tracker, :terminal_states)]
-    |> Enum.flat_map(&List.wrap/1)
-    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.flat_map(&declared/1)
     |> Enum.uniq()
+  end
+
+  # One declared state list, in the workflow's own order, with the blanks a hand-written list can
+  # carry dropped.
+  defp declared(states) do
+    states
+    |> List.wrap()
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+  end
+
+  @doc """
+  The state a landed ticket is moved to: the first entry of the workflow's own `terminal_states`.
+
+  From the workflow rather than from a word written here, for the same reason `declared_states/1` is:
+  a state nobody declared is a state nothing reads. It is the project's declaration read in the
+  project's own order, which is how `done` comes before `cancelled` in every workflow in this
+  repository -- the first entry is the one a merged ticket takes.
+
+  A workflow that declares no terminal state has nowhere to put a ticket it just merged, and answers
+  `{:error, :no_terminal_state}` rather than inventing one: an invented state would strand the
+  ticket where the scheduler cannot see it.
+
+  Takes the same `:project` option as `list/1`, and answers with the same errors, so a page that
+  could read a ticket can also read where a landed one belongs.
+  """
+  @spec terminal_state(keyword()) :: {:ok, String.t()} | {:error, term()}
+  def terminal_state(opts \\ []) do
+    with {:ok, tracker} <- tracker_settings(opts) do
+      case tracker |> Map.get(:terminal_states) |> declared() do
+        [state | _rest] -> {:ok, state}
+        [] -> {:error, :no_terminal_state}
+      end
+    end
   end
 
   @doc """
@@ -191,6 +224,11 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   def describe({:no_writable_queue, name}) do
     "the workflow file of project #{name} declares no ticket directory a write could go to (no_writable_queue)"
+  end
+
+  # The one read a landing needs that a read-only page never asked for: where a merged ticket goes.
+  def describe(:no_terminal_state) do
+    "the workflow declares no terminal state, so a landed ticket has nowhere to be moved (no_terminal_state)"
   end
 
   # Not a refusal the host returned but a raise from inside it -- a file another writer holds open, a
