@@ -93,8 +93,8 @@ The mechanism is now in place (both keys default off, so nothing changes until a
 `codex.child_env` is now either `"NAME"` or `"CHILD=SOURCE"`, and the mapping form is not decoration:
 `gh` prefers `GH_TOKEN` over the OS credential store, so naming it that in Symphony's own environment
 would move the janitor's GitHub calls onto the agent's narrower token and break the ticket mirror. So the
-workflow says `child_env: ["GH_TOKEN=BEEKEEPER_AGENT_TOKEN"]` -- the child gets `GH_TOKEN`, the value is
-read from `BEEKEEPER_AGENT_TOKEN` -- and when that source is absent the entry is simply omitted, which is
+workflow says `child_env: ["GH_TOKEN=SYMPHONY_AGENT_TOKEN"]` -- the child gets `GH_TOKEN`, the value is
+read from `SYMPHONY_AGENT_TOKEN` -- and when that source is absent the entry is simply omitted, which is
 why the line could be committed before the token existed. That change also brought
 `credential.helper=!gh auth git-credential`, since the sandbox account has no credential store of its own
 and some credential had to be supplied at all; `d4d6019` replaced the helper program with a config header
@@ -138,12 +138,16 @@ repository gate is re-run where it can run.
 
 **This is the one place the port makes the machine weaker**, so it is stated plainly: the token
 available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
-repository it can see, and anything in the child's environment is readable by the agent. A
-fine-grained PAT limited to the target repository is the honest choice for `codex.child_env`;
-injecting the broad token is not. The decision taken: a fine-grained PAT with **Contents: Read and
-write** and **Pull requests: Read and write**, on `lanhaolong20161111/beekeeper` only, handed over as the
-User-scope variable `BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript). That credential is now in
-place, and SYM-57's push is the measurement that it reaches git.
+repository it can see, and anything in the child's environment is readable by the agent. A fine-grained
+PAT, rather than that broad token, is the honest choice for `codex.child_env`. The decision taken on the
+retired deployment: a fine-grained PAT with **Contents: Read and write** and **Pull requests: Read and
+write**, on `lanhaolong20161111/beekeeper` only, handed over as the User-scope variable
+`BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript) -- the retired deployment's variable, replaced
+now by `SYMPHONY_AGENT_TOKEN`: one variable serves every project, because the workflow decides which
+repository the agent works on. The current workflow fills it either with one PAT set to **All
+repositories** (the same two scopes, plus **Workflows: write** only if an agent will ever push
+`.github/workflows/*`) or not at all, in which case the host publishes as it has all along. That was the
+credential in place on the retired deployment, and SYM-57's push is the measurement that it reaches git.
 
 ## 4. The tracker: what "as consistent as Linear" means
 
@@ -520,7 +524,9 @@ rounds, which are counted separately.
   `push` skill now says so (target repository `1df8639`). The target repository was pushed earlier in
   the round (`38fc8a2..e5de4c8`, after merging two commits that were already on the remote), and the
   five skills are now on `main`.
-  Next: set `BEEKEEPER_AGENT_TOKEN` (User scope), then re-run one ticket to demonstrate acceptance item 3.
+  Next: set the agent token (User scope) -- `BEEKEEPER_AGENT_TOKEN` as it was then,
+  `SYMPHONY_AGENT_TOKEN` in the current workflow -- then re-run one ticket to demonstrate acceptance
+  item 3.
 - **Round 15 (2026-09-29)**: acceptance item 3. Three commits closed the credential chain -- `9417b04`
   (the writable git dir keeps the caller's spelling, because codex compares that entry as text and
   `Path.expand` lower-cases a drive letter), `d4d6019` (the `Authorization: Basic` config header and
