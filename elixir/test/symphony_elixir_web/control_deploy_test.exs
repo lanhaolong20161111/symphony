@@ -233,10 +233,14 @@ defmodule SymphonyElixirWeb.ControlDeployTest do
   end
 
   test "a workflow that does not parse offers no deploy, and the row still renders", %{registry: registry} do
+    # One file whose front matter is not YAML, and one the schema refuses because its declared working
+    # directory is relative: neither gets a button, and neither can take the page down -- the refusal
+    # is a sentence, which is what a row can render.
     File.write!(Path.join(registry, "broken.md"), "---\ndeploy: [\n---\n\nWork on broken.\n")
+    write_project(registry, "bad-dir", 4102, {@deploy_command, "not/absolute", @declared_timeout})
 
     start_test_endpoint(
-      project_status_client: client(%{4101 => :down}),
+      project_status_client: client(%{4101 => :down, 4102 => :down}),
       project_status_timeout_ms: 50,
       deploy_runner: never_used()
     )
@@ -245,6 +249,14 @@ defmodule SymphonyElixirWeb.ControlDeployTest do
 
     assert html =~ "Control Plane"
     refute has_element?(view, "button[phx-click='deploy_project'][phx-value-project='broken']")
+    refute has_element?(view, "button[phx-click='deploy_project'][phx-value-project='bad-dir']")
+
+    # A crafted press on the schema-refused project lands in its row as a reason, and the page renders.
+    refused = render_click(view, "deploy_project", %{"project" => "bad-dir"})
+
+    assert refused =~ "Control Plane"
+    assert refused =~ "the workflow does not load"
+    assert refused =~ "deploy.working_directory"
     refute_received {:deploy_ran, _, _, _}
   end
 

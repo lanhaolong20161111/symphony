@@ -229,6 +229,26 @@ defmodule SymphonyElixir.DeployTest do
         assert broken_message =~ "the workflow does not load"
       end)
     end
+
+    test "a file the schema refuses is a sentence too, not the parser's own tuple" do
+      registry = tmp_dir("symphony-deploy-registry")
+
+      with_registry(registry, fn ->
+        # YAML that parses, refused by the schema because its `deploy.working_directory` is relative.
+        # The reason ends up in a row, and a row that interpolates a tuple raises -- so this is the
+        # difference between a failing deploy and a page that will not render.
+        write_project!(registry, "bad-dir", {@deploy_command, "not/absolute", @declared_timeout})
+
+        assert {:error, message} = Deploy.declared("bad-dir")
+        assert is_binary(message)
+        assert message =~ "the workflow does not load"
+        assert message =~ "deploy.working_directory"
+
+        assert {:error, result} = Deploy.run("bad-dir", never_used())
+        assert is_binary(result.message)
+        refute_received {:deploy_ran, _, _, _}
+      end)
+    end
   end
 
   describe "what a run may not say" do

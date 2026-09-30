@@ -155,9 +155,15 @@ defmodule SymphonyElixir.Deploy do
 
   # `Workflow.load/1` + `Schema.parse/1`, the pair `Projects` itself uses: the declaration the button
   # reads is the declaration an instance would load, with no second parser and no second copy of it.
+  #
+  # Both failures become a **sentence** here, never the parser's own tuple: the message ends up in a
+  # row, and a row that interpolates a tuple raises -- which is the one thing a failing deploy must
+  # not do to the page.
   defp settings_from(path) do
-    case Workflow.load(path) do
-      {:ok, loaded} -> Schema.parse(loaded.config)
+    with {:ok, loaded} <- Workflow.load(path),
+         {:ok, settings} <- Schema.parse(loaded.config) do
+      {:ok, settings}
+    else
       {:error, reason} -> {:error, unreadable_message(reason)}
     end
   end
