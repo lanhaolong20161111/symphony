@@ -148,15 +148,31 @@ defmodule SymphonyElixirWeb.Layouts do
   end
 
   @doc """
-  One row per project in the registry.
+  One row per project in the registry, with the live state of the instance behind it.
 
   This is the whole point of the registry being a directory: N rows, not 400. Each row is one
   project -- one workflow, one queue, one instance -- and the detail a person needs to answer "is it
-  running, what does it run, and where does its work go" without opening N dashboards.
+  running, how much is it carrying, and where does its work go" without opening N dashboards.
 
-  A project declared but not running is shown as exactly that. That state is the reason the
-  reachability probe exists: a task written into a queue nobody reads is a task that silently never
-  happens.
+  ## The status is asked for, and only ever by one route
+
+  Every row shows its own port and the answer from that instance's
+  `GET /api/v1/state` -- `running` / `retrying` / `blocked` when it answered with counts. No other
+  instance's internals are read, and nothing here starts, stops or configures anything: a project
+  declared and not running is shown as exactly that, which is the state the whole table exists to
+  make visible rather than leave a task sitting in a queue nobody reads.
+
+  The four states (`ProjectStatus`) are `up`, `down` (nothing is listening), `unreachable` (something
+  did not answer) and `no port declared` (there is nothing to ask) -- three of them are not
+  interchangeable, so they are not drawn the same way.
+
+  ## Links per row
+
+  A row that *is* this instance links to this console's own `/control/tickets` and `/settings`
+  directly. The other rows link to those same paths **on their own instance**, which is a route that
+  instance serves -- and only while it is up, because a link to a page nobody is serving is worse
+  than no link. Those routes take no project parameter: there is no page on *this* console that shows
+  another project's tickets or settings, so nothing here pretends otherwise.
   """
   attr(:projects, :list, required: true)
   attr(:conflicts, :map, default: %{})
@@ -167,27 +183,33 @@ defmodule SymphonyElixirWeb.Layouts do
     <section class="section-card">
       <div class="section-header">
         <div>
-          <h2 class="section-title">项目总览</h2>
+          <h2 class="section-title">项目总览 / Projects</h2>
           <p class="section-copy">
-            注册表里每个项目一行（一个项目 = 一份 workflow = 一个队列 = 一个实例）。
-            这里是"谁在跑、用什么 agent、活进哪个队列"；票据细节点进它自己的页面。
+            One row per registry entry: a project is one workflow file, one queue, one instance. The
+            status is asked for rather than assumed -- each row's own port gets one
+            <code>GET /api/v1/state</code> (short timeout, <code>retry: false</code>, every row at
+            once), and that is the only thing this page reads from another instance.
           </p>
         </div>
       </div>
 
       <%= if @projects == [] do %>
-        <p class="empty-state">注册表是空的（<code>config :symphony_elixir, :projects_dir</code>）。</p>
+        <p id="projects-empty" class="empty-state">
+          注册表是空的（<code>config :symphony_elixir, :projects_dir</code>）。
+        </p>
       <% else %>
         <div class="table-wrap">
-          <table class="data-table" style="min-width: 900px;">
+          <table class="data-table" style="min-width: 1150px;">
             <thead>
               <tr>
-                <th>项目</th>
-                <th>地址</th>
-                <th>在跑？</th>
+                <th>project</th>
+                <th>workflow file</th>
+                <th>port</th>
+                <th>status (from /api/v1/state)</th>
                 <th>agent</th>
-                <th>队列</th>
+                <th>queue</th>
                 <th>issues / tickets</th>
+                <th>pages</th>
               </tr>
             </thead>
             <tbody>
@@ -195,22 +217,21 @@ defmodule SymphonyElixirWeb.Layouts do
                 <td>
                   <div class="detail-stack">
                     <span class="mono">{project.name}</span>
+                    <%= if project[:own?] do %>
+                      <span class="muted event-meta">this instance</span>
+                    <% end %>
                     <%= if project[:error] do %>
-                      <span class="muted event-meta">配置读不出来</span>
+                      <span class="muted event-meta">the workflow file does not parse</span>
                     <% end %>
                   </div>
                 </td>
-                <td class="mono event-meta">{project[:url] || "—"}</td>
-                <td>
-                  <%= if project[:reachable?] do %>
-                    <span class="state-badge state-badge-active">在跑</span>
-                  <% else %>
-                    <span class="state-badge state-badge-warning">没在跑</span>
-                  <% end %>
-                </td>
+                <td class="mono event-meta" title={project[:path]}>{project[:path]}</td>
+                <td class="mono event-meta">{project[:port] || "-"}</td>
+                <td><.project_state status={status(project)} /></td>
                 <td class="mono event-meta">{agent_line(project)}</td>
                 <td class="mono event-meta">{queue_line(project)}</td>
                 <td class="mono event-meta">{repos_line(project)}</td>
+                <td><.project_links project={project} /></td>
               </tr>
             </tbody>
           </table>
@@ -234,6 +255,93 @@ defmodule SymphonyElixirWeb.Layouts do
     </section>
     """
   end
+
+  @doc """
+  The badge class for one project row's state.
+
+  Here rather than in the page for the same reason `state_badge_class/1` is: two surfaces drawing
+  the same state differently is a page that lies about the state. `up` is the active badge, `down`
+  the warning one (a project that is not running is normal, not an error), `unreachable` the danger
+  one (something is there and will not answer), and "no port declared" the plain badge -- it is not
+  a state of the instance at all.
+  """
+  @spec status_badge_class(SymphonyElixir.ProjectStatus.state()) :: String.t()
+  def status_badge_class(state) do
+    case state do
+      :up -> "state-badge state-badge-active"
+      :down -> "state-badge state-badge-warning"
+      :unreachable -> "state-badge state-badge-danger"
+      _no_port_or_unknown -> "state-badge"
+    end
+  end
+
+  @doc "The word shown for one project row's state."
+  @spec status_label(SymphonyElixir.ProjectStatus.state()) :: String.t()
+  def status_label(:up), do: "up"
+  def status_label(:down), do: "down"
+  def status_label(:unreachable), do: "unreachable"
+  def status_label(:no_port), do: "no port"
+  def status_label(other), do: to_string(other)
+
+  attr(:status, :map, required: true)
+
+  defp project_state(assigns) do
+    ~H"""
+    <div class="detail-stack">
+      <span class={status_badge_class(@status.state)}>{status_label(@status.state)}</span>
+      <%= if @status.counts do %>
+        <span class="muted event-meta">
+          running {@status.counts.running} / retrying {@status.counts.retrying} /
+          blocked {@status.counts.blocked}
+        </span>
+      <% end %>
+      <%= if @status.detail do %>
+        <span class="muted event-meta">{@status.detail}</span>
+      <% end %>
+    </div>
+    """
+  end
+
+  attr(:project, :map, required: true)
+
+  defp project_links(assigns) do
+    ~H"""
+    <div class="detail-stack">
+      <%= if @project[:own?] do %>
+        <a class="issue-link" href="/control/tickets">tickets</a>
+        <a class="issue-link" href="/settings">settings</a>
+      <% else %>
+        <%= if live_elsewhere?(@project) do %>
+          <a
+            class="issue-link"
+            href={"#{@project[:url]}/control/tickets"}
+            target="_blank"
+            rel="noopener noreferrer"
+          >tickets ↗</a>
+          <a
+            class="issue-link"
+            href={"#{@project[:url]}/settings"}
+            target="_blank"
+            rel="noopener noreferrer"
+          >settings ↗</a>
+        <% else %>
+          <span class="muted event-meta" title="this console cannot show another project's tickets or settings">-</span>
+        <% end %>
+      <% end %>
+    </div>
+    """
+  end
+
+  # A row's state, as `ProjectStatus` left it. A row without one is a caller that did not ask, and it
+  # is shown as such rather than as a state that was never read.
+  defp status(%{status: status}) when is_map(status), do: status
+
+  defp status(_project),
+    do: %{state: :unreachable, counts: nil, detail: "no state was read for this row"}
+
+  # The other instance serves these routes itself (the router is the same in every instance), which is
+  # why the link is absolute and only drawn while it is up.
+  defp live_elsewhere?(project), do: is_binary(project[:url]) and status(project).state == :up
 
   defp agent_line(project) do
     [project[:backend], project[:adapter], project[:model]]

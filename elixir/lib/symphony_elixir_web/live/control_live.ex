@@ -19,7 +19,7 @@ defmodule SymphonyElixirWeb.ControlLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Orchestrator, Projects, RecorderClient, Settings, TaskComposer}
+  alias SymphonyElixir.{Orchestrator, Projects, ProjectStatus, RecorderClient, Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
 
   @impl true
@@ -327,13 +327,22 @@ defmodule SymphonyElixirWeb.ControlLive do
     _error -> []
   end
 
+  # The rows come from the registry read **once** -- `Projects.list/1` parses every workflow file --
+  # and their status comes from every instance at once, over its own `GET /api/v1/state`. The registry
+  # read and the state read are the same list of projects, so it is one registry read, not two, and
+  # the http client is injectable for the same reason the orchestrator is: a page test must not open a
+  # socket.
   defp load_projects do
-    Projects.list()
+    ProjectStatus.list(client: project_status_client(), timeout: project_status_timeout_ms())
   rescue
     _error -> []
   end
 
-  # The registry is read **once**: `Projects.list/0` probes every project over HTTP, so calling it
+  defp project_status_client, do: Endpoint.config(:project_status_client)
+
+  defp project_status_timeout_ms, do: Endpoint.config(:project_status_timeout_ms) || 1_500
+
+  # The registry is read **once**: `Projects.list/1` probes every project over HTTP, so calling it
   # twice to answer two questions about the same list doubled the cost of an optional panel.
   #
   # Two projects on one queue is not a display detail either way: both instances would race for the

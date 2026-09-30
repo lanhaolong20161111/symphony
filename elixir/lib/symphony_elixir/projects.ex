@@ -103,15 +103,26 @@ defmodule SymphonyElixir.Projects do
 
   A missing directory is `[]`, not an error: a machine with no registry simply has no other
   projects, which is the state this system was in until now.
+
+  ## `probe: false` -- parsing without asking
+
+  The reachability probe is one HTTP request per project, **one after another**, which is the right
+  shape for a page that only wants a boolean. A page that wants the *counts* has to ask each
+  instance anyway, and asking twice is asking the same instance twice -- so `ProjectStatus` turns the
+  probe off here and asks every instance at once instead. The file is still parsed by this module:
+  `Workflow.load/1` + `Schema.parse/1`, the same pair an instance uses, and never a second parser.
   """
   @spec list() :: [project()]
-  def list do
+  @spec list(keyword()) :: [project()]
+  def list(opts \\ []) do
+    probe? = Keyword.get(opts, :probe, true)
+
     registry_dir()
     |> Path.join("*.md")
     |> Path.wildcard()
     |> Enum.reject(&(Path.basename(&1) == "README.md"))
     |> Enum.sort()
-    |> Enum.map(&load/1)
+    |> Enum.map(&load(&1, probe?))
   end
 
   @doc "One project by name (the file's basename without `.md`)."
@@ -138,12 +149,12 @@ defmodule SymphonyElixir.Projects do
     |> Map.new()
   end
 
-  defp load(path) do
+  defp load(path, probe?) do
     name = Path.basename(path, ".md")
 
     with {:ok, loaded} <- Workflow.load(path),
          {:ok, settings} <- Schema.parse(loaded.config) do
-      from_settings(blank(name, path), settings)
+      from_settings(blank(name, path), settings, probe?)
     else
       {:error, reason} -> blank(name, path) |> Map.put(:error, describe_load_error(reason))
     end
@@ -174,7 +185,7 @@ defmodule SymphonyElixir.Projects do
     }
   end
 
-  defp from_settings(base, settings) do
+  defp from_settings(base, settings, probe?) do
     host = settings.server.host
     port = settings.server.port
     url = if(is_binary(host) and is_integer(port), do: "http://#{probe_host(host)}:#{port}", else: nil)
@@ -199,7 +210,9 @@ defmodule SymphonyElixir.Projects do
           # that does not -- the model list lives in that CLI's own --help.
           cli_path: acp_cli_path(settings),
           repos: Settings.clone_urls(settings.hooks.after_create || ""),
-          reachable?: url != nil and reachable?(url),
+          # `probe?` is false for a caller that is going to ask every instance at once, and skipping
+          # the request means `reachable?` is not a fact that caller may use.
+          reachable?: probe? and url != nil and reachable?(url),
           queue_present?: queue_present?(settings.tracker.provider)
         })
   end
