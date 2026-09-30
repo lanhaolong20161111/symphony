@@ -54,14 +54,33 @@ defmodule SymphonyElixirWeb.Layouts do
     """
   end
 
+  @doc """
+  The wrapper every page renders inside.
+
+  It carries the navigation for the one page that has none of its own. Upstream's dashboard renders
+  no nav at all, and this fork keeps `dashboard_live.ex` byte-identical to upstream's, so nothing
+  inside that page may link to `/control` -- but a page nobody can leave is a stranded page. Every
+  other page calls `page_nav/1` itself; rendering the nav here for one of those would show two.
+  """
   @spec app(map()) :: Phoenix.LiveView.Rendered.t()
   def app(assigns) do
+    assigns = assign(assigns, :layout_nav?, layout_nav?(assigns))
+
     ~H"""
     <main class="app-shell">
+      <.page_nav :if={@layout_nav?} current={:dashboard} />
       {@inner_content}
     </main>
     """
   end
+
+  # Which page a layout is wrapping is the one thing a layout can ask about its caller: `@socket.view`
+  # is the LiveView being rendered. The dashboard is the single route in the router that renders no
+  # `page_nav/1` of its own (the other six all do), so it is the single page that gets this one --
+  # and the check is stated as "the dashboard", not "some page", so a second nav cannot appear on a
+  # page that already has one.
+  defp layout_nav?(%{socket: %{view: SymphonyElixirWeb.DashboardLive}}), do: true
+  defp layout_nav?(_assigns), do: false
 
   @doc """
   Navigation between the console's pages.

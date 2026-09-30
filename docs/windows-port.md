@@ -129,11 +129,12 @@ It did not retry, called `symphony_publish` as the prompt says, and the host pus
 and opened PR #55 -- so the fallback path is real, and it is what the fork kept as the documented
 fallback once the credential arrived (round 15).
 
-**A sandbox limitation the same run exposed**: `mix precommit` **cannot compile** inside the agent
-sandbox (`Mix.Sync.PubSub`'s first compile dies; round 19 measured exactly where), so the `push` skill
-demanding it would have blocked every push for a reason unrelated to the change. The skill now says to
-report that and continue with the check the ticket names (target repository `1df8639`); the repository
-gate is re-run where it can run.
+**A sandbox limitation the same run exposed**: the gate -- `mix lint` (specs.check + `credo --strict`)
+then `mix test`, both from `elixir/` -- **cannot compile** inside the agent sandbox
+(`Mix.Sync.PubSub`'s first compile dies; round 19 measured exactly where), so the `push` skill
+demanding it would have blocked every push for a reason unrelated to the change. The skill now says
+to report that and continue with the check the ticket names (target repository `1df8639`); the
+repository gate is re-run where it can run.
 
 **This is the one place the port makes the machine weaker**, so it is stated plainly: the token
 available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
@@ -249,8 +250,9 @@ Upstream does something simpler, and its own prompt shows it: it names the file 
 live in the repository, and the workflow prompt points at them. That is why the mechanism has two
 legs:
 
-1. **The files are repository content** of the repository the agent works on -- here
-   `lanhaolong20161111/beekeeper` (locally `ai_beekeeper/.verify_elixir`), not this fork. Committed:
+1. **The files are repository content** of the repository the agent works on -- and the deployment now
+   targets this fork, so that repository is this one (the workflow file is
+   `~/code/symphony-projects/symphony.md`; the retired one is archived). Committed here:
    `.codex/skills/{commit,push,pull,land,debug}/SKILL.md`, ported for this host (see the table below).
 2. **The deployment prompt references them by path**, the way upstream does. That was done as one
    change together with `codex.git_metadata_writable` and `codex.child_env`, so that permissions,
@@ -266,10 +268,10 @@ What is in each file now, and how far each one is from upstream's:
 | skill | lines | state |
 |---|---|---|
 | `commit` | 96 | ported: the capability is platform-neutral; heredoc and temp files become repeated `-m` (or `-F -`), the `Co-authored-by: Codex` trailer is gone, and a run never blanket `git add -A` |
-| `pull` | 199 | ported: the conflict path, plus the line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) and the fresh-clone preconditions that executing it turned up |
-| `push` | 177 | ported: the gate is `mix precommit` from the repository root (this host has no `make`, and this repository has no `elixir/` subdirectory), `$env:TEMP` replaces `/tmp`, `&&`/`||` are unrolled because PowerShell 5.1 cannot parse them, the PR title/body discipline is kept -- and **a run never pushes `main`** |
-| `land` | 477 | ported **in full, not reduced**: the manual loop, the helper's five exit codes and `## Review Handling` are all here, because executing the skill is what showed which of upstream's steps are load-bearing |
-| `debug` | 270 | ported and retargeted (round 10): the queue before the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), `rg`'s own `--glob`, no `| sort -u` (PATH's `sort` is Windows `sort.exe`), and the lifecycle lines this host actually emits |
+| `pull` | 204 | ported: the conflict path, plus the line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) and the fresh-clone preconditions that executing it turned up |
+| `push` | 190 | ported: the gate is `mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/` -- the fork's project root (this host has no `make`), `$env:TEMP` replaces `/tmp`, `&&`/`||` are unrolled because PowerShell 5.1 cannot parse them, the PR title/body discipline is kept -- and **a run never pushes `main`** |
+| `land` | 482 | ported **in full, not reduced**: the manual loop, the helper's five exit codes and `## Review Handling` are all here, because executing the skill is what showed which of upstream's steps are load-bearing |
+| `debug` | 276 | ported and retargeted (round 10): the queue before the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), `rg`'s own `--glob`, no `| sort -u` (PATH's `sort` is Windows `sort.exe`), and the lifecycle lines this host actually emits |
 | `release`, `linear` | -- | **still deliberately unported**: `release` bumps and watches upstream's own repository on ubuntu-24.04, and `linear_graphql` is bound only by the Linear adapter -- the file tracker advertises `symphony_publish` instead |
 | `land/land_watch.py` | -- | **not ported as Python, and not dropped either**: its signals are now `SymphonyElixir.Land` in this fork's own code (`c5a55f2`, `b06c82d`), which also runs inside the agent sandbox (round 19) |
 
@@ -279,7 +281,12 @@ What is in each file now, and how far each one is from upstream's:
 section order and wording where it is host-neutral, puts a one-line `> **Differs from upstream:** ...`
 note directly above every changed instruction, and ends with `## Differences from upstream (this host)`,
 whose bullets index those notes; an upstream instruction that cannot work here is declared "not
-applicable, because ..." rather than deleted. The line counts above are the count at `1712c55`.
+applicable, because ..." rather than deleted. **The line counts above are counted in the fork's own
+`.codex/skills/`**, where the five skills live now -- the retired target repository's `1712c55` was the
+same table's earlier reading. One correction moved with them: the gate every skill names is the fork's,
+`mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/`. The retired target
+repository gated at its root with `mix precommit`, and every gate reference in this file -- the round
+log below included -- has been corrected to the fork's.
 
 **And the rule the SYM-57 run earned** (`b0e8fd8`): that run pushed `main` first, then noticed the
 convention, moved the commit to `symphony/SYM-57` and restored `main` with `--force-with-lease`
@@ -376,6 +383,22 @@ console), and ~19% were added by the port itself.
    do not run. That contradicts the comment above it ("reconciliation below still runs") and
    `orchestrator_pause_test.exs`'s claim; the test only asserts `claimed == 0`, so it cannot catch it.
 
+### Accepted, not done -- the standalone recorder has no drain budget
+
+The recorder was extracted from the retired application into its own repository, and one thing could
+not move: `drain_above` was an **in-process MFA** into that application's own orchestrator
+(`{AiBeekeeper.Orchestration.Coordinator, :remaining_capacity, []}`), which a standalone recorder
+cannot reach. The standalone poller therefore sets no `drain_above`, and **drain is off** -- a feature
+the extraction cost, not a defect anybody found and shelved.
+
+The decision is accepted as it stands, and nothing currently depends on it: the limit it read was
+always *another* orchestrator's remaining capacity, shared so that the two would not over-schedule
+between them, and a standalone recorder no longer sits inside one. The fix path is known and
+cheap-ish -- expose remaining capacity over HTTP and let `drain_above` be a 0-arity function that reads
+it (the poller already accepts a number, a 0-arity function or an MFA, so only the budget's *source* is
+missing, not the mechanism). Nobody is doing that now; this paragraph is the record, so the next
+session does not re-derive why the switch has nothing behind it.
+
 ## 7. Round log
 
 These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
@@ -391,11 +414,12 @@ rounds, which are counted separately.
   Next: the token decision (§3), then port the four skills into the target repository (§5), then the
   rest of the tracker parity work (§4.1 item 5: `blocked_by` refs and `dispatchable`).
 - **Round 2 (2026-09-29)**: the four skills written and committed in the target repository
-  (`beekeeper` `7733061`): `commit`, `pull`, `push` (repository gate `mix precommit`, `gh --jq`,
-  PowerShell exit-status checks, body files as UTF-8 without BOM) and a reduced `land`; `release`,
-  `linear` and the Python watcher deliberately not reproduced. Skill discovery was measured and
-  found **not** to include the workspace, so the delivery mechanism is corrected above: repository
-  content plus a prompt that names the file by path.
+  (`beekeeper` `7733061`): `commit`, `pull`, `push` (repository gate -- `mix lint` then `mix test` from
+  `elixir/` where the skills live now; `mix precommit` when this round ran, as the note above the table
+  records -- `gh --jq`, PowerShell exit-status checks, body files as UTF-8 without BOM) and a reduced
+  `land`; `release`, `linear` and the Python watcher deliberately not reproduced. Skill discovery was
+  measured and found **not** to include the workspace, so the delivery mechanism is corrected above:
+  repository content plus a prompt that names the file by path.
   Next: the token decision (§3), the prompt/skills/permission switch as one change (§5 leg 2), then
   §4.1 item 5.
 - **Round 3 (2026-09-29)**: §4.1 items 2 and 5 done -- labels normalize like Linear's (previous round)
@@ -491,9 +515,11 @@ rounds, which are counted separately.
   fallback. SYM-53 measured that fallback: the agent's own commit `d754576`, then
   `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` on its push, no retry, a call to
   `symphony_publish`, and PR #55 from the host -- plus a `ticket_comment` reporting the raw error. The
-  same run found that `mix precommit` cannot compile inside the sandbox, and the `push` skill now says so
-  (target repository `1df8639`). The target repository was pushed earlier in the round (`38fc8a2..e5de4c8`,
-  after merging two commits that were already on the remote), and the five skills are now on `main`.
+  same run found that the gate cannot compile inside the sandbox (`mix lint` then `mix test` from
+  `elixir/`; `mix precommit` when this round ran, per the gate note in the skills section), and the
+  `push` skill now says so (target repository `1df8639`). The target repository was pushed earlier in
+  the round (`38fc8a2..e5de4c8`, after merging two commits that were already on the remote), and the
+  five skills are now on `main`.
   Next: set `BEEKEEPER_AGENT_TOKEN` (User scope), then re-run one ticket to demonstrate acceptance item 3.
 - **Round 15 (2026-09-29)**: acceptance item 3. Three commits closed the credential chain -- `9417b04`
   (the writable git dir keeps the caller's spelling, because codex compares that entry as text and

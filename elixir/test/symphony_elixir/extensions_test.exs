@@ -525,9 +525,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
     # The fork's additions live on /control now: this page is upstream's, so none of them are here.
+    # The one link to it is the layout's navigation -- upstream's dashboard renders no navigation of
+    # its own, and that single link is what keeps the page from being a dead end.
     refute html =~ "Tokens / context"
     refute html =~ "Agent usage"
-    refute html =~ "/control"
+    assert html =~ ~s(href="/control")
+    refute html =~ "/control/tickets"
     refute html =~ "Pause"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
