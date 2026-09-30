@@ -279,6 +279,13 @@ and the adapter sends those names through unchanged. The running escript must be
 (`mix escript.build`): the service adapter only exists in a build made after it landed, and a stale
 escript fails at boot with `unsupported_tracker_kind`.
 
+
+The janitor is the other half of this step, and it is easy to miss: a ticket page's write actions
+still submit to it, and it writes a file at `janitor.tickets_path`. Point that setting at a **fresh
+empty directory** rather than renaming the queue away -- a path that no longer exists can fail a
+deployment's own validation at boot and take the hub down with it, while an empty directory makes
+every stray write refuse loudly (`no_such_ticket`) instead of silently editing a file the service
+never reads. Leave the old queue exactly where it is: it is the record, and it is the rollback.
 **5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
 should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
 read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
