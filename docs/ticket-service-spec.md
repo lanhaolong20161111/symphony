@@ -238,3 +238,54 @@ created from an issue.
 Two regular expressions have to change together to fix it: the one in `janitor/ticket.ex` and
 the one in `tracker/file.ex`. Recorded here rather than fixed in passing, and it disappears
 with slice 6 if the file tracker and the janitor's parser are retired as decided.
+
+## 10. Cutting a deployment over to this service (procedure, rehearsed)
+
+The mirror is already off by the operator's decision (the registry's `symphony.md` has its `tickets_repo`
+line commented, `f941278`). What remains of the replacement is moving a deployment's *tracker* from the
+file tracker to this service, which touches the main deployment's configuration and the two tickets
+currently living in its file queue -- so it is done in this order, and steps 1-3 are reversible by
+putting the old tracker block back and restarting.
+
+**0. Know what is in the queue.** The queue directory (`workspace` of the file tracker) holds the real
+tickets; the `BOARD-*.md`, `GUIDE.md` and `README.md` files beside them are the board and the notes, not
+tickets. A queue in the state this one was in held two tickets, both `in-review` -- that is a
+**non-active** state, so the engine does not touch them either way and the cutover cannot strand a
+running agent. Check that before starting: a ticket in `ready` or `in-progress` must be dealt with first.
+
+**1. Land or park the in-review tickets.** Their pull requests are the deliverable; landing them from the
+ticket page is the console's job and is unaffected by this procedure. Do this first so the queue being
+migrated is a record, not work in flight.
+
+**2. Clear the throwaway ticket from the service (if any).** Any ticket created while proving the
+adapter works is not a real ticket; the service has no delete, so the clean way is: stop the service,
+move `~/.symphony-tickets/tickets.db` aside as a backup, start it again (an empty database is created on
+first use), and keep the backup until the cutover is verified.
+
+**3. Import the queue's tickets.** `POST /tickets` once per ticket, with the body in a **file** and
+`--data-binary @file`: never build JSON by string interpolation in a shell, because a Windows shell
+mangles the quotes and the service answers `malformed request body` -- a mistake this project made twice.
+Send `title`, `description` (the body of the markdown file, below its front matter) and
+`state: {type, name, display_name}`; omit `state` entirely to take the store's default. Then read each one
+back with `GET /tickets/:ref` and confirm the description arrived. **This path was rehearsed** against a
+copy of the database on a scratch port: two real queue tickets imported, both readable, descriptions
+intact.
+
+**4. Switch the tracker block.** In the deployment's workflow, `tracker.kind` changes from `file` to
+`ticket_service`, the `provider.path` line is replaced by `provider.url: http://127.0.0.1:4020`, and
+`active_states` / `terminal_states` stay exactly as they are -- they are the workflow's own vocabulary
+and the adapter sends those names through unchanged. The running escript must be rebuilt first
+(`mix escript.build`): the service adapter only exists in a build made after it landed, and a stale
+escript fails at boot with `unsupported_tracker_kind`.
+
+**5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
+should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
+read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
+report written back into the service. Keep the queue directory **read-only** for a few rounds -- it is the
+only copy of the old record until then, and it is also what makes the rollback one line. Only after that:
+remove the queue, and then delete the janitor's second parser of the ticket format.
+
+**Rollback.** Point `tracker.kind` back at `file` and restart. The queue was never deleted, the service
+keeps whatever it was given, and the export (`mix symphony_tickets.export --out DIR`) can produce a
+diffable markdown copy of the service's tickets at any time -- which is how the property the mirror used
+to provide is kept without the mirror.
