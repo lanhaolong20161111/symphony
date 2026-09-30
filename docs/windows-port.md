@@ -1764,16 +1764,17 @@ rounds, which are counted separately.
   then the decision item 10 leaves open (whether a service-tracked tracker advertises **writer** tools);
   then a policy for the landing sweep; and then the registry's two still-untracked project files
   (`svcprobe.md`, `e2e-alpha.md`, `e2e-beta.md`).
-- **Round 29 (2026-10-01)**: the cutover procedure was corrected twice from measurement, then partly
+- **Round 29 (2026-10-01)**: the cutover procedure was corrected three times from measurement, then partly
   executed -- its steps 0-3 are done on the live service, and the half that changes the main deployment
   was deliberately left for the operator.
-  - **Two corrections to `docs/ticket-service-spec.md` §10, both from measurements.** `125a52e`
+  - **Three corrections to `docs/ticket-service-spec.md` §10, both from measurements.** `125a52e`
     replaced the advice to keep the queue "read-only for a few rounds", which was **harmful**: a ticket
     page's write actions still submit to the janitor, and the janitor writes at `janitor.tickets_path`,
     so a stale queue beside a service-backed deployment means a write silently edits a file the service
     never reads, under the same identifier; the step now says to move the queue out of reach. `0f0938d`
     -- an amendment of `f5c2b3c`, which is still reachable in the reflog (`main@{1}`) and whose inserted
-    paragraph carried three leading spaces, so it would have rendered as a code block -- refined that
+    paragraph carried a three-space indent (measured), removed by this amendment; the round's recorded
+    reason was that an indented paragraph would render as a code block instead of prose -- refined that
     again: do **not** rename the queue away, because a path that no longer exists can fail a
     deployment's own validation at boot and take the hub down with it, while `janitor.tickets_path`
     pointed at a **fresh empty directory** makes every stray write refuse loudly (`no_such_ticket`) and
