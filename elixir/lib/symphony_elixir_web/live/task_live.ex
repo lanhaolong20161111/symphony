@@ -7,15 +7,23 @@ defmodule SymphonyElixirWeb.TaskLive do
   This page is the "entry" the architecture names as the gap: a person fills a
   form, and the middleware (`TaskComposer`) creates the GitHub issue and the
   ticket file in one step, so the janitor's next round only mirrors state.
+
+  ## The not-configured project gets one explicit action
+
+  A project with no `janitor.tickets_repo` is a project whose janitor has nowhere
+  to mirror: the `tickets` row says `（没声明 ✗）`. That state offers one action --
+  create the repository (`Projects.create_repo/2`) and write the setting into the
+  project's own workflow file with `WorkflowEditor.put_scalar/3` -- and it is
+  offered by the **page**, not by a background job: nothing happens on mount, on
+  render or on a retry, only on the submit. Both collaborators are injected the
+  same way `ControlLive` injects its HTTP client, so no test calls `gh` or writes
+  the workflow file this instance is running on.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.AgentIdentity
-  alias SymphonyElixir.Projects
-  alias SymphonyElixir.Settings
-  alias SymphonyElixir.TaskComposer
-  alias SymphonyElixirWeb.Layouts
+  alias SymphonyElixir.{AgentIdentity, Projects, Settings, TaskComposer, Workflow, WorkflowEditor}
+  alias SymphonyElixirWeb.{Endpoint, Layouts}
 
   @states ["ready", "in-progress", "in-review", "paused", "done", "cancelled"]
 
@@ -33,9 +41,11 @@ defmodule SymphonyElixirWeb.TaskLive do
       |> assign(:states, @states)
       |> assign(:form, empty_form())
       |> assign(:creating, false)
+      |> assign(:repo_creating, false)
       |> assign(:error, nil)
       |> assign(:info, nil)
       |> assign(:warnings, [])
+      |> assign_repo_proposal()
 
     {:ok, socket}
   end
@@ -45,7 +55,7 @@ defmodule SymphonyElixirWeb.TaskLive do
     name = params["project"] || socket.assigns.selected
     overrides = %{adapter: params["adapter"], model: params["model"]}
 
-    {:noreply, socket |> assign_project(name) |> assign_route(overrides)}
+    {:noreply, socket |> assign_project(name) |> assign_route(overrides) |> assign_repo_proposal()}
   end
 
   @impl true
@@ -110,6 +120,19 @@ defmodule SymphonyElixirWeb.TaskLive do
   @impl true
   def handle_event("refresh", _params, socket) do
     {:noreply, assign(socket, :tickets, load_tickets())}
+  end
+
+  # The only event on this page that changes something outside this process, and the only one that
+  # writes the workflow file. It is a submit and nothing else: no mount, no render and no retry
+  # reaches it, which is what keeps "nothing was created" true until a person asks.
+  @impl true
+  def handle_event("create_tickets_repo", %{"repo" => params}, socket) do
+    {:noreply, create_tickets_repo(assign(socket, :repo_creating, true), trim(params["name"]))}
+  end
+
+  @impl true
+  def handle_event("create_tickets_repo", _params, socket) do
+    {:noreply, repo_failed(socket, "没有收到仓库名 ⇒ 什么都没做")}
   end
 
   @impl true
@@ -281,6 +304,38 @@ defmodule SymphonyElixirWeb.TaskLive do
           </button>
         </form>
       </section>
+
+      <%= if @project && is_nil(@project[:tickets_repo]) do %>
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">tickets 仓库（这个项目还没声明）</h2>
+              <p class="section-copy">
+                上面「这一提交会发生什么」里的 <code>tickets</code> 是「没声明 ✗」⇒ janitor 没地方镜像票据。
+                下面这一步会建一个仓库并把名字写进**本项目的 workflow**（<code>janitor.tickets_repo</code>）。
+              </p>
+            </div>
+          </div>
+
+          <form phx-submit="create_tickets_repo" class="task-form">
+            <label class="form-field">
+              <span class="form-label">仓库名（owner/仓库）</span>
+              <input type="text" name="repo[name]" class="form-input" value={@tickets_repo_name} />
+              <span class="form-hint">
+                默认按项目推导：<code><%= @tickets_repo_name %></code>，可以改。
+                建的仓库是**私有**的（<code>--private</code>），带一个 README 提交。
+                只在点下面的按钮时才动 GitHub：不点就什么都不发生。
+                仓库已经存在的话会被**采用** —— 里面一个字都不改。
+                创建失败就只报原因，workflow 一个字都不写。
+              </span>
+            </label>
+
+            <button type="submit" class="task-submit" disabled={@repo_creating}>
+              <%= if @repo_creating, do: "建立中…", else: "建立并采用为 tickets 仓库" %>
+            </button>
+          </form>
+        </section>
+      <% end %>
 
       <section class="section-card">
         <div class="section-header">
@@ -509,6 +564,175 @@ defmodule SymphonyElixirWeb.TaskLive do
 
   defp add_warning(list, true, text), do: list ++ [text]
   defp add_warning(list, false, _text), do: list
+
+  # ── tickets repository ───────────────────────────────────────────────────────
+
+  # The three answers `Projects.create_repo/2` gives decide everything, and **only** two of them
+  # write the setting. A name written for a repository that was never created is a project that
+  # looks configured and fails on its first ticket, which is the one outcome this action must not
+  # have -- so a failure writes nothing at all, not even a best-effort key.
+  defp create_tickets_repo(socket, ""),
+    do: repo_failed(socket, "仓库名不能为空 —— 要写成 owner/仓库 的形式，什么都没做")
+
+  defp create_tickets_repo(socket, name) do
+    case attempt_create(name) do
+      :created ->
+        adopt(socket, name, "已创建 #{name}（私有，带一个 README 提交）")
+
+      :already_exists ->
+        adopt(socket, name, "#{name} 已经存在 ⇒ 直接采用：仓库里的东西一个字都没动")
+
+      {:error, reason} ->
+        repo_failed(socket, "建立 #{name} 失败：#{describe(reason)} —— workflow 一个字都没写")
+
+      other ->
+        repo_failed(socket, "建立 #{name} 的结果看不懂：#{inspect(other)} —— workflow 一个字都没写")
+    end
+  end
+
+  # Created or adopted, the next step is the same and is the whole point of the action: the setting
+  # goes into the project's own workflow file, so the registry and the running instance then say the
+  # same thing. A write that fails is reported as its own failure -- the repository **was** created,
+  # and saying otherwise would be worse than saying the write did not happen.
+  defp adopt(socket, name, note) do
+    case write_tickets_repo(socket, name) do
+      :ok ->
+        socket
+        |> assign(:repo_creating, false)
+        |> assign(:error, nil)
+        |> assign(:info, note <> "；已把 janitor.tickets_repo 写进 " <> workflow_path(socket))
+        |> put_tickets_repo(name)
+
+      {:error, reason} ->
+        repo_failed(socket, note <> "，但写 workflow 失败：#{describe(reason)}")
+    end
+  end
+
+  defp repo_failed(socket, message) do
+    socket
+    |> assign(:repo_creating, false)
+    |> assign(:info, nil)
+    |> assign(:error, message)
+  end
+
+  # Read, edit, write in one step: the editor hands back the whole file text, so what is written is
+  # exactly what it produced. The key is `janitor.tickets_repo` -- the same key the registry reads
+  # and the row above displays -- and the editor appends the `janitor:` block when the file declares
+  # none, so a project that never had a tickets repository gets the key rather than an error.
+  defp write_tickets_repo(socket, name) do
+    path = workflow_path(socket)
+
+    with {:ok, text} <- File.read(path),
+         {:ok, updated} <- editor().(text, ["janitor", "tickets_repo"], name) do
+      File.write(path, updated)
+    end
+  rescue
+    error -> {:error, {:workflow_write_raised, Exception.message(error)}}
+  end
+
+  # A registry file **is** the workflow its instance is started with, so the project's own path is
+  # always the file to edit: this instance's workflow for the local project, that project's file for
+  # any other. Nil-safe, because a page has to render even when the picker holds a name the registry
+  # no longer has.
+  defp workflow_path(socket) do
+    project = socket.assigns[:project] || %{}
+    project[:path] || Workflow.workflow_file_path()
+  end
+
+  # The two collaborators this action uses, injected the same way `ControlLive` injects its HTTP
+  # client and `InstanceRegistry` its launcher: one option each in the endpoint configuration, read
+  # at the moment of the call, with the real implementation as the default -- so no test calls `gh`,
+  # opens a socket, or writes the workflow file this instance is running on.
+  defp creator, do: Endpoint.config(:tickets_repo_creator) || (&Projects.create_repo/2)
+  defp editor, do: Endpoint.config(:workflow_editor) || (&WorkflowEditor.put_scalar/3)
+
+  # `Projects.create_repo/2` through the seam, private and explicit: private is what that function
+  # defaults to and what a ticket queue should be, and passing it says so instead of relying on an
+  # omission. Wrapped, because "the page renders" outranks "the page explains": a creator that
+  # raises has to produce a reason in the page, not a dead LiveView.
+  defp attempt_create(name) do
+    creator().(name, public: false)
+  rescue
+    error -> {:error, {:creator_raised, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:creator_exited, kind, reason}}
+  end
+
+  # The row is read from the project, so the project is updated with what was just written: the page
+  # then shows the repository it adopted rather than the empty one it started from.
+  defp put_tickets_repo(socket, name) do
+    selected = socket.assigns.selected
+
+    projects =
+      Enum.map(socket.assigns.projects, fn project ->
+        if project.name == selected, do: Map.put(project, :tickets_repo, name), else: project
+      end)
+
+    socket |> assign(:projects, projects) |> assign_project(selected)
+  end
+
+  # What the repository should be called, before anything happens: the project's name plus
+  # `-tickets`, under the owner this machine already works under -- from **this** project's own
+  # repositories first, so the proposal is derived from the project rather than from whichever one
+  # happens to sort first. Editable, because a suggestion is not a decision.
+  defp assign_repo_proposal(socket) do
+    assign(socket, :tickets_repo_name, proposed_repo(socket.assigns[:project]))
+  end
+
+  defp proposed_repo(nil), do: "project-tickets"
+
+  defp proposed_repo(project) do
+    name = repo_slug(project) <> "-tickets"
+
+    case repo_owner(project) do
+      nil -> name
+      owner -> owner <> "/" <> name
+    end
+  end
+
+  defp repo_owner(project) do
+    Enum.find_value([project[:tickets_repo], project[:issues_repo]], &owner_of/1) ||
+      Projects.github_owner()
+  end
+
+  defp owner_of(repo) when is_binary(repo) do
+    case String.split(repo, "/", parts: 2) do
+      [owner, _name] when owner != "" -> owner
+      _ -> nil
+    end
+  end
+
+  defp owner_of(_repo), do: nil
+
+  # A slug with nothing ASCII in it -- this instance's own project is called 本实例 -- would give
+  # `-tickets`, which is not a repository name, so that case falls back to a name a person can edit.
+  defp repo_slug(project) do
+    case slug(project[:name]) do
+      "" -> "project"
+      slug -> slug
+    end
+  end
+
+  # The same rule the new-project form slugifies with, so the repository this page proposes and the
+  # one that form would propose for the same project agree.
+  defp slug(name) when is_binary(name) do
+    name
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9-]+/, "-")
+    |> String.trim("-")
+  end
+
+  defp slug(_name), do: ""
+
+  defp describe(reason) when is_binary(reason), do: reason
+  defp describe({:gh_exit, status, output}), do: "gh 退出码 #{status}：#{trim(output)}"
+  defp describe({:invalid_repo, repo}), do: "名字要写成 owner/仓库 的形式：#{inspect(repo)}"
+  defp describe({:creator_raised, message}), do: "创建时抛异常：#{message}"
+  defp describe(reason), do: inspect(reason)
+
+  defp trim(nil), do: ""
+  defp trim(value) when is_binary(value), do: String.trim(value)
+  defp trim(value), do: value |> to_string() |> String.trim()
 
   defp site_info do
     Settings.site()
