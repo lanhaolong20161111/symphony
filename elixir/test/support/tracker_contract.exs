@@ -17,7 +17,7 @@ defmodule SymphonyElixir.TrackerContract do
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Tracker.Issue
 
-  # The registry is a private module attribute (`tracker.ex:13-21`), and the only public door,
+  # The registry is a private module attribute (`tracker.ex:27-36`), and the only public door,
   # `adapter_for_kind/1`, needs a kind to open it. So the kinds are read from the source: a kind
   # added to the registry and not to this suite makes `registered_kinds/0` change under the test
   # that pins it, instead of being silently skipped -- which is the whole point of a contract that a
@@ -25,8 +25,8 @@ defmodule SymphonyElixir.TrackerContract do
   @registry_source Path.expand("../../lib/symphony_elixir/tracker.ex", __DIR__)
   @registry_entry ~r/"([a-z_]+)"\s*=>/
 
-  # `tracker.ex:23-28` declares three required callbacks. `agent_tool_specs/0`,
-  # `execute_agent_tool/3` and `validate_config/1` are optional there (`tracker.ex:30-32`), so an
+  # `tracker.ex:38-43` declares three required callbacks. `agent_tool_specs/0`,
+  # `execute_agent_tool/3` and `validate_config/1` are optional there (`tracker.ex:45-47`), so an
   # adapter need not export them -- but one that advertises tools must be able to run them.
   @required_callbacks [
     fetch_issues_by_states: 1,
@@ -86,7 +86,7 @@ defmodule SymphonyElixir.TrackerContract do
   end
 
   @doc """
-  Rule 1: the kind round-trips through `adapter_for_kind/1` (`tracker.ex:94-100`).
+  Rule 1: the kind round-trips through `adapter_for_kind/1` (`tracker.ex:148-154`).
   """
   @spec registered_adapter(String.t()) :: module()
   def registered_adapter(kind) do
@@ -97,7 +97,7 @@ defmodule SymphonyElixir.TrackerContract do
   @doc """
   Rule 1: a registered module implements the behaviour and its required callbacks.
 
-  The required three are `tracker.ex:23-24` and `tracker.ex:27`; `module_info(:attributes)` is read
+  The required three are `tracker.ex:38-39` and `tracker.ex:42`; `module_info(:attributes)` is read
   for the `@behaviour` declaration so a module that merely exports the names still fails.
   """
   @spec assert_registered_adapter(module()) :: :ok
@@ -112,7 +112,7 @@ defmodule SymphonyElixir.TrackerContract do
     assert function_exported?(adapter, :agent_tool_specs, 0) ==
              function_exported?(adapter, :execute_agent_tool, 3),
            "#{inspect(adapter)} advertises agent tools and execute_agent_tool/3 must come as a pair " <>
-             "(tracker.ex:25-26): specs exported=#{function_exported?(adapter, :agent_tool_specs, 0)} " <>
+             "(tracker.ex:40-41): specs exported=#{function_exported?(adapter, :agent_tool_specs, 0)} " <>
              "execute exported=#{function_exported?(adapter, :execute_agent_tool, 3)}"
 
     :ok
@@ -263,12 +263,65 @@ defmodule SymphonyElixir.TrackerContract do
   end
 
   @doc """
-  Rule 6: the agent tool surface.
+  Rule 6 for the composed list: the advertisement is composed at the tracker boundary.
+
+  `Tracker.compose_agent_tool_specs/1` is the rule -- the adapter's own tools first, then the host's,
+  for **every** kind -- and `Tracker.bind_agent_tools/0` is the single source of truth every transport
+  reads (the Codex app-server's `dynamicTools`, the ACP path's stdio MCP server, the HTTP tool
+  endpoint). Neither the adapter nor an individual transport composes anything.
+
+  `adapter_tools` and `host_tools` are passed in rather than read out of `Tracker`, so this states the
+  composition instead of repeating it: an adapter that quietly gained a tool, or a host tool that
+  stopped being advertised, fails here rather than passing through the same call that produced it.
+  """
+  @spec assert_composed_tool_list(module(), [String.t()], [String.t()]) :: :ok
+  def assert_composed_tool_list(adapter, adapter_tools, host_tools) do
+    expected = adapter_tools ++ host_tools
+    composed = tool_names(Tracker.compose_agent_tool_specs(adapter))
+
+    assert composed == expected,
+           "the tracker boundary must compose #{inspect(expected)} for #{inspect(adapter)}, " <>
+             "got #{inspect(composed)}"
+
+    :ok
+  end
+
+  @doc """
+  Rule 6 at the door: `Tracker.bind_agent_tools/0` answers the composed list for the configured kind.
+
+  The configured kind has to be `adapter`, which the assertion states rather than assumes -- a
+  workflow that failed to load leaves the previous configuration in place (`workflow_store.ex:98-105`),
+  and this rule would otherwise be measured against a tracker nobody selected.
+  """
+  @spec assert_bound_tool_list(module(), [String.t()]) :: :ok
+  def assert_bound_tool_list(adapter, expected) do
+    binding = Tracker.bind_agent_tools()
+
+    assert binding.adapter == adapter,
+           "the configured tracker must be #{inspect(adapter)} for this rule, got " <>
+             "#{inspect(binding.adapter)}"
+
+    bound = tool_names(binding.tool_specs)
+
+    assert bound == expected,
+           "Tracker.bind_agent_tools/0 is the list every transport advertises and it must answer " <>
+             "#{inspect(expected)}, got #{inspect(bound)}"
+
+    :ok
+  end
+
+  @doc """
+  Rule 6: the agent tool surface of one adapter.
 
   The dispatch answers an unsupported tool with the envelope rather than an exception
-  (`tracker.ex:115-121`, `tracker.ex:127-141`), which is what every adapter has to satisfy; an
+  (`tracker.ex:190-196`, `tracker.ex:202-216`), which is what every adapter has to satisfy; an
   adapter that advertises tools must additionally answer each of its own specs with the envelope
   (`success`/`output`/`contentItems`) and never raise, including for arguments it refuses.
+
+  This is the adapter's **own** list, not the list a run is offered: the composed list is
+  `Tracker.bind_agent_tools/0`'s, which is this list followed by the host's
+  (`assert_composed_tool_list/3`). An adapter is measured here, and the composition is measured
+  there.
 
   `tool_opts` is handed to `execute_agent_tool/3` unchanged. It exists so the caller can pass the
   adapter's own transport stub (`linear/agent_tool.ex:57`, `github/agent_tool.ex:58`,
@@ -304,12 +357,36 @@ defmodule SymphonyElixir.TrackerContract do
 
   defp assert_callback(adapter, {fun, arity}) do
     assert function_exported?(adapter, fun, arity),
-           "#{inspect(adapter)} is missing required callback #{fun}/#{arity} (tracker.ex:23-28)"
+           "#{inspect(adapter)} is missing required callback #{fun}/#{arity} (tracker.ex:38-43)"
   end
 
   defp assert_present_string(value, what) do
     assert is_binary(value), "#{what} must be a string, got #{inspect(value)}"
     assert String.trim(value) != "", "#{what} must not be blank"
+  end
+
+  # The names of a composed list, with the spec shape `assert_tool_spec/3` asserts for an adapter's own
+  # tools: a host tool is advertised to a transport too, so it has to be a spec one can send.
+  defp tool_names(specs) do
+    assert is_list(specs), "the composed tool list must be a list, got #{inspect(specs)}"
+
+    Enum.map(specs, fn spec ->
+      assert_tool_spec_shape(spec, "the composed list")
+      spec["name"]
+    end)
+  end
+
+  defp assert_tool_spec_shape(spec, what) do
+    assert is_map(spec), "#{what} carries a tool spec that is not a map: #{inspect(spec)}"
+
+    keys = spec |> Map.keys() |> Enum.sort()
+    assert keys == Enum.sort(@tool_keys), "#{what} carries keys #{inspect(keys)}"
+
+    assert_present_string(spec["name"], "a tool name from #{what}")
+    assert_present_string(spec["description"], "the description of #{inspect(spec["name"])}")
+
+    assert is_map(spec["inputSchema"]),
+           "#{inspect(spec["name"])} must carry an inputSchema map, got #{inspect(spec["inputSchema"])}"
   end
 
   defp assert_advertised_tools(adapter, tool_opts) do
@@ -329,16 +406,7 @@ defmodule SymphonyElixir.TrackerContract do
   end
 
   defp assert_tool_spec(adapter, spec, tool_opts) do
-    assert is_map(spec), "#{inspect(adapter)} advertises a tool spec that is not a map"
-
-    keys = spec |> Map.keys() |> Enum.sort()
-    assert keys == Enum.sort(@tool_keys), "#{inspect(adapter)} advertises keys #{inspect(keys)}"
-
-    assert_present_string(spec["name"], "a tool name from #{inspect(adapter)}")
-    assert_present_string(spec["description"], "the description of #{inspect(spec["name"])}")
-
-    assert is_map(spec["inputSchema"]),
-           "#{inspect(spec["name"])} must carry an inputSchema map, got #{inspect(spec["inputSchema"])}"
+    assert_tool_spec_shape(spec, inspect(adapter))
 
     Enum.each(@refused_arguments, &assert_tool_envelope(adapter, spec["name"], &1, tool_opts))
   end

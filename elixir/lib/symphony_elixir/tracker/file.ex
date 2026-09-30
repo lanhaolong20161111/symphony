@@ -73,7 +73,7 @@ defmodule SymphonyElixir.Tracker.File do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Janitor.{AgentTool, GateTool}
+  alias SymphonyElixir.Janitor.AgentTool
   alias SymphonyElixir.Tracker.Issue
 
   @ticket_extensions ~w(.md .markdown .yaml .yml)
@@ -154,33 +154,26 @@ defmodule SymphonyElixir.Tracker.File do
   def secret_environment_names(_tracker_settings), do: []
 
   @doc """
-  The janitor's tools, not provider tools.
+  The janitor's three tools, and only those.
 
-  A file ticket is changed by editing it, so this tracker has never needed a provider API. What it
-  does need is a publisher: the agent cannot commit, push or open a pull request (see
-  `SymphonyElixir.Janitor`), so the janitor -- this tracker's host-side caretaker -- offers
-  `symphony_publish` and the agent calls it when the work is done. `ticket_comment` and `ticket_state`
-  are there because the host owns every write to a ticket file.
-
-  `GateTool` joins them for the same reason: the agent's own shell cannot run this project's gate
-  (the sandbox cannot start `mix` here), and the host can. It is advertised only when the project
-  declares `gate.command`, so this list is still exactly the three janitor tools for a project that
-  declares none.
+  The gate tool is deliberately **not** here. Running the project's gate is a property of the
+  project, not of this tracker, so it is composed at the tracker boundary
+  (`SymphonyElixir.Tracker.compose_agent_tool_specs/1`) and advertised whatever the kind is.
+  Composing it here is exactly what left a service-backed project with no tools at all: a project
+  whose tickets come from the service does not run this adapter, so the gate it declares was never
+  offered to its agent.
   """
   @spec agent_tool_specs() :: [map()]
-  def agent_tool_specs, do: AgentTool.tool_specs() ++ GateTool.tool_specs()
+  def agent_tool_specs, do: AgentTool.tool_specs()
 
   @doc """
-  Runs one agent tool call: the janitor's, or the gate's when the call names it.
+  Runs one agent tool call at the janitor.
+
+  Only the janitor's own tools arrive here: the boundary routes a host tool to the host module
+  before any adapter is consulted (`SymphonyElixir.Tracker.execute_bound_agent_tool/4`).
   """
   @spec execute_agent_tool(String.t() | nil, term(), keyword()) :: map()
-  def execute_agent_tool(tool, arguments, opts) do
-    if GateTool.handles?(tool) do
-      GateTool.execute(tool, arguments, opts)
-    else
-      AgentTool.execute(tool, arguments, opts)
-    end
-  end
+  def execute_agent_tool(tool, arguments, opts), do: AgentTool.execute(tool, arguments, opts)
 
   @doc """
   Validate the tracker block.

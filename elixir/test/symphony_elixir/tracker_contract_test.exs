@@ -32,11 +32,18 @@ defmodule SymphonyElixir.TrackerContractTest do
   alias SymphonyElixir.Linear.Adapter, as: LinearAdapter
   alias SymphonyElixir.Tracker.File, as: FileTracker
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixir.Tracker.TicketService
   alias SymphonyElixir.TrackerContract, as: Contract
 
-  # The tools each adapter advertises, pinned by name. `memory` advertises none, which is a value:
-  # `tracker.ex:107-113` turns the missing callback into an empty list, and `tracker.ex:115-121`
-  # answers every tool call with a structured failure.
+  # The tools each adapter advertises **itself**, pinned by name. This is not the list a run is
+  # offered: that is the composed list, `Tracker.bind_agent_tools/0`'s `tool_specs`, which is this
+  # list followed by the host's tools (`Tracker.compose_agent_tool_specs/1`) for every kind. Composing
+  # it in one adapter is what left a service-backed project with no tools at all, so where the
+  # composition happens is itself pinned, in the tests below.
+  #
+  # `memory` and `ticket_service` advertise none, which is a value: `tracker.ex:161-167` turns the
+  # missing callback into an empty list, and `tracker.ex:190-196` answers every tool call such an
+  # adapter does not own with a structured failure.
   @advertised_tools %{
     "asana" => ["asana_api"],
     "file" => ["symphony_publish", "ticket_comment", "ticket_state"],
@@ -48,7 +55,17 @@ defmodule SymphonyElixir.TrackerContractTest do
     "ticket_service" => []
   }
 
-  # `tracker.ex:13-21`, pinned as text: a kind added to the registry and not to this list fails
+  # The host's own tools, pinned by name. They belong to no adapter, so they are not in
+  # `@advertised_tools`; they are advertised beside whatever the adapter offers, for every kind, and
+  # this table is what makes a host tool being dropped (or doubled) a failure rather than a silent
+  # change to every kind's list.
+  @host_tools ["symphony_gate"]
+
+  # A gate a project could declare. Nothing in this suite runs it: the gate tool is only advertised
+  # here, and its execution is pinned in `janitor/gate_tool_test.exs` with an injected runner.
+  @gate_command "mix lint && mix test"
+
+  # `tracker.ex:27-36`, pinned as text: a kind added to the registry and not to this list fails
   # `registered_kinds/0 == @registered_kinds` instead of being skipped by the loop below.
   @registered_kinds ~w(asana file github gitlab jira linear memory ticket_service)
 
@@ -343,8 +360,10 @@ defmodule SymphonyElixir.TrackerContractTest do
       binding = Tracker.bind_agent_tools()
 
       assert binding.adapter == Memory
+      # The composed list: memory's own list is empty and this project declares no gate, so nothing is
+      # advertised at all (`tracker.ex:73-84`).
       assert binding.tool_specs == []
-      # An empty list of secret names is a value, not an exemption (tracker.ex:123-125).
+      # An empty list of secret names is a value, not an exemption (tracker.ex:198-200).
       assert binding.secret_environment_names == []
 
       result = Tracker.execute_bound_agent_tool(binding, "not_a_memory_tool", %{})
@@ -365,10 +384,44 @@ defmodule SymphonyElixir.TrackerContractTest do
 
       assert binding.adapter == FileTracker
 
+      # The composed list, which is what every transport advertises: the adapter's three tools, and
+      # nothing appended while the project declares no gate (`tracker.ex:95-98`).
       assert Enum.map(binding.tool_specs, & &1["name"]) ==
                ["symphony_publish", "ticket_comment", "ticket_state"]
 
       assert binding.secret_environment_names == []
+    end
+
+    test "a service-backed project that declares a gate is advertised the gate tool" do
+      assert :ok = write_service_gate_workflow!(@gate_command)
+
+      # Asserted, not assumed: a failed reload would leave the previous tracker configured, and this
+      # rule would then be measured against the wrong adapter.
+      assert Config.settings!().tracker.kind == "ticket_service"
+      assert Config.settings!().gate.command == @gate_command
+
+      # This is the fix. `ticket_service` deliberately advertises no tools of its own, and the gate
+      # used to be composed by the **file** tracker's adapter -- so a project whose tickets come from
+      # the service was offered no tools at all, its agent read the workflow's `gate.command` and ran
+      # that command itself in its sandbox, where this project's gate cannot even start.
+      assert Contract.assert_composed_tool_list(TicketService, [], @host_tools) == :ok
+      assert Contract.assert_bound_tool_list(TicketService, @host_tools) == :ok
+    end
+
+    test "a project that declares no gate is advertised nothing extra, for every kind" do
+      # The fixture workflow declares no `gate.command` (`schema.ex:579-582`), and composition is
+      # asked of the boundary per adapter, so this is a statement about the rule rather than about one
+      # configured tracker: for every registered kind, the composed list is exactly the adapter's own.
+      assert Config.settings!().gate.command == nil
+
+      Enum.each(Contract.registered_adapters(), fn {kind, adapter} ->
+        assert Contract.assert_composed_tool_list(adapter, Map.fetch!(@advertised_tools, kind), []) ==
+                 :ok
+      end)
+
+      # And at the door, for the kind the fixture configures.
+      assert Contract.assert_bound_tool_list(LinearAdapter, Map.fetch!(@advertised_tools, "linear")) ==
+               :ok
     end
 
     test "every adapter answers its own tool surface with the envelope" do
@@ -418,7 +471,7 @@ defmodule SymphonyElixir.TrackerContractTest do
     end
 
     test "secret_environment_names/1 answers a list for every registered adapter" do
-      # Rule 7 at the adapter, not through the binding: the callback is required (`tracker.ex:27`), so
+      # Rule 7 at the adapter, not through the binding: the callback is required (`tracker.ex:42`), so
       # every adapter is asked, and an empty list counts as an answer rather than an exemption. A
       # linear workflow is written and its load asserted first, because the file-tracker test above
       # rewrites the shared workflow and an adapter must not be measured against whichever workflow
@@ -602,6 +655,33 @@ defmodule SymphonyElixir.TrackerContractTest do
     ---
 
     Tracker contract test workflow.
+    """
+
+    File.write!(Workflow.workflow_file_path(), contents)
+    WorkflowStore.force_reload()
+  end
+
+  # A service-backed project that declares a gate. `TicketService.validate_config/1` checks only that
+  # `provider.url` is declared and probes nothing, so this test opens no socket; the gate tool is
+  # advertised here, never run (its execution is pinned in `janitor/gate_tool_test.exs`).
+  defp write_service_gate_workflow!(command) do
+    contents = """
+    ---
+    tracker:
+      kind: ticket_service
+      provider:
+        url: 'http://127.0.0.1:4020'
+      active_states:
+        - ready
+      terminal_states:
+        - done
+    gate:
+      command: '#{command}'
+    codex:
+      command: codex app-server
+    ---
+
+    Tracker contract test workflow: a service-backed project that declares a gate.
     """
 
     File.write!(Workflow.workflow_file_path(), contents)
