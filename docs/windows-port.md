@@ -1511,9 +1511,9 @@ rounds, which are counted separately.
     (c) The new project's workflow was generated from `symphony.md` and carried its
     `cd elixir && mix deps.get` hook line, which is right for the fork's own repository and fatal for a
     README-only target. The log shows the trap firing **four times** --
-    `Workspace hook failed hook=after_create ... status=1 output="Cloning into '.'...\n/usr/bin/bash:
-    line 15: cd: elixir: No such file or directory\n"` at 01:32:20, 01:32:32, 01:32:55 and 01:33:37,
-    each followed by `{:workspace_hook_failed, "after_create", 1, ...}` and a retry -- before the line
+    `Workspace hook failed hook=after_create ... status=1 output="Cloning into '.'...\n/usr/bin/bash: line 15: cd: elixir: No such file or directory\n"`
+    at 01:32:20, 01:32:32, 01:32:55 and 01:33:37, each followed by
+    `{:workspace_hook_failed, "after_create", 1, ...}` and a retry -- before the line
     was removed; `svcprobe.md`'s `after_create` still ends with the comment that introduced it and no
     command after it (`:94-95`). The earlier end-to-end round had already paid for this trap, which is
     why it is a mistake rather than a discovery.
