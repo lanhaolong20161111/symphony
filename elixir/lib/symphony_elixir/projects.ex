@@ -548,6 +548,7 @@ defmodule SymphonyElixir.Projects do
         # under `agent:` and the parser dropped it entirely -- which is how `adapter` silently fell
         # back to its default.
         backend_block(attrs),
+        project_block(attrs),
         hooks_block(attrs)
       ]
       |> Enum.join("\n\n")
@@ -617,6 +618,28 @@ defmodule SymphonyElixir.Projects do
       # asking for a different model therefore cannot be honoured on codex, and says so.
       command: codex --config 'model="#{attrs[:model] || "<model-name>"}"' app-server\
     """
+  end
+
+  # `project.publish` is the one project-level choice this form makes: how finished work lands.
+  # Only `publish` is written -- the sibling `project.isolation` is not offered by this page and is
+  # not written here, so a file created by this form carries the schema's own default for it.
+  #
+  # The comment is English because the front matter is ASCII-only (see `render/1`).
+  defp project_block(attrs) do
+    """
+    project:
+      # pull_request pushes a branch and opens a pull request; direct commits and pushes the
+      # project's own main branch, with no pull request.
+      publish: #{publish_mode(attrs[:publish])}\
+    """
+  end
+
+  # The modes are read from the schema rather than listed here, and anything else -- a form that
+  # forgot the field, or a crafted POST -- falls back to the safe half instead of writing a file the
+  # schema then refuses: "nothing lands on the project's own branch without review" is the default
+  # this system is built on.
+  defp publish_mode(value) do
+    if value in Schema.Project.publishes(), do: value, else: "pull_request"
   end
 
   # A block scalar's indentation is set by its first line, so every line inside `after_create: |`

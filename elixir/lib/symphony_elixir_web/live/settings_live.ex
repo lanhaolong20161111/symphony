@@ -287,14 +287,26 @@ defmodule SymphonyElixirWeb.SettingsLive do
                 <td>
                   <form phx-submit="save" class="state-form">
                     <input type="hidden" name="path" value={Enum.join(entry.path, ".")} />
-                    <input
-                      type="text"
-                      name="value"
-                      class="form-input"
-                      value={input_value(Map.get(entry, :value))}
-                      list={repo_field?(entry) && "gh-repos"}
-                      disabled={not @can_write}
-                    />
+                    <%= if entry[:type] == :enum do %>
+                      <select name="value" class="form-input" disabled={not @can_write}>
+                        <option
+                          :for={option <- Map.get(entry, :options, [])}
+                          value={option}
+                          selected={input_value(Map.get(entry, :value)) == option}
+                        >
+                          <%= option %>
+                        </option>
+                      </select>
+                    <% else %>
+                      <input
+                        type="text"
+                        name="value"
+                        class="form-input"
+                        value={input_value(Map.get(entry, :value))}
+                        list={repo_field?(entry) && "gh-repos"}
+                        disabled={not @can_write}
+                      />
+                    <% end %>
                     <button type="submit" class="subtle-button" disabled={not @can_write}>写入</button>
                   </form>
                 </td>
@@ -382,6 +394,10 @@ defmodule SymphonyElixirWeb.SettingsLive do
   end
 
   defp describe({:not_editable, path}), do: "#{Enum.join(path, ".")} 不在可改清单里"
+
+  defp describe({:not_one_of, value, options}),
+    do: "#{inspect(value)} 不是可选值 —— 只能填 #{Enum.join(options, " 或 ")}"
+
   defp describe({:not_an_integer, raw}), do: "#{inspect(raw)} 不是整数"
   defp describe({:not_a_boolean, raw}), do: "#{inspect(raw)} 不是 true/false"
   defp describe({:would_overwrite_section, key}), do: "#{key} 是一个小节，不能改成单个值"

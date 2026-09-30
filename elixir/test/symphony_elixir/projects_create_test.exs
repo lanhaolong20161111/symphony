@@ -125,6 +125,79 @@ defmodule SymphonyElixir.ProjectsCreateTest do
     end
   end
 
+  # `create/2` writes exactly these bytes (`File.write!(path, Projects.render(attrs))`); it is the
+  # step before that -- provisioning `gh repo create` and `git clone` -- that keeps a test from
+  # calling it, so the assertion is on the file's contents as the registry receives them.
+  defp written_file(attrs) do
+    path = Path.join(System.tmp_dir!(), "project-#{System.unique_integer([:positive])}.md")
+    File.write!(path, Projects.render(attrs))
+    on_exit(fn -> File.rm(path) end)
+    File.read!(path)
+  end
+
+  # How finished work lands is the one project-level choice the create form makes, and the mode has
+  # to reach the file: a page that only remembered it in its own assigns would create projects that
+  # all publish the default way.
+  describe "project.publish (how finished work lands)" do
+    test "each mode is written into the file's project: block" do
+      assert Schema.Project.publishes() == ["pull_request", "direct"]
+
+      for mode <- Schema.Project.publishes() do
+        text = written_file(attrs(%{publish: mode}))
+
+        assert project_block(text) =~ "publish: #{mode}"
+        assert {:ok, settings} = parse(text)
+        assert settings.project.publish == mode
+      end
+    end
+
+    test "omitting the choice writes pull_request -- the safe half, and the schema's default" do
+      text = written_file(Map.delete(attrs(), :publish))
+
+      assert project_block(text) =~ "publish: pull_request"
+      assert {:ok, settings} = parse(text)
+      assert settings.project.publish == "pull_request"
+      # ...and saying nothing means the same thing to the schema, which is what lets the deployment's
+      # own workflow carry no `project:` block at all.
+      assert {:ok, settings} = parse(without_project_block(text))
+      assert settings.project.publish == "pull_request"
+    end
+
+    test "a mode outside the two is not written -- the file falls back to pull_request" do
+      # Only reachable by a crafted POST: the form is a pair of radios. The safe half is what it
+      # gets, because a file carrying a mode the schema refuses would not load at all.
+      text = written_file(attrs(%{publish: "merge"}))
+
+      assert project_block(text) =~ "publish: pull_request"
+      refute text =~ "merge"
+      assert {:ok, settings} = parse(text)
+      assert settings.project.publish == "pull_request"
+    end
+
+    test "the block carries publish only -- the sibling setting is not this form's to offer" do
+      block = project_block(written_file(attrs()))
+
+      assert block =~ "publish:"
+      refute block =~ "isolation"
+    end
+  end
+
+  # The block as it appears in the file, its comment included: `project:` and everything indented
+  # under it.
+  defp project_block(text) do
+    case Regex.run(~r/^project:\n(?:[ \t].*\n)*/m, text) do
+      [block] -> block
+      nil -> flunk("no project: block in\n#{text}")
+    end
+  end
+
+  defp without_project_block(text) do
+    text
+    |> String.split("\n")
+    |> Enum.reject(&(String.starts_with?(&1, "project:") or String.starts_with?(&1, "  publish:")))
+    |> Enum.join("\n")
+  end
+
   # The port is chosen by trying to bind, not by reading a table: the registry only knows Symphony's
   # own projects, and a port can be held by anything.
   describe "next_free_port/1" do

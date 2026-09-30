@@ -65,7 +65,17 @@ defmodule SymphonyElixir.Settings do
     %{path: ["agent", "max_concurrent_agents"], label: "并发 agent 数", type: :integer},
     %{path: ["agent", "max_turns"], label: "每单最大回合", type: :integer},
     %{path: ["acp", "adapter"], label: "ACP adapter", type: :string, hint: "dsh 或 workbuddy"},
-    %{path: ["acp", "model"], label: "ACP model", type: :string, hint: "留空即用 agent 自报的默认"}
+    %{path: ["acp", "model"], label: "ACP model", type: :string, hint: "留空即用 agent 自报的默认"},
+    # An enum rather than a string: the two modes are a choice, so the page offers them as one and
+    # `coerce/2` refuses anything else. The values come from `Schema.Project.publishes/0` at runtime
+    # (`options: {module, function}`), so this list stays a single source.
+    %{
+      path: ["project", "publish"],
+      label: "完工发布方式（project.publish）",
+      type: :enum,
+      options: {Schema.Project, :publishes},
+      hint: "pull_request = 推一个分支 + 开 PR（默认 ✓ 等人看过再落地）；direct = 直接提交、推送项目自己的 main，不开 PR ✗"
+    }
   ]
 
   # Keys that must always carry the same value, because they are the same thing declared twice.
@@ -255,6 +265,12 @@ defmodule SymphonyElixir.Settings do
          ]
        },
        %{
+         title: "project",
+         rows: [
+           {"publish", settings.project.publish}
+         ]
+       },
+       %{
          title: "workspace / server / polling",
          rows: [
            {"workspace.root", settings.workspace.root},
@@ -354,14 +370,34 @@ defmodule SymphonyElixir.Settings do
     settings = Config.settings!()
 
     Enum.map(@editable, fn entry ->
-      Map.put(entry, :value, read_path(settings, entry.path))
+      entry
+      |> Map.put(:value, read_path(settings, entry.path))
+      |> with_options()
     end)
   rescue
-    _error -> @editable
+    # Without a readable configuration the page still renders the list of keys -- but with their
+    # choices resolved, so an enum row is a picker rather than a tuple the template cannot walk.
+    _error -> Enum.map(@editable, &with_options/1)
   end
 
-  defp read_path(settings, [section, key]) do
-    settings |> Map.get(String.to_existing_atom(section)) |> Map.get(String.to_existing_atom(key))
+  # The choices a `:enum` entry offers, resolved for the page so it can render a picker. Anything
+  # else keeps its `type` and is rendered as the plain text field it always was.
+  defp with_options(%{type: :enum} = entry), do: Map.put(entry, :options, options_for(entry))
+  defp with_options(entry), do: entry
+
+  # `{module, function}` rather than the list itself: the modes live in the schema (a compile-time
+  # call from a module attribute would be a compile-order dependency on a module this one does not
+  # own), and it is read at the moment the page asks.
+  defp options_for(%{options: {module, function}}), do: apply(module, function, [])
+  defp options_for(%{options: options}) when is_list(options), do: options
+  defp options_for(_entry), do: []
+
+  # Walks the whole path, one segment at a time. It used to match exactly two segments, and the
+  # curated list's first entry is `tracker.provider.path` -- so the `FunctionClauseError` it threw
+  # took the rescue below and **every** row lost its value, which is why the page's "生效值" column
+  # read `nil` for keys whose value was right there in the running configuration.
+  defp read_path(settings, path) do
+    Enum.reduce(path, settings, &Map.get(&2, String.to_existing_atom(&1)))
   end
 
   @doc """
@@ -440,6 +476,19 @@ defmodule SymphonyElixir.Settings do
       "true" -> {:ok, true}
       "false" -> {:ok, false}
       other -> {:error, {:not_a_boolean, other}}
+    end
+  end
+
+  # A closed set is refused here rather than written and then rejected by the schema: the two modes
+  # are the whole list, and a value outside it is a typo the page should answer with the choices.
+  defp coerce(%{type: :enum} = entry, raw) do
+    value = String.trim(to_string(raw))
+    options = options_for(entry)
+
+    if value in options do
+      {:ok, value}
+    else
+      {:error, {:not_one_of, value, options}}
     end
   end
 

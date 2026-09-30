@@ -29,11 +29,20 @@ defmodule SymphonyElixirWeb.ProjectLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.Config.Schema.Project
   alias SymphonyElixir.Projects
   alias SymphonyElixirWeb.Layouts
 
   @backends ["codex", "acp", "commandcode"]
   @adapters ["dsh", "workbuddy"]
+
+  # One short line per mode, keyed by the value the schema accepts. The values themselves are read
+  # from `Project.publishes/0`, so a mode added there shows up here -- with a blank line, rather than
+  # this page keeping a second list in step by hand.
+  @publish_blurbs %{
+    "pull_request" => "推一个分支并开 pull request（默认 ✓ 等人看过再落地）",
+    "direct" => "直接提交、推送项目自己的 main 分支，不开 pull request ✗（不等人看）"
+  }
 
   @impl true
   def mount(_params, _session, socket) do
@@ -44,6 +53,7 @@ defmodule SymphonyElixirWeb.ProjectLive do
       |> assign(:projects, existing)
       |> assign(:backends, @backends)
       |> assign(:adapters, @adapters)
+      |> assign(:publish_choices, publish_choices())
       |> assign(:form, defaults(existing))
       |> assign(:known_models, models_for("dsh"))
       |> assign(:problems, [])
@@ -215,6 +225,22 @@ defmodule SymphonyElixirWeb.ProjectLive do
             <input type="text" name="project[workspace_root]" class="form-input" value={@form["workspace_root"]} placeholder="~/code/ws/my-app" />
           </label>
 
+          <fieldset class="form-field" style="border: 0; padding: 0; margin: 0;">
+            <legend class="form-label">完工怎么落地 *（写进 <code>project.publish</code>）</legend>
+            <label
+              :for={{value, blurb} <- @publish_choices}
+              style="display: block; margin: 0.25rem 0;"
+            >
+              <input
+                type="radio"
+                name="project[publish]"
+                value={value}
+                checked={@form["publish"] == value}
+              />
+              <code>{value}</code> —— {blurb}
+            </label>
+          </fieldset>
+
           <div style="display: flex; gap: 0.8rem; flex-wrap: wrap;">
             <label class="form-field" style="flex: 1 1 10rem;">
               <span class="form-label">coding agent *</span>
@@ -335,9 +361,16 @@ defmodule SymphonyElixirWeb.ProjectLive do
       "backend" => "acp",
       "adapter" => "dsh",
       "model" => "auto",
+      # Preselected: the safe half of the choice, and the schema's own default when a file says
+      # nothing at all.
+      "publish" => "pull_request",
       "env_prep" => "",
       "prompt" => Projects.default_prompt()
     }
+  end
+
+  defp publish_choices do
+    Enum.map(Project.publishes(), &{&1, Map.get(@publish_blurbs, &1, "")})
   end
 
   # `nil` from the scan means the range is full, which the form then says rather than inventing a
@@ -424,6 +457,9 @@ defmodule SymphonyElixirWeb.ProjectLive do
       backend: params["backend"] || "codex",
       adapter: params["adapter"],
       model: text(params["model"]),
+      # The mode is passed through as the form sent it; `Projects.render/1` writes the safe default
+      # for anything that is not one of `Project.publishes/0`.
+      publish: params["publish"],
       env_prep: params["env_prep"] || "",
       prompt: params["prompt"] || ""
     }

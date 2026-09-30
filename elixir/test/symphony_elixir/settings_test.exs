@@ -215,6 +215,94 @@ defmodule SymphonyElixir.SettingsTest do
     end
   end
 
+  describe "project.publish (how finished work lands)" do
+    test "is in the curated list, offered as the modes the schema accepts" do
+      entry = Enum.find(Settings.editable(), &(&1.path == ["project", "publish"]))
+
+      assert entry, "project.publish must be editable, or the mode can only be changed by hand"
+      assert entry.type == :enum
+      assert entry.options == Schema.Project.publishes()
+      assert entry.value in Schema.Project.publishes()
+    end
+
+    test "changing it rewrites the mode in place and leaves the rest of the file alone" do
+      queue = existing_dir!("publish-queue")
+      write_workflow_with_publish!(queue, "pull_request")
+      before = File.read!(effective_path())
+
+      assert {:ok, path, written} = Settings.update(["project", "publish"], "direct")
+
+      assert written == [["project", "publish"]]
+
+      text = File.read!(path)
+      assert text =~ "publish: direct"
+      refute text =~ "publish: pull_request"
+      # In place: the block is not duplicated, and everything around the one replaced line is
+      # untouched -- the comment above it, the other sections, the prompt body.
+      assert length(String.split(text, "project:")) == 2
+      assert text =~ "# pull_request pushes a branch and opens a pull request"
+      assert text =~ "issues_repo: owner/example"
+      assert text =~ "Prompt body."
+      assert replace_mode(text) == replace_mode(before)
+      assert effective!(path).project.publish == "direct"
+    end
+
+    test "a workflow with no project: block gains one, which is what the deployment's file needs" do
+      # The fixture in `setup/0` has no `project:` block, and neither does the workflow this machine
+      # runs: the schema's default applies there, so nothing has to be written into it.
+      refute File.read!(effective_path()) =~ "project:"
+
+      assert {:ok, path, _written} = Settings.update(["project", "publish"], "direct")
+
+      text = File.read!(path)
+      assert text =~ "project:\n  publish: direct"
+      # Added inside the front matter, not after the body.
+      assert [_, front, _] = String.split(text, "---", parts: 3)
+      assert front =~ "publish: direct"
+      assert effective!(path).project.publish == "direct"
+    end
+
+    test "refuses a value that is not one of the two, and does NOT touch the file" do
+      before = File.read!(effective_path())
+
+      assert {:error, {:not_one_of, "merge", ["pull_request", "direct"]}} =
+               Settings.update(["project", "publish"], "merge")
+
+      assert File.read!(effective_path()) == before
+      refute File.exists?(effective_path() <> ".bak")
+    end
+  end
+
+  # A workflow that already carries the mode, written the way the create form writes it -- the
+  # comment included. The choice is made once, in the file, and changed afterwards from here.
+  defp write_workflow_with_publish!(queue, mode) do
+    File.write!(effective_path(), """
+    ---
+    tracker:
+      kind: file
+      provider:
+        path: #{queue}
+      active_states:
+        - ready
+    project:
+      # pull_request pushes a branch and opens a pull request; direct commits and pushes the
+      # project's own main branch, with no pull request.
+      publish: #{mode}
+    janitor:
+      enabled: true
+      interval_ms: 30000
+      issues_repo: owner/example
+    agent:
+      max_concurrent_agents: 1
+      max_turns: 5
+    ---
+
+    Prompt body.
+    """)
+  end
+
+  defp replace_mode(text), do: String.replace(text, ~r/^(\s*)publish:.*$/m, "\\1publish: <mode>")
+
   # A workflow with no `janitor` block at all, which is what a deployment that has not named its
   # repositories looks like.
   defp write_workflow_without_repositories! do
