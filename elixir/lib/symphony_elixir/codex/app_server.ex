@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, Shell, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, GitHubAppToken, PathSafety, Shell, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -41,7 +41,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     dynamic_tool_binding = DynamicTool.bind()
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding, opts) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -189,33 +189,39 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, dynamic_tool_binding) do
-    # `Shell.find_bash/0` rather than `System.find_executable("bash")`: on Windows the latter finds
-    # WSL's bash, which cannot run a Windows launch command (it exits 127 on `codex`).
-    executable = Shell.find_bash()
+  defp start_port(workspace, nil, dynamic_tool_binding, opts) do
+    # The environment is built -- which mints an App installation token when the workflow configured
+    # one -- before anything is spawned. A run whose credential cannot be minted fails here, with that
+    # reason, rather than starting a child that would push with whatever the sandbox account happens
+    # to hold.
+    with {:ok, env} <- child_env(workspace, dynamic_tool_binding, opts) do
+      # `Shell.find_bash/0` rather than `System.find_executable("bash")`: on Windows the latter finds
+      # WSL's bash, which cannot run a Windows launch command (it exits 127 on `codex`).
+      executable = Shell.find_bash()
 
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
-            cd: String.to_charlist(workspace),
-            env: child_env(workspace, dynamic_tool_binding),
-            line: @port_line_bytes
-          ]
-        )
+      if is_nil(executable) do
+        {:error, :bash_not_found}
+      else
+        port =
+          Port.open(
+            {:spawn_executable, String.to_charlist(executable)},
+            [
+              :binary,
+              :exit_status,
+              :stderr_to_stdout,
+              args: [~c"-lc", String.to_charlist(local_launch_command(dynamic_tool_binding))],
+              cd: String.to_charlist(workspace),
+              env: env,
+              line: @port_line_bytes
+            ]
+          )
 
-      {:ok, port}
+        {:ok, port}
+      end
     end
   end
 
-  defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
+  defp start_port(workspace, worker_host, dynamic_tool_binding, _opts) when is_binary(worker_host) do
     remote_command = remote_launch_command(workspace, dynamic_tool_binding)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
@@ -244,7 +250,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @doc """
   The environment the locally launched Codex child starts with.
 
-  Three decisions in one place, because they are one decision:
+  Four decisions in one place, because they are one decision:
 
     * the tracker's declared secrets are **removed** (`{name, false}`), which is what keeps a tracker
       token out of the agent's reach;
@@ -258,22 +264,40 @@ defmodule SymphonyElixir.Codex.AppServer do
       process does not have is omitted rather than set empty, and an entry naming a declared tracker
       secret on either side is refused with a warning -- those intents contradict each other, and
       silently honouring one of them is how a token leaks;
+    * when the workflow configures `codex.app_token`, the run **mints a GitHub App installation token**
+      and hands it to the child as `GH_TOKEN`, and the git credential header below is built from that
+      same minted string. A `child_env` mapping onto `GH_TOKEN`/`GITHUB_TOKEN` is dropped rather than
+      passed alongside it -- one credential per child, and the App is the one the workflow asked for --
+      and no token is ever logged;
     * git is told to trust the workspace (`safe.directory=*`) when the agent may write git metadata,
       because the sandbox runs as a different OS account and git otherwise refuses every command with
-      `fatal: detected dubious ownership`. When a GitHub token is being passed through, git is also
-      given the `gh` credential helper, without which an HTTPS push has no credential at all: the
-      sandbox account has no credential store of its own.
+      `fatal: detected dubious ownership`. When a GitHub token is on its way to the child, git is also
+      given the `gh` credential helper's replacement, an `http.https://github.com/.extraheader`, without
+      which an HTTPS push has no credential at all: the sandbox account has no credential store of its
+      own.
+
+  Returns the environment, or the reason minting failed: minting is part of building the environment,
+  and a run whose App credential cannot be minted must fail with that reason instead of quietly falling
+  back to a long-lived credential -- which is the thing configuring the App exists to avoid.
 
   Local launches only. An SSH launch builds its environment on the remote host, and what those hosts
   should inherit is a separate decision from what this machine's child gets.
-  """
-  @spec child_env(Path.t() | nil, map()) :: [{charlist(), charlist() | false}]
-  def child_env(_workspace, dynamic_tool_binding) do
-    secrets = dynamic_tool_binding.secret_environment_names |> valid_environment_names()
-    passthrough = passthrough_env(secrets)
 
-    Enum.map(secrets, &{String.to_charlist(&1), false}) ++
-      passthrough ++ no_prompt_env(passthrough) ++ git_config_env(passthrough)
+  ## Options
+
+    * `:mint_token` -- the injection point for the mint, arity 1, taking the `codex.app_token` map and
+      returning `{:ok, %{token: String.t()}} | {:error, term()}`, defaulting to
+      `GitHubAppToken.installation_token/1`. Tests inject it so no key file and no network call is
+      needed; a workflow with no `app_token` never reaches it.
+  """
+  @spec child_env(Path.t() | nil, map(), keyword()) ::
+          {:ok, [{charlist(), charlist() | false}]} | {:error, term()}
+  def child_env(_workspace, dynamic_tool_binding, opts \\ []) do
+    secrets = dynamic_tool_binding.secret_environment_names |> valid_environment_names()
+
+    with {:ok, token} <- app_token_token(opts) do
+      {:ok, environment(secrets, passthrough_env(secrets), token)}
+    end
   end
 
   # The two names `gh` itself reads, and therefore the two that mean "a GitHub token is on its way to the
@@ -281,15 +305,46 @@ defmodule SymphonyElixir.Codex.AppServer do
   # before it, and `name in nil` fails at runtime rather than at compile time.
   @gh_token_names ~w(GH_TOKEN GITHUB_TOKEN)
 
+  # A minted token replaces -- rather than joins -- a `child_env` mapping onto either of `gh`'s names,
+  # and the mapping it replaces is named in a warning so the workflow's author can see which of their
+  # two credentials was honoured.
+  defp environment(secrets, passthrough, nil) do
+    credential = passthrough_github_token(passthrough)
+
+    Enum.map(secrets, &{String.to_charlist(&1), false}) ++
+      passthrough ++ no_prompt_env(credential) ++ git_config_env(credential)
+  end
+
+  defp environment(secrets, passthrough, token) when is_binary(token) do
+    Enum.map(secrets, &{String.to_charlist(&1), false}) ++
+      [{~c"GH_TOKEN", String.to_charlist(token)}] ++
+      drop_passthrough_github_token(passthrough) ++
+      no_prompt_env(token) ++ git_config_env(token)
+  end
+
+  defp passthrough_github_token(passthrough) do
+    Enum.find_value(passthrough, fn {name, value} ->
+      if to_string(name) in @gh_token_names, do: to_string(value)
+    end)
+  end
+
+  defp drop_passthrough_github_token(passthrough) do
+    Enum.reject(passthrough, fn {name, _value} ->
+      if to_string(name) in @gh_token_names do
+        Logger.warning("codex: app_token is configured, so the child_env mapping onto #{name} is not passed through")
+
+        true
+      else
+        false
+      end
+    end)
+  end
+
   # A broken token should fail, not hang: without this, git may sit waiting for a username it can never
   # be given, and the run burns its budget on a prompt nobody will answer.
-  defp no_prompt_env(passthrough) do
-    if Enum.any?(passthrough, fn {name, _value} -> to_string(name) in @gh_token_names end) do
-      [{~c"GIT_TERMINAL_PROMPT", ~c"0"}]
-    else
-      []
-    end
-  end
+  defp no_prompt_env(nil), do: []
+
+  defp no_prompt_env(_credential), do: [{~c"GIT_TERMINAL_PROMPT", ~c"0"}]
 
   defp passthrough_env(secrets) do
     Config.settings!().codex.child_env
@@ -307,9 +362,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         cond do
           child in secrets or source in secrets ->
-            Logger.warning(
-              "codex: child_env #{inspect(spec)} names a tracker secret; not passing it through"
-            )
+            Logger.warning("codex: child_env #{inspect(spec)} names a tracker secret; not passing it through")
 
             []
 
@@ -363,17 +416,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     ]
   end
 
-  defp git_config_env(passthrough) do
-    gh_token =
-      Enum.find_value(passthrough, fn {name, value} ->
-        if to_string(name) in @gh_token_names, do: to_string(value)
-      end)
-
+  # `credential` is the token itself -- never the *name* of an environment variable that carries it:
+  # `github_auth_entries/1` puts its argument into the header verbatim, so a name here would base64 a
+  # variable name into a credential nobody can use. It is either the token minted for this run from
+  # `codex.app_token`, or the value a `child_env` mapping passed through; `nil` means no GitHub
+  # credential at all, and the header is omitted.
+  defp git_config_env(credential) do
     trust? = Config.settings!().codex.git_metadata_writable
 
     entries =
-      (if trust? or gh_token, do: [{"safe.directory", "*"}], else: []) ++
-        (if gh_token, do: github_auth_entries(gh_token), else: [])
+      if(trust? or credential, do: [{"safe.directory", "*"}], else: []) ++
+        if credential, do: github_auth_entries(credential), else: []
 
     case entries do
       [] ->
@@ -392,6 +445,78 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         [{~c"GIT_CONFIG_COUNT", String.to_charlist(to_string(length(entries)))} | pairs]
     end
+  end
+
+  # -- app token -------------------------------------------------------------------------------
+
+  # Exactly the options `GitHubAppToken.installation_token/1` takes, in the order the setting's own
+  # schema lists them.
+  @app_token_option_keys [
+    {:app_id, "app_id"},
+    {:private_key_path, "private_key_path"},
+    {:installation_id, "installation_id"},
+    {:account, "account"}
+  ]
+
+  # The whole setting: absent (`nil`) means no minting at all, so nothing here can reach the network
+  # for a workflow that does not name an App.
+  defp app_token_token(opts) do
+    case Config.settings!().codex.app_token do
+      nil -> {:ok, nil}
+      app_token -> mint_token(app_token, opts)
+    end
+  end
+
+  defp mint_token(app_token, opts) do
+    case attempt_mint(app_token, opts) do
+      {:ok, token} -> {:ok, token}
+      {:error, reason} -> maybe_retry_mint(app_token, opts, reason)
+    end
+  end
+
+  defp attempt_mint(app_token, opts) do
+    case mint_fun(opts).(app_token) do
+      {:ok, %{token: token}} when is_binary(token) and token != "" -> {:ok, token}
+      # The minted string is never echoed back in an error: it is the credential.
+      {:ok, _other} -> {:error, :malformed_mint_result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # One immediate retry, and only for a transport failure: GitHub was never reached, so the key and the
+  # App are not what failed, and the alternative is throwing a whole run away over one dropped
+  # connection. Every other failure is a decision -- an unreadable key, a missing installation, a
+  # rejected JWT -- and repeating it only doubles the wait before the same reason is reported.
+  # `GitHubAppToken` sets `retry: false` for the same reason.
+  defp maybe_retry_mint(app_token, opts, {:api_unreachable, _reason}) do
+    case attempt_mint(app_token, opts) do
+      {:ok, token} -> {:ok, token}
+      {:error, reason} -> {:error, {:app_token_mint_failed, reason}}
+    end
+  end
+
+  defp maybe_retry_mint(_app_token, _opts, reason), do: {:error, {:app_token_mint_failed, reason}}
+
+  defp mint_fun(opts), do: Keyword.get(opts, :mint_token) || (&default_mint_token/1)
+
+  # The real implementation is the existing module, unchanged: the setting names the same options
+  # `GitHubAppToken.installation_token/1` documents, so this only copies them across -- by name, so the
+  # settings map never doubles as a keyword list by accident.
+  defp default_mint_token(app_token) do
+    app_token
+    |> app_token_options()
+    |> GitHubAppToken.installation_token()
+  end
+
+  # The schema hands this map over with string keys; atom keys are accepted too, so a hand-built map (a
+  # test, a future caller) reads the same.
+  defp app_token_options(app_token) do
+    Enum.flat_map(@app_token_option_keys, fn {key, name} ->
+      case Map.get(app_token, name) || Map.get(app_token, key) do
+        nil -> []
+        value -> [{key, value}]
+      end
+    end)
   end
 
   defp tracker_secret_unset_command(dynamic_tool_binding) do

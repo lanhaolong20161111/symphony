@@ -261,6 +261,13 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    # Exactly the keys `GitHubAppToken.installation_token/1` takes, so the setting and the mint agree
+    # on what an App is described by. `account` is here because that module takes it: an App installed
+    # on several accounts needs it -- or `installation_id` -- to say which installation this project
+    # means.
+    @app_token_keys ["app_id", "private_key_path", "installation_id", "account"]
+    @app_token_required_keys ["app_id", "private_key_path"]
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
@@ -298,6 +305,19 @@ defmodule SymphonyElixir.Config.Schema do
       # has to be written into a project file. Empty by default, and a name that is also a declared
       # tracker secret is refused rather than honoured -- the two intents contradict each other.
       field(:child_env, {:array, :string}, default: [])
+
+      # A GitHub App to mint the agent's push credential from, instead of a long-lived personal
+      # access token handed over through `child_env` above. `app_id` and `private_key_path` are the
+      # App's identity; the key is read from its file at every mint and never enters this process's
+      # environment, and `installation_id` (or `account`) says which installation this project means
+      # when the App is installed more than once.
+      #
+      # Absent -- `nil` -- by default, because it is a different *kind* of credential: a deployment
+      # that is happy with the token it already passes through `child_env` must keep working
+      # unchanged, and minting reaches the network, so nothing may do it until a workflow asks for
+      # an App by name. See `Codex.AppServer.child_env/3` for where the token is minted and handed to
+      # the child.
+      field(:app_token, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -315,6 +335,7 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :git_metadata_writable,
           :child_env,
+          :app_token,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
@@ -332,7 +353,65 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_change(:app_token, fn :app_token, app_token -> app_token_errors(app_token) end)
     end
+
+    # Refused as a whole -- unknown key, missing half, wrong type -- rather than accepted and left to
+    # fail at push time: this block describes a credential, and a `appid:` typo would otherwise mint
+    # nothing and surface hours later as a git error that never mentions the setting.
+    #
+    # `validate_change/3` fires only for a value a file actually wrote, so an omitted `app_token` is
+    # never looked at, and every workflow that does not name an App passes through exactly as before.
+    defp app_token_errors(app_token) when is_map(app_token) do
+      unknown_app_token_key_errors(app_token) ++
+        Enum.flat_map(@app_token_keys, &app_token_key_errors(app_token, &1))
+    end
+
+    defp app_token_errors(app_token) do
+      [app_token_error("must be a mapping, got " <> inspect(app_token))]
+    end
+
+    defp unknown_app_token_key_errors(app_token) do
+      app_token
+      |> Map.keys()
+      |> Enum.reject(&(to_string(&1) in @app_token_keys))
+      |> Enum.map(&app_token_error("unknown key " <> inspect(&1)))
+    end
+
+    defp app_token_key_errors(app_token, key) do
+      value = Map.get(app_token, key)
+
+      cond do
+        is_nil(value) and key not in @app_token_required_keys -> []
+        key in ["app_id", "installation_id"] and positive_id?(value) -> []
+        key in ["private_key_path", "account"] and non_blank_string?(value) -> []
+        true -> [app_token_error(app_token_key_message(key))]
+      end
+    end
+
+    defp app_token_key_message("app_id"), do: "app_id must be a positive integer"
+    defp app_token_key_message("installation_id"), do: "installation_id must be a positive integer"
+    defp app_token_key_message("account"), do: "account must be a non-empty login"
+
+    defp app_token_key_message("private_key_path") do
+      "private_key_path must be a non-empty path to the App's PEM file"
+    end
+
+    defp app_token_error(message), do: {:app_token, message}
+
+    defp positive_id?(value) when is_integer(value), do: value > 0
+
+    defp positive_id?(value) when is_binary(value) do
+      case Integer.parse(String.trim(value)) do
+        {id, ""} -> id > 0
+        _other -> false
+      end
+    end
+
+    defp positive_id?(_value), do: false
+
+    defp non_blank_string?(value) when is_binary(value), do: String.trim(value) != ""
+    defp non_blank_string?(_value), do: false
   end
 
   defmodule Acp do
@@ -730,7 +809,8 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
+        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy),
+        app_token: normalize_optional_map(settings.codex.app_token)
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}

@@ -13,12 +13,19 @@ defmodule SymphonyElixir.CodexChildEnvTest do
     {:ok, binding: %{secret_environment_names: ["LINEAR_API_KEY"], tool_specs: []}}
   end
 
+  # `child_env/3` returns `{:ok, env}` because building the environment is also where a workflow's
+  # `codex.app_token` is minted, and that can fail; these cases all take the no-App path.
+  defp child_env(binding, opts \\ []) do
+    assert {:ok, env} = AppServer.child_env("/tmp/ws", binding, opts)
+    env
+  end
+
   test "a named variable is passed through with the value this process has", %{binding: binding} do
     restore_env("SYMPHONY_CHILD_ENV_PROBE", "from-the-parent")
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["SYMPHONY_CHILD_ENV_PROBE"])
 
-    assert {~c"SYMPHONY_CHILD_ENV_PROBE", ~c"from-the-parent"} in AppServer.child_env("/tmp/ws", binding)
+    assert {~c"SYMPHONY_CHILD_ENV_PROBE", ~c"from-the-parent"} in child_env(binding)
   end
 
   test "a variable this process does not have is omitted, not set empty", %{binding: binding} do
@@ -26,7 +33,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["SYMPHONY_CHILD_ENV_ABSENT"])
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     refute Enum.any?(env, &match?({~c"SYMPHONY_CHILD_ENV_ABSENT", _value}, &1))
   end
@@ -35,7 +42,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
     restore_env("LINEAR_API_KEY", "tracker-token")
     write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["LINEAR_API_KEY"])
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert {~c"LINEAR_API_KEY", false} in env
     refute Enum.any?(env, fn {name, value} -> name == ~c"LINEAR_API_KEY" and value != false end)
@@ -46,12 +53,12 @@ defmodule SymphonyElixir.CodexChildEnvTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_git_metadata_writable: false)
 
     refute Enum.any?(
-             AppServer.child_env("/tmp/ws", binding),
+             child_env(binding),
              &match?({~c"GIT_CONFIG_KEY_0", _value}, &1)
            )
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_git_metadata_writable: true)
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert {~c"GIT_CONFIG_COUNT", ~c"1"} in env
     assert {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"} in env
@@ -67,7 +74,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["GH_TOKEN=SYMPHONY_AGENT_TOKEN"])
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert {~c"GH_TOKEN", ~c"scoped-token"} in env
   end
@@ -80,7 +87,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
       codex_child_env: ["GH_TOKEN=SYMPHONY_AGENT_TOKEN"]
     )
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert {~c"GIT_CONFIG_COUNT", ~c"3"} in env
     assert {~c"GIT_CONFIG_KEY_0", ~c"safe.directory"} in env
@@ -98,6 +105,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
 
     # Basic auth for the token itself, built without mangling it.
     assert header =~ "Authorization: Basic "
+
     assert Base.decode64!(String.replace_prefix(header, "Authorization: Basic ", "")) ==
              "x-access-token:scoped-token"
 
@@ -112,7 +120,7 @@ defmodule SymphonyElixir.CodexChildEnvTest do
       codex_child_env: ["GH_TOKEN=LINEAR_API_KEY"]
     )
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert {~c"LINEAR_API_KEY", false} in env
     refute Enum.any?(env, fn {name, _} -> name == ~c"GH_TOKEN" end)
@@ -121,14 +129,14 @@ defmodule SymphonyElixir.CodexChildEnvTest do
   test "an entry with a malformed name is ignored", %{binding: binding} do
     write_workflow_file!(Workflow.workflow_file_path(), codex_child_env: ["not a name", "=ALSO_BAD"])
 
-    assert AppServer.child_env("/tmp/ws", binding) == [{~c"LINEAR_API_KEY", false}]
+    assert child_env(binding) == [{~c"LINEAR_API_KEY", false}]
   end
 
   test "nothing is passed through by default", %{binding: binding} do
     restore_env("SYMPHONY_CHILD_ENV_PROBE", "from-the-parent")
     write_workflow_file!(Workflow.workflow_file_path(), [])
 
-    env = AppServer.child_env("/tmp/ws", binding)
+    env = child_env(binding)
 
     assert env == [{~c"LINEAR_API_KEY", false}]
   end
