@@ -28,11 +28,17 @@ Already true, and worth not redoing:
   lists `*.md` in the directory root. The console that began as one project with no management is now
   a multi-project control plane: §7-§12.
 - The agent can run its project's **declared gate** and read the answer (§14, `cf4a7da`) -- the check
-  the sandbox cannot make for itself on this host. The tool is advertised only to a project that
-  declares `gate.command`; two registry workflows declare one now, and the declaration was exercised
-  in production for the first time in the `svcprobe` run (§13.1, §14) -- where the running agent read
-  the gate out of the workflow and ran it itself, because a project tracked by the ticket service is
-  advertised no tools at all.
+  the sandbox cannot make for itself on this host. The tool is advertised to a project that declares
+  `gate.command`, for **every tracker kind**, since `df2941a` and `6ba1b04`: it had been composed by
+  the file tracker's adapter alone, so a service-tracked project -- whose adapter advertises no tracker
+  tools -- was advertised **nothing**, which the `svcprobe` run measured before the fix (§13.1, §14).
+  Two registry workflows declare a gate, and both declarations are still uncommitted.
+- The console's ticket pages read **whichever tracker a project configures** (§12, `d376ae8`): one seam,
+  `elixir/lib/symphony_elixir_web/ticket_reader.ex` (584 lines), asks the tracker for a ticket's deep
+  read; the file tracker keeps byte-for-byte its old behaviour and the service answers in one call.
+- The offline, diffable property the retired mirror used to provide has a replacement: a **markdown
+  export** of the ticket store (§13, `3e0ad76` in `symphony-tickets`), one `<identifier>.md` per ticket
+  in the vocabulary the file tracker's own parser reads.
 - The last step of the loop is on the ticket's own page (§15, `97329cb`): the pull request the ticket
   records is judged with `Land`'s own core, merged only on a verdict to land, and the outcome is
   written onto the ticket.
@@ -659,13 +665,31 @@ another project's queue lands in that project's files; and nothing is written wi
 than a crashed LiveView; the page's two test files report 20 tests at that commit. Round 25 added the
 third write -- landing the ticket's own pull request -- in §15.
 
+**And the read stopped belonging to one tracker's file format (round 27).** `d376ae8` put a ticket's
+deep read behind one seam, `elixir/lib/symphony_elixir_web/ticket_reader.ex` (584 lines), which the
+presenter resolves through (`ticket_presenter.ex:14`, `:71`, `:93`): the page asks the configured
+tracker for one ticket, and the kind decides how. The workflow's `tracker.kind` string is what the seam
+maps (`"file"` -> the file reader, `"ticket_service"` -> the service's own call, `ticket_reader.ex:154-155`).
+The file tracker's answer is what it always was -- the same parse the dispatcher uses, one directory scan
+per read indexed by front-matter id and file stem, so a board of N tickets is not N listings -- and the
+service's is one HTTP call, `GET {url}/tickets/:ref`, whose single answer carries the description, the
+comments, the labels and the blockers. A kind that cannot answer (`linear`, `github`, `jira`, `asana`,
+`gitlab`, `memory`) returns `{:error, {:ticket_kind_not_readable, kind}}` (`ticket_reader.ex:157-158`)
+and the page renders that **sentence**, because a tracker that cannot answer must say so: an empty board
+reads as "no work to do" and an empty description as "this ticket has no description", and both invite
+someone to redo work that is already done. This is a read-only seam -- no write path, no tool, no
+agent-facing surface; the page's writes and the land action are untouched. Measured 2026-10-01:
+`ticket_reader_test.exs` (474 lines) is **24 passed** and `control_ticket_service_test.exs` (424 lines)
+is **10 passed**.
+
 ## 13. The ticket service: the store, the surface, and the contract
 
 The tracker work of §4 is finished, and its successor is being built rather than argued about: a
 service that owns tickets, in a **new sibling repository**
 `~/Desktop/android_cli_demos/symphony-tickets` (its own git repository, its own SQLite through
 `exqlite`; no Ecto at all, and Phoenix only for the HTTP surface -- `mix.exs:56-59` lists `exqlite`,
-`phoenix`, `bandit` and `jason`). Three slices are committed in that repository, and the fork's own
+`phoenix`, `bandit` and `jason`). Four slices are committed in that repository -- the store, the surface,
+the list-row relations and now the export -- and the fork's own
 side of the contract -- the adapter -- is committed here as of `fb31a7f` (§13.1):
 
 - **The store** (`7c31f50`, 42 tests): tickets with both a machine state type and a display name,
@@ -699,6 +723,35 @@ stored, because the consumer already matches them case-insensitively and folding
 would make a row disagree with the ticket it names. `dispatchable` is still the stored column: the
 gating decision belongs to the scheduler, not to the store. `mix precommit`: 90 tests.
 
+**And the tickets come back out as markdown (`3e0ad76`, the fourth slice).**
+`mix symphony_tickets.export --out DIR [--db PATH]` writes one `<identifier>.md` per ticket, in the
+**vocabulary the file tracker's own parser reads** -- which is what replaces the offline, diffable
+property the retired mirror used to provide, and what makes a future import an honest thing to attempt
+(`lib/mix/tasks/symphony_tickets.export.ex`, 93 lines; `lib/symphony_tickets/export.ex`, 569 lines).
+The task is a thin shell: it parses two options, prints what happened, and **exits non-zero when any
+ticket failed**, after the tickets that could be written have been; it deliberately does not start the
+application, because the store opens the database per operation and starting the listener would bind
+the service's port for a one-shot job (`export.ex` moduledoc, `symphony_tickets.export.ex:18-22`). The
+design is deliberately boring, and each property is a test: the bytes are a pure function of one
+ticket's data -- fixed key order, no export timestamp, stable ordering -- so a second export renders
+the same bytes twice over; an unchanged ticket's file is **not touched**, so a repository holding an
+export shows empty diffs, and a file that differs only by CRLF counts as unchanged because a Windows
+checkout with `core.autocrlf` would otherwise rewrite every file the export wrote; writes go through a
+temp file and a rename, so a reader never sees half a ticket; the export **never deletes** a file, and a
+file whose front matter does not carry the generated marker is reported and left exactly as it was
+(`@marker`, `export.ex:98-106`; the check looks inside the front matter, so a ticket whose *description*
+quotes the marker line is not mistaken for an export); and a value that is not valid UTF-8 fails **that
+one ticket** loudly rather than writing replacement characters -- no file for it, every other ticket
+still exported (`export.ex:71-79`, `:489`). The format claim was checked rather than asserted: the
+round's own record says the output was read back with the fork's own parser -- `SymphonyElixir.Tracker.File.tickets/1`,
+the parse the dispatcher uses (`tracker/file.ex:205`), plus `Janitor.Ticket.problems/1`
+(`janitor/ticket.ex:283`) -- loaded read-only from the fork's `_build`, and every field round-tripped,
+including escaped quotes, a backslash, an embedded newline, CJK, an emoji and a blocker reference. That
+check is recorded by the commit and was **not re-run here**; what was measured here is the test file
+and the suite. Measured 2026-10-01 at `3e0ad76`: `test/symphony_tickets/export_test.exs` (658 lines) is
+**20 passed** (3.5s) and the service's whole suite is **110 passed** (6.9s) -- the 90 recorded at
+`87b2efe` plus those 20.
+
 **It is running, by hand, and nothing here survives a reboot.** Measured 2026-10-01: the listener on
 `127.0.0.1:4020` is PID 19384, started 2026-09-30 23:59:37, running `mix phx.server`; `GET /health`
 answers `{"ok":true}`. The empty-request rule above was then watched live rather than only in its test:
@@ -715,12 +768,14 @@ after round 25** (`cd04499`, then `5bec515`), and this document still does not d
 automatic landing sweep is an open decision that needs a policy first: which tickets may merge
 unattended (§18).
 
-**Slice 3 of the replacement is no longer paused: the adapter is committed and proved live (§13.1).**
-What remains is the rest of the plan, and the specification fixes the order: slice 4 (the console
-reading through the service) has to move before slice 6 (retiring the file tracker, the mirror and the
-janitor's second parser), because the console's pages read whichever tracker the project's workflow
-declares and every registry workflow still declares the file tracker. Slice 5 (a markdown export) is
-not written either (`docs/ticket-service-spec.md:158-165`).
+**Slices 3, 4 and 5 of the replacement are delivered; slice 6 is the one left.** The adapter
+(`fb31a7f`) is committed and proved live (§13.1), the console reads whichever tracker a project
+configures (`d376ae8`, §12), and the markdown export exists (`3e0ad76`, above). Slice 6 -- retiring the
+file tracker, the GitHub mirror, the ticket queue and the janitor's second parser of the ticket format
+-- is **not** done: the specification's own order keeps it waiting, because the console's pages had to
+read the service before the files they read could go away, and every registry workflow still declares
+the file tracker (`docs/ticket-service-spec.md:158-165`). It is also semi-irreversible, so it waits on
+the operator's sequencing decision rather than on more code (§18 item 5).
 
 The design is `docs/ticket-service-spec.md` -- the contract, the minimal surface, the interface, six
 slices, and the operator's five decisions, which supersede the document's own recommendations: a
@@ -825,21 +880,26 @@ narrower than "the tool was used".** The workflow declares `gate.command:
 grep -q svc-probe-1 README.md` (`svcprobe.md:150-155`); the agent found it by reading the workflow, and
 ran the command **itself**, in its sandbox, with Git's own grep -- which is what the ticket says. The
 `symphony_gate` tool was **not** advertised to it: this project's tracker is the service adapter, whose
-tool list is empty by design, and the gate tool is composed only by the file adapter
-(`tracker/file.ex:171`). Measured: `symphony_gate` appears nowhere in the run's Codex rollout
-(`~/.codex/sessions/2026/10/01/rollout-2026-10-01T01-35-03-01a0f362-...jsonl`, whose only call items
-are `exec_command` and `write_stdin`), nor anywhere in the 88 rollouts under `~/.codex/sessions`. So
-the capability is built and tested (§14) and the declaration is real, but on a service-backed project
-the agent gets **no tools at all** -- not the gate, not `ticket_comment`, not `symphony_publish` --
-and it finished the run by writing to the service over HTTP itself. That is an open gap, not a feature
-(§18).
+tool list is empty by design, and the gate tool was then composed only by the file adapter
+(`tracker/file.ex:171` at `11af6ed`). Measured: `symphony_gate` appears nowhere in the run's Codex
+rollout (`~/.codex/sessions/2026/10/01/rollout-2026-10-01T01-35-03-01a0f362-...jsonl`, whose only call
+items are `exec_command` and `write_stdin`), nor anywhere in the 88 rollouts under `~/.codex/sessions`.
+So the capability was built, tested and declared, and a service-backed project's agent still got **no
+tools at all** -- not the gate, not `ticket_comment`, not `symphony_publish` -- and it finished the run
+by writing to the service over HTTP itself. **That gap is closed in round 27** (§14, `df2941a`): running
+a gate is a property of the project, so the host's own tools are advertised beside whatever the adapter
+offers, for every kind. The *tracker* tools are the part that stays as it was -- the service adapter
+still advertises none by design, so a service-backed run is offered the gate and not `ticket_comment`
+or `symphony_publish` (§18 item 10).
 
 ## 14. The gate, run host-side, where `mix` works
 
 `cf4a7da` gave the agent the one capability the sandbox takes away: it can run its project's gate and
 read the answer. `SymphonyElixir.Janitor.GateTool` is
-`elixir/lib/symphony_elixir/janitor/gate_tool.ex` (393 lines), with
-`elixir/test/symphony_elixir/janitor/gate_tool_test.exs` (417 lines, 18 tests).
+`elixir/lib/symphony_elixir/janitor/gate_tool.ex` (398 lines at `6ba1b04`, the round-27 end; 393 when
+`cf4a7da` added it), with
+`elixir/test/symphony_elixir/janitor/gate_tool_test.exs` (545 lines, **21 tests**; 417 lines and 18
+tests when it landed -- `df2941a` and `6ba1b04` added the rest).
 
 **The problem it solves is measured, not suspected** (§3, §5 round 19): a turn runs in a restricted
 local account, and on this machine `mix` dies there before compiling -- `Mix.Sync.PubSub` calls
@@ -853,43 +913,54 @@ that same surface pointed at the gate.
 only command (`config/schema.ex:583-600`), and an argument that tries to carry one is refused **by
 name** rather than ignored -- silently dropping `command` would leave the caller believing it had
 chosen what ran. The only argument the schema accepts is a ticket
-(`@allowed_arguments [@ticket_argument]`, `gate_tool.ex:29`); anything else comes back with
-`"...takes no command..."` and `supportedArguments` beside it (`:274-288`), and a ticket value that is
-not a plain identifier is refused rather than sanitised (`:295-306`) -- `SYM-26\n` is exactly what an
+(`@allowed_arguments [@ticket_argument]`, `gate_tool.ex:34`); anything else comes back with
+`"...takes no command..."` and `supportedArguments` beside it (`:279-293`), and a ticket value that is
+not a plain identifier is refused rather than sanitised (`:300-311`) -- `SYM-26\n` is exactly what an
 unanchored `$` lets through, and that value then gets joined into a path. That is the whole security
 rule of the module: a tool that runs what it is handed is a remote shell for anything that can write an
 agent prompt, and the host side of this one is not sandboxed at all.
 
-**A project that declares no gate does not get the tool.** `tool_specs/0` answers `[]` (`:60-68`), so
+**A project that declares no gate does not get the tool.** `tool_specs/0` answers `[]` (`:65-73`), so
 it is not advertised at all -- rather than advertised and failing on every call -- and a call that
 arrives anyway (a stale binding, the HTTP tool endpoint) is told `this project declares no gate: add
-gate.command to WORKFLOW.md. Nothing was run.` (`:183-185`). `gate.command` is deliberately not
+gate.command to WORKFLOW.md. Nothing was run.` (`:188-190`). `gate.command` is deliberately not
 required and not validated for blankness: "this project declares no gate" has to stay a state a
 workflow can be in, rather than a workflow that refuses to load over a setting nothing needs
 (`config/schema.ex:579-582`).
 
 **Everything about the answer is bounded.** The deadline is the project's `gate.timeout_ms`, default
-900,000 ms (`gate_tool.ex:30`, `config/schema.ex:591`); the answer is the last 40 lines
-(`@tail_lines`, `:35`), then a hard 8,192-byte cap (`@max_output_bytes`, `:36`) applied through
-`Workspace.sanitize_hook_output_for_log/2` (`:330-335`), which already trims back to a **character**
+900,000 ms (`gate_tool.ex:35`, `config/schema.ex:591`); the answer is the last 40 lines
+(`@tail_lines`, `:40`), then a hard 8,192-byte cap (`@max_output_bytes`, `:41`) applied through
+`Workspace.sanitize_hook_output_for_log/2` (`:335-340`), which already trims back to a **character**
 boundary -- the same class of byte-cutting had corrupted a ticket file earlier in the same batch (§5,
 round 23), so the bound must not leave a tail that is no longer text. The command runs through
-`Shell.run/3`, never `System.cmd/3` (`:115-131`), because that is the runner that owns a **total**
+`Shell.run/3`, never `System.cmd/3` (`:120-136`), because that is the runner that owns a **total**
 deadline (a command that keeps printing cannot reset it) and kills the **process tree** on expiry, so a
 `mix test` that outlives its deadline takes its children with it instead of leaving a survivor holding
 the stdout pipe. A refusal, a non-zero exit, a timeout and a command that cannot start all come back as
-values in the envelope the other tools use (`%{"success", "output", "contentItems"}`, `:342-354`);
+values in the envelope the other tools use (`%{"success", "output", "contentItems"}`, `:347-359`);
 none of them raises, because a raise inside an agent tool becomes a protocol-level error for the whole
-session (`:102-106`).
+session (`:107-111`).
 
-**Where it runs, and how it got there.** The file tracker advertises the janitor's tools and then the
-gate's -- `AgentTool.tool_specs() ++ GateTool.tool_specs()` (`tracker/file.ex:171`) -- and routes a
-call by `GateTool.handles?/1` (`:177-181`), so a project that declares no gate still has exactly the
-three janitor tools it had. The directory is the session's own: the Codex path threads `workspace` from
-the session into the tool executor (`codex/app_server.ex:94`), so the gate runs in the tree that turn
-is editing; where there is no session (the MCP stdio server, the HTTP endpoint) the workspace is
-derived from the ticket the call names, through `Workspace.workspace_key/1`
-(`gate_tool.ex:210-243`) -- either way a path the host resolved, never one an argument named.
+**Where it runs, and how it got there.** The host's tools are now composed at the **tracker boundary**,
+not in an adapter (`df2941a`, `6ba1b04`). `SymphonyElixir.Tracker` holds `@host_tool_modules [GateTool]`
+(`tracker.ex:54`) and `compose_agent_tool_specs/1` answers the adapter's own tools followed by the
+host's (`:96`), so a host tool is advertised **beside** whatever the adapter offers, for **every** kind;
+every transport advertises through the one door, `bind_agent_tools/0` -- the Codex app-server as
+`dynamicTools`, the ACP path's stdio MCP server on `tools/list`, and the HTTP tool endpoint -- so an
+adapter can neither add nor remove it. Dispatch is routed by the same rule the advertisement uses: a
+tool whose module says `handles?/1` goes to that module, everything else to the adapter
+(`:117`, `:181-182`), and this happens **before** the adapter is consulted, so no adapter's
+`execute_agent_tool/3` contract changes. The file adapter keeps its three janitor tools and no longer
+composes the gate -- `agent_tool_specs/0` is `AgentTool.tool_specs()` alone (`tracker/file.ex:173`) and
+`execute_agent_tool/3` is `AgentTool.execute/3` alone (`:182`) -- so the gate cannot appear twice for a
+file-tracked project that declares one. `GateTool.tool_specs/0` still answers `[]` for a project that
+declares no gate, so such a project is advertised exactly what its adapter offers and nothing extra.
+The directory is the session's own: the Codex path threads `workspace` from the session into the tool
+executor (`codex/app_server.ex:94`), so the gate runs in the tree that turn is editing; where there is
+no session (the MCP stdio server, the HTTP endpoint) the workspace is derived from the ticket the call
+names, through `Workspace.workspace_key/1` (`gate_tool.ex:215-248`) -- either way a path the host
+resolved, never one an argument named.
 
 **Measured state, corrected in round 26: declared and exercised, still advertised to nobody.** Two
 registry workflows declare a gate now -- `symphony.md`, whose command is
