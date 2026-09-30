@@ -245,6 +245,68 @@ defmodule SymphonyElixir.ProjectsCreateTest do
     end
   end
 
+  # Creating a repository is a side effect on GitHub, so the command runner is injected -- the same
+  # shape `InstanceRegistry` injects its launcher. These tests assert the argv and the answer: no
+  # network, no `gh` on PATH, and no repository at the other end.
+  describe "create_repo/2" do
+    defp runner_answering(result) do
+      test_pid = self()
+
+      fn args ->
+        send(test_pid, {:argv, args})
+        result
+      end
+    end
+
+    test "asks gh for exactly this argv, private by default" do
+      runner = runner_answering({:ok, "", 0})
+      assert Projects.create_repo("me/my-tickets", runner: runner) == :created
+
+      assert_received {:argv, ["repo", "create", "me/my-tickets", "--private", "--add-readme"]}
+    end
+
+    test "the caller's privacy choice is the one that reaches the command line" do
+      runner = runner_answering({:ok, "", 0})
+      assert Projects.create_repo("me/my-tickets", runner: runner, public: true) == :created
+
+      assert_received {:argv, ["repo", "create", "me/my-tickets", "--public", "--add-readme"]}
+    end
+
+    test "a repository that is already there is not a failure -- it is adoptable" do
+      # The API's own 422 and the older GraphQL wording; both mean "do not touch it".
+      existing = [
+        "HTTP 422: Repository creation failed. (name already exists on this account)",
+        "GraphQL: Name already exists on this account (createRepository)"
+      ]
+
+      for output <- existing do
+        assert Projects.create_repo("me/my-tickets", runner: runner_answering({:ok, output, 1})) ==
+                 :already_exists
+      end
+    end
+
+    test "a real failure carries its reason, and is never read as already-existing" do
+      runner = runner_answering({:ok, "HTTP 404: Not Found (me)", 1})
+
+      assert Projects.create_repo("me/my-tickets", runner: runner) ==
+               {:error, {:gh_exit, 1, "HTTP 404: Not Found (me)"}}
+
+      # A runner that could not run gh at all says that, rather than "created".
+      assert Projects.create_repo("me/my-tickets", runner: runner_answering({:error, {:not_found, "gh"}})) ==
+               {:error, {:not_found, "gh"}}
+    end
+
+    test "a name that is not owner/name is refused before gh is asked anything" do
+      runner = runner_answering({:ok, "", 0})
+
+      for bad <- ["not-a-repo", "me/", "/tickets", "", "me/ti ckets", "a/b/c", nil] do
+        assert Projects.create_repo(bad, runner: runner) == {:error, {:invalid_repo, bad}}
+      end
+
+      refute_received {:argv, _args}
+    end
+  end
+
   # Validation is the part that keeps a project from being created and then not running. The GitHub
   # question is injected, so "the repository does not exist" is testable without a network.
   describe "validate/3" do

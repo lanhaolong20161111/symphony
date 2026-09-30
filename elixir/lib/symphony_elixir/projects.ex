@@ -943,24 +943,71 @@ defmodule SymphonyElixir.Projects do
   def repo_exists?(_repo), do: false
 
   @doc """
-  Creates `owner/name` on GitHub, with one README commit.
+  Makes `owner/name` exist on GitHub, with one README commit.
+
+  Three answers, and a caller can act on each:
+
+    * `:created` -- `gh repo create` created it;
+    * `:already_exists` -- GitHub already had it and **nothing was changed**. This is deliberately not
+      a failure: the caller adopts the repository as it is, which is what a second project pointing at
+      a ticket repository that is already there needs;
+    * `{:error, reason}` -- anything else, carrying `gh`'s exit status and its own output, or the
+      runner's reason when `gh` could not be run at all.
 
   `--add-readme` is not decoration: the janitor mirrors the ticket repository with
   `pull --rebase --autostash` and `push`, and an entirely empty repository has no branch to pull.
   Private by default -- a task queue is not public reading.
+
+  ## The runner is injected
+
+  `:runner` is what actually runs `gh`, and it is replaceable the same way `InstanceRegistry`'s
+  `:launcher` is -- one option in `opts`, defaulting to the real implementation. It is handed the
+  **argv list** (no executable, no options) and answers what `Shell.run/3` answers:
+  `{:ok, output, status} | {:error, reason}`. So a test asserts the exact argv with no network and no
+  `gh` on `PATH`.
+
+  A name that is not `owner/name` is refused here, by the one `valid_repo?/1` the form's validation
+  also uses, so a caller that knows only the repository name cannot ask `gh` for something else --
+  and `gh` is not run at all.
   """
-  @spec create_repo(String.t(), keyword()) :: :ok | {:error, term()}
+  @spec create_repo(String.t() | nil, keyword()) :: :created | :already_exists | {:error, term()}
   def create_repo(repo, opts \\ []) do
-    visibility = if Keyword.get(opts, :public, false), do: "--public", else: "--private"
-
-    args = ["repo", "create", repo, visibility, "--add-readme"]
-
-    case Shell.run("gh", args, timeout: 120_000) do
-      {:ok, _output, 0} -> :ok
-      {:ok, output, status} -> {:error, {:gh_exit, status, output}}
-      {:error, reason} -> {:error, reason}
+    if valid_repo?(repo) do
+      args = create_repo_args(repo, opts)
+      runner(opts).(args) |> create_repo_result()
+    else
+      {:error, {:invalid_repo, repo}}
     end
   end
+
+  # The exact command, in one place: `gh repo create <owner/name> --private|--public --add-readme`.
+  defp create_repo_args(repo, opts) do
+    visibility = if Keyword.get(opts, :public, false), do: "--public", else: "--private"
+
+    ["repo", "create", repo, visibility, "--add-readme"]
+  end
+
+  defp create_repo_result({:ok, _output, 0}), do: :created
+
+  defp create_repo_result({:ok, output, status}) do
+    if exists_message?(output), do: :already_exists, else: {:error, {:gh_exit, status, output}}
+  end
+
+  defp create_repo_result({:error, reason}), do: {:error, reason}
+
+  # What separates "adopt it" from "it failed". GitHub answers a create for a name it already has with
+  # `HTTP 422: Repository creation failed. (name already exists on this account)`, and an older
+  # GraphQL path says `Name already exists on this account (createRepository)`. Both carry these two
+  # words, and no other refusal this argv can produce does -- checked against the strings `gh` itself
+  # carries, where the only repository-conflict text is `already exists`.
+  defp exists_message?(output) when is_binary(output),
+    do: String.contains?(String.downcase(output), "already exists")
+
+  defp exists_message?(_output), do: false
+
+  defp runner(opts), do: Keyword.get(opts, :runner) || (&gh_create/1)
+
+  defp gh_create(args), do: Shell.run("gh", args, timeout: 120_000)
 
   @doc """
   Makes sure `path` is a clone of `repo`.
@@ -1119,8 +1166,19 @@ defmodule SymphonyElixir.Projects do
     end
   end
 
-  defp maybe_create(repo, create?) when create? in [true, "true"], do: create_repo(repo, public: false)
+  defp maybe_create(repo, create?) when create? in [true, "true"] do
+    repo |> create_repo(public: false) |> created_or_existing()
+  end
+
   defp maybe_create(_repo, _create?), do: :ok
+
+  # `:already_exists` is success on this path, not a failure: the form ticked "create it" and the
+  # repository is there when the command runs -- validation refuses that combination outright, so this
+  # is one that appeared in between -- and the project is pointed at that repository as it is. Nothing
+  # is changed and nothing is refused.
+  defp created_or_existing(:created), do: :ok
+  defp created_or_existing(:already_exists), do: :ok
+  defp created_or_existing({:error, reason}), do: {:error, reason}
 
   defp commit_note(path) do
     name = Path.basename(path)
