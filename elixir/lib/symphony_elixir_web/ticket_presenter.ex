@@ -193,6 +193,13 @@ defmodule SymphonyElixirWeb.TicketPresenter do
     "the workflow file of project #{name} declares no ticket directory a write could go to (no_writable_queue)"
   end
 
+  # Not a refusal the host returned but a raise from inside it -- a file another writer holds open, a
+  # workflow file that vanished between the read and the submit. Named apart from the refusals so a
+  # reader can tell "the host said no" from "the host could not answer".
+  def describe({:write_raised, message}) when is_binary(message) do
+    "the write failed: #{message} (write_raised)"
+  end
+
   def describe(reason), do: inspect(reason)
 
   defp workflow_reason({:missing_workflow_file, path, reason}) do

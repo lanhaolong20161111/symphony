@@ -398,7 +398,8 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
 
   defp write_state(socket, state) do
     with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
-         {:ok, _result} <- Janitor.set_ticket_state(socket.assigns.ticket_id, state, options) do
+         {:ok, _result} <-
+           host_write(fn -> Janitor.set_ticket_state(socket.assigns.ticket_id, state, options) end) do
       reload(socket)
     else
       {:error, reason} -> assign(socket, :action_error, TicketPresenter.describe(reason))
@@ -418,11 +419,23 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   defp write_comment(socket, body) do
     with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
          {:ok, _result} <-
-           Janitor.comment_on_ticket(socket.assigns.ticket_id, body, [author: @operator] ++ options) do
+           host_write(fn ->
+             Janitor.comment_on_ticket(socket.assigns.ticket_id, body, [author: @operator] ++ options)
+           end) do
       reload(socket)
     else
       {:error, reason} -> assign(socket, :action_error, TicketPresenter.describe(reason))
     end
+  end
+
+  # The host fails closed with an `{:error, reason}` for everything it refuses, but the last step of a
+  # write is still a filesystem call, and on Windows a ticket file another writer holds open makes
+  # `File.write!/2` raise `File.Error`. A LiveView that came down over that would lose the ticket it was
+  # showing, so an unexpected raise is turned into the same shape as a refusal and rendered like one.
+  defp host_write(write) do
+    write.()
+  rescue
+    error -> {:error, {:write_raised, Exception.message(error)}}
   end
 
   # After a write that succeeded: the ticket is re-read, so the new state or comment is on the page

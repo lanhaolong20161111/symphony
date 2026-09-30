@@ -203,6 +203,30 @@ defmodule SymphonyElixirWeb.ControlTicketActionsTest do
     assert render(view) =~ "Cache the git roots lookup"
   end
 
+  test "a write that raises inside the host is rendered as a reason, not taken as a crash", %{path: path} do
+    {:ok, view, html} = live(build_conn(), "/control/tickets/SYM-7")
+    assert html =~ "Cache the git roots lookup"
+
+    # A directory where the ticket file was: the host's reader raises on it rather than answering with an
+    # `{:error, _}`. That is the one shape a page has to survive to keep its promise of never raising,
+    # and on this host the same shape arrives from a ticket another writer holds open.
+    File.rm!(path)
+    File.mkdir_p!(path)
+
+    comment_html = view |> form("form[phx-submit=comment]", comment: "hello") |> render_submit()
+
+    assert comment_html =~ "That change was not written"
+    assert comment_html =~ "write_raised"
+
+    state_html = view |> form("form[phx-submit=set_state]", state: "in-progress") |> render_submit()
+
+    assert state_html =~ "write_raised"
+
+    # Still a page, still showing the ticket it had read.
+    assert render(view) =~ "Cache the git roots lookup"
+    File.rmdir!(path)
+  end
+
   test "a write while reading another project's queue lands in that project's files, not this instance's",
        %{path: path, registry: registry, root: root} do
     queue = other_project!(registry, root)
