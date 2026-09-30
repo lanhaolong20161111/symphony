@@ -44,12 +44,13 @@ defmodule SymphonyElixir.TrackerContractTest do
     "gitlab" => ["gitlab_api"],
     "jira" => ["jira_rest"],
     "linear" => ["linear_graphql"],
-    "memory" => []
+    "memory" => [],
+    "ticket_service" => []
   }
 
   # `tracker.ex:13-21`, pinned as text: a kind added to the registry and not to this list fails
   # `registered_kinds/0 == @registered_kinds` instead of being skipped by the loop below.
-  @registered_kinds ~w(asana file github gitlab jira linear memory)
+  @registered_kinds ~w(asana file github gitlab jira linear memory ticket_service)
 
   # The four REST clients expose an injected-request-function hook (`github/client.ex:64`,
   # `gitlab/client.ex:66`, `jira/client.ex:71`, `asana/client.ex:77`, and the `_by_ids` twin beside
@@ -565,6 +566,8 @@ defmodule SymphonyElixir.TrackerContractTest do
   defp tool_opts("jira"), do: [jira_client: refusing_rest_request("jira")]
   defp tool_opts("asana"), do: [asana_client: refusing_rest_request("asana")]
   defp tool_opts("memory"), do: []
+  # No tools are advertised, so there is nothing to stub: the dispatch's unsupported-tool path is what runs.
+  defp tool_opts("ticket_service"), do: []
 
   defp refusing_rest_request(kind) do
     fn _method, _path, _params, _body, _opts ->
