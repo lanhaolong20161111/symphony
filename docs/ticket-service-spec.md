@@ -286,17 +286,22 @@ empty directory** rather than renaming the queue away -- a path that no longer e
 deployment's own validation at boot and take the hub down with it, while an empty directory makes
 every stray write refuse loudly (`no_such_ticket`) instead of silently editing a file the service
 never reads. Leave the old queue exactly where it is: it is the record, and it is the rollback.
-**5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
-should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
-read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
-**5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
-should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
-read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
-report written back into the service. Leave the old queue exactly where it is -- it is the record, and it
-is what makes the rollback one rename plus one line (see step 4, which re-points the janitor at a fresh
-empty directory precisely so the queue can stay put). Retiring the queue and deleting the janitor's second
-parser of the ticket format are a separate, later decision, taken only after a few rounds of the service
-carrying the tickets on its own.
+**5. Verify, and leave the queue where it is.** Once the change is live, `GET /api/v1/state` on the
+deployment's port should show the imported tickets; the ticket pages under `/control/tickets` should
+render their bodies read through the adapter; and the next dispatched ticket should reach `in-review`
+with its state and its report written back into the service. Leave the old queue exactly where it is --
+it is the record, and it is what makes the rollback one line plus a restart (see step 4, which re-points
+the janitor at a fresh empty directory precisely so the queue can stay put). Retiring the queue and
+deleting the janitor's second parser of the ticket format are a separate, later decision, taken only
+after a few rounds of the service carrying the tickets on its own.
+
+One measured footnote to this step, from the 2026-10-01 cutover: the tracker's settings **are** re-read
+(the workflow is hot-reloaded, so the switch took effect with the hub's own process unchanged and no
+restart at all), but the janitor's are **not** -- for five minutes after the switch it kept working
+against the old queue, rewriting its board files and trying to open pull requests for tickets the
+service had taken over. That deployment therefore switched the janitor **off**
+(`janitor.enabled: false`) rather than merely re-pointing it: with the mirror already off and the tracker
+on the service, everything left in it belonged to the file tracker.
 
 **Rollback.** Point `tracker.kind` back at `file` and restart. The queue was never deleted, the service
 keeps whatever it was given, and the export (`mix symphony_tickets.export --out DIR`) can produce a
