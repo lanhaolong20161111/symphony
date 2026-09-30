@@ -118,8 +118,7 @@ remember setting.
 
 ### Serving the console behind a proxy mount
 
-If something else fronts Symphony on a path prefix (for example the recorder serving it at
-`/symphony`), set `SYMPHONY_URL_PATH`:
+If something else fronts Symphony on a path prefix, set `SYMPHONY_URL_PATH`:
 
 ```sh
 SYMPHONY_URL_PATH=/symphony mise exec -- mix phx.server
@@ -128,6 +127,11 @@ SYMPHONY_URL_PATH=/symphony mise exec -- mix phx.server
 That makes absolute URLs (including `/dashboard.css`) and the LiveView socket carry the prefix,
 and the layout publishes the matching socket path for the client. Empty -- the default -- keeps
 upstream behaviour exactly as it was.
+
+Nothing fronts Symphony here today. The recorder this deployment once served at `/symphony` is a
+separate application in its own repository, listening on its own port (4010), with no reverse proxy
+in front of it -- so it is not a route on this console, and there is nothing for this setting to
+configure. It stays for whatever proxy a deployment chooses to put in front.
 
 ## 5. Check your work
 

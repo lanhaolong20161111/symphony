@@ -19,6 +19,11 @@ Already true, and worth not redoing:
   #35 (sweep), #37 (agent's tool call) and #39/#41/#43 (probe tickets). Since SYM-57 the agent
   publishes inside its own session too (§3, §6 item 3); the host path stays the documented fallback.
 - The tracker is a git repository of Markdown tickets, mirrored to GitHub Issues by the janitor.
+- The deployment drives **this fork**: the registry directory `~/code/symphony-projects/` holds
+  `symphony.md`, whose target repository is this one, and the retired deployment's `beekeeper.md` sits
+  in the same directory under `archive/` -- readable, and no longer a project, because the registry
+  lists `*.md` in the directory root. The console that began as one project with no management is now
+  a multi-project control plane: §7-§12.
 
 What was not true when this file was first written -- the whole distance to upstream -- and where each
 one stands now:
@@ -290,7 +295,10 @@ applicable, because ..." rather than deleted. **The line counts above are counte
 same table's earlier reading. One correction moved with them: the gate every skill names is the fork's,
 `mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/`. The retired target
 repository gated at its root with `mix precommit`, and every gate reference in this file -- the round
-log below included -- has been corrected to the fork's.
+log below included -- has been corrected to the fork's. The fork's copies are not new files: upstream's
+own `main` ships `.codex/skills/{commit,push,pull,land,debug}/SKILL.md` (they arrive with `be10a1b`,
+the commit this fork is based on), and `e592ebe` **replaced their content in place** with the
+Windows-adapted versions -- so the diff against upstream is the port, not an added directory.
 
 **And the rule the SYM-57 run earned** (`b0e8fd8`): that run pushed `main` first, then noticed the
 convention, moved the commit to `symphony/SYM-57` and restored `main` with `--force-with-lease`
@@ -356,7 +364,7 @@ the `land` CLI; SYM-57 and SYM-58 are the two runs that exercised this work):
 | 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0 |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | **the rule every round**: `mix lint` clean and the suite green (613 when it was last counted, before the `land` work). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+| 6 | **the rule every round**: `mix lint` clean and the suite green -- measured 2026-09-30 for this batch: `mix test` in `elixir/` exits 0 with **796 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 223.1s. The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
 
 ### The fork against upstream, audited
 
@@ -370,22 +378,25 @@ files that exist only here, roughly 5% are upstream concerns lifted into their o
 (2026-09-21...09-28: the ACP/CommandCode backends, the file tracker, the MCP bridge, the janitor, the
 console), and ~19% were added by the port itself.
 
-### Open, found by that audit -- not fixed
+### Open, found by that audit
 
-1. **`elixir/test/symphony_elixir/core_test.exs` lost its retry lower bound.**
-   `assert remaining_ms >= min_remaining_ms` went away when a flaky-window fix landed; only
-   `remaining_ms > -60_000` remains, so a retry scheduled *immediately* instead of after its backoff
-   now passes. The comment above it claims the lower edge is asserted by callers that compare two
-   attempts against each other, and there are no such callers in the file.
-2. **`ssh_test.exs` is excluded wholesale on Windows** by `@moduletag :needs_ssh`, which is
-   over-broad: those tests use a fake `ssh` script, and one of them is pure string logic.
-3. **`docs/fork-changes.md` is wrong about `granular`.** It says the `granular` approval-policy default
-   "is not a change made here" and cites a command whose path is wrong; the change is commit `84428e5`
-   (2026-09-21), so it *is* a fork change relative to upstream.
-4. **`orchestrator.ex`: while `paused`, `maybe_dispatch/1` returns early**, so
+One of the four it found is still open; the other three were closed later the same day, and are
+recorded here in the form they were closed in rather than left standing as open items.
+
+1. **`orchestrator.ex`: while `paused`, `maybe_dispatch/1` returns early**, so
    `reconcile_running_issues/1` and `reconcile_blocked_issues/1` -- both inside `dispatch_new_work/1` --
    do not run. That contradicts the comment above it ("reconciliation below still runs") and
    `orchestrator_pause_test.exs`'s claim; the test only asserts `claimed == 0`, so it cannot catch it.
+   Re-read on 2026-09-30: the early return and the comment are both still there.
+
+The three closures: `elixir/test/symphony_elixir/core_test.exs`'s retry lower bound is back
+(`0775e09`), anchored to a monotonic clock read *before* the test triggers the exit that arms the
+retry, which is what makes it exact with no margin -- the false comment and the 60s net are gone, and
+callers now pass the configured delay as the lower edge, so a short backoff fails the test rather than
+only an order-of-magnitude error. `ssh_test.exs`'s whole-file `@moduletag :needs_ssh` became per-test
+(`02a56a0`), because only six of the eight need what this host lacks. And `docs/fork-changes.md`'s
+claim about `granular` was corrected where it was wrong (`e796351`), together with the counting rule
+that let the wrong version stand (`e6be478`).
 
 ### Accepted, not done -- the standalone recorder has no drain budget
 
@@ -403,7 +414,161 @@ it (the poller already accepts a number, a 0-arity function or an MFA, so only t
 missing, not the mechanism). Nobody is doing that now; this paragraph is the record, so the next
 session does not re-derive why the switch has nothing behind it.
 
-## 7. Round log
+## 7. The control plane: every project, and only its own state
+
+`/control` used to carry a badge list of registry entries. It now carries a **projects table**
+(`5c42964`): one row per registry entry with its name, workflow file, declared port, `agent` route,
+queue and links, plus a status column and the two control buttons of §8. The table is rendered by
+`layouts.ex`'s `project_overview/1`; the status half is `ProjectStatus` (206 lines).
+
+**One interface, and it is the instance's own.** A row's status is the answer from that instance's
+`GET /api/v1/state`. No other route is read, nothing reaches into another instance, and nothing is
+started or stopped to find out -- which is also why there is deliberately no state file for this view
+to go stale against.
+
+**Bounded twice.** Per request, Req gets a short `receive_timeout`, `connect_options` timeout and
+`pool_timeout`, all with `retry: false`: Req retries transport errors with backoff, so probing an
+instance that is **not** running cost three connection attempts, and that is the one thing a "which of
+these are up" table cannot afford. Across rows, the asks go out at once (`Task.async_stream`,
+`on_timeout: :kill_task`, `max_concurrency: 8`), so the page waits about one timeout in total rather
+than one timeout per project. A probe that raises, or a task that is killed, still yields a row.
+
+**Four states, none of them a guess**: `up`, with the counts the instance reported; `down` when the
+connection was refused, which says nothing is listening on the declared port; `unreachable` on a
+timeout, a non-200, or a raise; and `no port` when the workflow declares no `server.port` -- not
+probed, and deliberately not called "down", because "there is nothing there" sends a reader somewhere
+else than "there is nothing to ask". An instance that answers 200 with its own error payload is `up`
+with `counts: nil` and the code in `detail`: it is running, and it said so itself. Zeroes would be a
+number the instance never claimed, which is the one thing this table must not show. A failing instance
+never breaks the page, and the HTTP client is injectable, so the tests never open a socket.
+
+## 8. The hub can start and stop instances
+
+The control column is backed by `InstanceRegistry` (877 lines, `c3da1b3`): the memory the hub did not
+have, which is *which process this hub started*. It keeps one small JSON state file at
+`~/code/symphony-instances.json` -- project, workflow, port, pid, logs root, started_at -- written
+atomically (a temporary file renamed over the old one, so a reader sees the whole old file or the whole
+new one) and read totally: a missing, empty or malformed file is an empty registry, and a record
+missing any field is not a record.
+
+**A record is not a running project.** A record means the hub started that pid, and nothing else. On
+boot `reconcile/1` drops records whose pid is gone and rewrites the file, and adopts the live ones --
+but adoption never turns a record into the claim that something is running; only the instance's own
+state endpoint does that (§7). A start or a stop looks at the records again for the same reason, so a
+crashed instance never leaves a row claiming the hub controls something that is not there.
+
+**Ports.** `allocate/1` is pure apart from the injected "is it held" check: the project's declared port
+when nothing holds it, otherwise the first free port in 4001-4099 -- the same block
+`Projects.next_free_port/1` suggests from, so a suggestion and an assignment cannot disagree. That
+check has to ask the operating system, because a table of who holds which port does not exist and
+would be wrong the moment anything else on the machine bound one.
+
+**Starting** runs the same argv this hub was started with, including the acknowledgement switch taken
+from the CLI's own parser rather than copied as a string (`CLI.acknowledgement_switch/0`), through a
+generated `start.cmd` and `cmd /c` -- which is what lets the child survive the port closing. It
+refuses, with a reason rather than a crash: a project the registry does not list (the event carries a
+name, never a path), a workflow whose `server.host` is not loopback, a file the validator rejects, a
+project already running, and no free port. **Nothing is started at boot**; an instance starts because
+a person pressed the button.
+
+**Stopping** kills the process tree with the same helper the shell timeout path already used. When the
+kill fails the record is kept, because forgetting it would lose the only handle on a process that may
+still be there. It refuses to stop the instance it is running in -- by its own pid and by its serving
+port -- and the row for that project renders no stop button, with a crafted click refused in the row.
+A project the hub never started is refused too, because the only pids it can name are the ones in its
+file.
+
+53 tests, every side effect injected (`:launcher`, `:held?`, `:alive?`, `:kill`, plus the state-file,
+registry and own-port bypasses): no test spawns a process, opens a socket or kills anything. Measured
+2026-09-30: 43 tests in `instance_registry_test.exs` and 10 in `control_instances_test.exs`.
+
+## 9. `project.publish`: a pull request, or the trunk
+
+A project chooses how finished work lands (`edba622`): `pull_request` (the default, so every existing
+workflow behaves exactly as before) or `direct`, which commits on the project's trunk and pushes it
+and never looks for or creates a pull request. Under `direct` the ticket records `branch_name: main`
+and carries no `links:` entry, because there is no pull request to link.
+
+The two modes share everything else. `direct` checks the trunk out with `git checkout main` (never
+`-B`: the reset form would move a branch an agent may already be on), commits only when the tree is
+dirty, and pushes with no `--force` and no `+` refspec. A rejected push -- a trunk that moved on the
+remote, or an auth failure -- is logged in git's own words and reported as **not** pushed, so no round
+claims a push git did not confirm. `main` is a literal rather than discovered per round: a workspace an
+agent had already branched must not decide where `direct` pushes, and a project whose trunk is not
+`main` surfaces as a failed push instead of a silent push somewhere else.
+
+Six tests run against a scratch repository with a real bare remote. "Never touches the pull-request
+path" is *observed* rather than asserted from a log line: a `gh` that resolves but cannot be executed
+is put first on `PATH`, and `direct` has to survive it. The first version of that test keyed on a log
+line and passed a mutation that routed `direct` through the PR check, which is why the test observes
+the behaviour instead.
+
+## 10. `project.isolation: shared` is declared and refused
+
+`5e33746`. `project.isolation: shared` is refused at settings validation, with a message saying it is
+not implemented and `per_ticket` is the only mode. The reason is a process one rather than a design
+one: the workspace change that would honour `shared` was written by an agent that never tested it, so
+it was withdrawn from the working tree rather than shipped on trust. Its diff and test are preserved
+outside the repository, at `~/code/symphony-isolation-slice.patch` and
+`~/code/symphony-isolation-slice.test.exs`, so the work is neither lost nor in the tree. The
+alternative -- accepting the key and quietly giving each ticket its own clone -- is the failure the
+refusal exists to prevent.
+
+The schema's cross-field hook (`shared` beside parallel agents, which would have two runs overwriting
+each other's edits in one tree) is left in place with a comment saying it is unreachable by
+construction until `shared` is honoured. It stays because it is the guard that must hold the moment it
+is.
+
+## 11. `publish` is chosen at creation, and edited in settings
+
+`e73b068`. `publish` is chosen when a project is created -- radios in the new-project form, with
+`pull_request` preselected and anything else clamped to the default before the file is written -- and
+it is visible and editable in the settings page, where the mode joined the existing curated key/value
+table as an enum rather than becoming a second surface for the same setting.
+
+Fixing that exposed a real pre-existing bug. The settings reader walked exactly two-segment paths, and
+the curated list's first entry is `tracker.provider.path`, three segments deep. The
+`FunctionClauseError` it threw was rescued, so **every** row's effective value rendered as `nil` --
+including the keys whose value was right there in the running configuration. `read_path/2` now walks
+the whole path one segment at a time.
+
+## 12. Reading another project's tickets
+
+`3aa9a99`. The hub can read any registry project's tickets, not only its own. Both ticket routes take
+an optional `project` name, resolved by registry membership -- the name is looked up in the listing
+rather than joined onto the registry directory, which is what makes a crafted `?project=../../x`
+unrepresentable rather than merely discouraged. That project's own workflow file supplies the tracker
+settings (a registry file *is* the workflow its instance is started with), so a **stopped** project's
+tickets are still reachable here. Omitting the parameter keeps the previous behaviour exactly.
+
+The three failures each render their reason in the existing error card and keep the page alive: an
+unknown project, a workflow file that does not parse, and one that cannot be read. None of them
+answers "no tickets": an empty list would read as "this project has no work", which is the one answer
+that must not be given for a file that could not be read.
+
+## 13. Open, after this batch
+
+None of these is finished, and none should be read as though it were.
+
+1. **`project.isolation: shared` is declared and refused** (§10). The implementation is parked outside
+   the repository, and nothing in the tree honours the setting.
+2. **There is no hub-side settings view for another project.** The settings link in a row points at
+   that project's own instance, and only while it answers (§7). A stopped project's *tickets* are
+   readable here; its settings are not.
+3. **Reading a non-file tracker across projects is not attempted.** A Linear or GitHub project shows
+   "the workflow does not configure a ticket directory" -- which is the pre-existing behaviour for the
+   running instance too, not a new gap.
+4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
+   carry the in-process MFA, and the fix path is recorded there.
+5. **The agent's own push/PR credential is not set.** `codex.child_env` maps
+   `GH_TOKEN=SYMPHONY_AGENT_TOKEN`, and the entry is inert while that variable is absent, so the host
+   publishes as it always has (§3). The channel is measured and works; the value is a decision nobody
+   has taken for the current deployment.
+
+And the one item the upstream audit found that this batch did not touch: the `paused` early return in
+`orchestrator.ex` (§6).
+
+## 14. Round log
 
 These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
 rounds, which are counted separately.
@@ -616,3 +781,42 @@ rounds, which are counted separately.
   a flaky-window fix, and `ssh_test.exs` is excluded wholesale by `@moduletag :needs_ssh` although its
   tests use a fake `ssh` script.
   Next: the four items in §6 -- none of them is the credential path, which is closed.
+- **Round 21 (2026-09-30)**: the deployment moved to this fork and the console grew from one project
+  with no management into a multi-project control plane. The registry now holds `symphony.md`, whose
+  target repository is this one, with the retired deployment's `beekeeper.md` archived beside it
+  (`ea242c5`, `d43f44b`, then `9b9de14`, `54895d6`, `781a58a`); the five Windows-adapted skills were
+  replaced in place in this fork's `.codex/skills/` with the gate as `mix lint` then `mix test` from
+  `elixir/` (`e592ebe`); and the retired repository's name was removed from the fork's defaults,
+  example workflows, UI copy and one generated page (`ef7a83c`). Then, in order:
+  - `/control`'s badge list became a projects table that asks each instance's own
+    `GET /api/v1/state` -- bounded per request (`retry: false`) and across rows (`Task.async_stream`,
+    `on_timeout: :kill_task`), four states and no guesses, a failing instance never taking the page
+    down (`5c42964`, `ProjectStatus`).
+  - `InstanceRegistry` gave the hub the memory of which process it started, and with it the two
+    buttons: a JSON state file written atomically and read totally, a boot reconciliation that drops
+    dead pids and adopts live ones without upgrading a record into a fact, a pure port allocator with
+    an injected "is it held", a start through a generated `start.cmd` carrying the CLI's own
+    acknowledgement switch, a stop that kills the tree and keeps the record when the kill fails, a
+    refusal to stop its own instance, and nothing started at boot (`c3da1b3`; 53 tests, every side
+    effect injected).
+  - `project.publish` gained `direct` -- the trunk, and no pull request -- with the ticket recording
+    `branch_name: main` and no `links:`, a push with no `--force` and no `+` refspec, and a rejected
+    push reported as not pushed in git's own words (`edba622`; six tests against a scratch repository
+    with a real bare remote, one of which *observes* that the PR path is never reached).
+  - `project.isolation: shared` became a loud refusal instead of a silent no-op, its untested
+    implementation parked outside the repository (`5e33746`); `publish` gained a radio at creation and
+    a row in the existing settings table, which uncovered the settings reader that had been rendering
+    every row's effective value as `nil` (`e73b068`); and both ticket routes took an optional
+    `project` name resolved by registry membership, so a stopped project's tickets are readable here
+    (`3aa9a99`).
+  - Earlier the same day the audit's four open items were reduced to one: the retry lower bound came
+    back anchored to a clock read before the trigger (`0775e09`), `ssh_test.exs`'s exclusion went
+    per-test (`02a56a0`), and the `granular` correction landed in `docs/fork-changes.md` (`e796351`,
+    `e6be478`) -- the `paused` early return in `orchestrator.ex` is the one still open. The file
+    tracker's empty-list short-circuit (`7ea7c36`) and two documentation corrections (`f14b79a`,
+    `391708c`) landed in the same stretch. The running instance on 4001 was rebuilt and restarted
+    after each batch and serves all of it, and `docs/quickstart.md`'s "the recorder serves this at
+    `/symphony`" sentence was corrected: the recorder has been its own application, in its own
+    repository, on its own port, with no reverse proxy, since the extraction.
+  Next: the five items in §13 -- `shared` decided or its parked slice redone with tests, a hub-side
+  settings view for a project that is not answering, and the agent-credential decision.
