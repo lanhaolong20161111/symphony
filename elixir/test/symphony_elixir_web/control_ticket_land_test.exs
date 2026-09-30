@@ -205,6 +205,32 @@ defmodule SymphonyElixirWeb.ControlTicketLandTest do
     assert land_calls(calls) == []
   end
 
+  test "a merge the project has no terminal state to record is reported as both, and the ticket is left as it was",
+       %{path: path, root: root, tickets: tickets} do
+    before = File.read!(path)
+
+    # A second workflow file, this one declaring no terminal state at all: where a landed ticket goes
+    # is the project's word to say, and a project that has not said has nowhere to put it.
+    no_terminal = Path.join(root, "WORKFLOW-no-terminal.md")
+    File.write!(no_terminal, workflow_text(tickets, "[]"))
+    Workflow.set_workflow_file_path(no_terminal)
+
+    {view, _html, calls} = land_view({:ok, %{number: 7, url: @pull_request}})
+
+    html = view |> form("form[phx-submit=land]") |> render_submit()
+
+    # Both halves again -- the merge happened, the ticket was not updated -- and the reason is the
+    # project's own missing word rather than a state invented here.
+    assert html =~ "The pull request was landed"
+    assert html =~ "Pull request 7 was squash-merged"
+    assert html =~ "was not updated"
+    assert html =~ "no terminal state"
+
+    # Nothing was written: not an invented state, and not a comment either.
+    assert File.read!(path) == before
+    assert land_calls(calls) == [%{pr_url: @pull_request, branch: @branch}]
+  end
+
   # Mounts the ticket page with this test's land operation in the endpoint config, so the page is the
   # only thing under test and not one `gh` call is ever made. The agent records what the operation was
   # handed, which is how "no pull request was invented" is checked rather than asserted.
@@ -277,24 +303,26 @@ defmodule SymphonyElixirWeb.ControlTicketLandTest do
   # landing that moved the ticket to `cancelled` (or to an invented state) cannot pass.
   defp write_workflow!(root, tickets) do
     path = Path.join(root, "WORKFLOW.md")
+    File.write!(path, workflow_text(tickets, "[done, cancelled]"))
+    Workflow.set_workflow_file_path(path)
+    :ok
+  end
 
-    File.write!(path, """
+  defp workflow_text(tickets, terminal_states) do
+    """
     ---
     tracker:
       kind: file
       provider:
         path: "#{slash(tickets)}"
       active_states: [ready, in-progress]
-      terminal_states: [done, cancelled]
+      terminal_states: #{terminal_states}
     janitor:
       tickets_path: "#{slash(tickets)}"
     ---
 
     Test prompt.
-    """)
-
-    Workflow.set_workflow_file_path(path)
-    :ok
+    """
   end
 
   defp slash(path), do: String.replace(path, "\\", "/")
