@@ -707,20 +707,83 @@ defmodule SymphonyElixir.Janitor do
   janitor mirrors in from the issue and the two spaces should stay distinguishable.
 
   Fails closed on the same things `publish_now/2` does: an `id` that is not a plain ticket name, or a
-  ticket file that does not exist.
+  ticket file that does not exist. A ticket whose bytes are not valid UTF-8 is refused too
+  (`{:error, {:ticket_not_utf8, id}}`), and for a stronger reason than tidiness: every writer here
+  hands the file's own bytes back unchanged, and bytes that are not text cannot be handed back
+  unchanged -- a writer that accepts them only carries the damage onward. See `set_ticket_state/3`
+  for the measurement.
   """
   @spec comment_on_ticket(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def comment_on_ticket(id, body, opts \\ []) when is_binary(id) and is_binary(body) do
     with :ok <- validate_id(id),
          cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
          ticket_path = Path.join(cfg.tickets, "#{id}.md"),
-         true <- File.exists?(ticket_path) or {:error, {:no_such_ticket, id}} do
-      text = File.read!(ticket_path)
+         {:ok, text} <- read_ticket_text(ticket_path, id),
+         :ok <- writable_text?(text, body, id) do
       comment_id = Ticket.next_local_id(text)
 
       File.write!(ticket_path, Ticket.append_comment(text, "agent", body, comment_id))
 
       {:ok, %{ticket: id, comment: %{id: comment_id, author: "agent"}}}
+    end
+  end
+
+  @doc """
+  Moves a ticket to a new state: one front-matter key, and nothing else.
+
+  This is the file tracker's counterpart of a Linear state transition, and it exists so that **no run
+  ever has to rewrite a ticket file to move its own work along**. The host reads the bytes, replaces
+  one key and writes them back, so every other byte -- the body, the rest of the front matter, and
+  every non-ASCII character in either -- is the byte it was. That is the rule this function keeps:
+
+      a ticket file is UTF-8, and its only safe writer is one that never re-encodes it.
+
+  A shell editor is not such a writer, and that is measured, not assumed. On ALPHA-2 an agent moved
+  its ticket to `in-progress` by running
+
+      $c = Get-Content -LiteralPath $p -Raw; $c = $c -replace 'state: ready','state: in-progress'
+      Set-Content -LiteralPath $p -Value $c -NoNewline
+
+  under Windows PowerShell 5.1, whose `Get-Content` and `Set-Content` default to the **ANSI** code
+  page. Every byte pair the CP936 decoder rejected came back as `?` with the byte after it consumed:
+  the ticket went from 15 characters of readable Chinese to 15 broken ones and a file that is no
+  longer valid UTF-8, while the line the agent meant to change changed correctly. A one-line edit and
+  a whole-file re-encode look the same in the shell; here they cannot, because there is no shell.
+
+  Fails closed on the same things `comment_on_ticket/3` does -- an `id` that is not a plain ticket
+  name, a ticket that does not exist -- plus the one that matters most for a writer: a ticket whose
+  bytes are already not valid UTF-8 comes back as `{:error, {:ticket_not_utf8, id}}` rather than being
+  rewritten, because rewriting it would carry the damage forward with the host's authority behind it.
+  """
+  @spec set_ticket_state(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def set_ticket_state(id, state, opts \\ []) when is_binary(id) and is_binary(state) do
+    with :ok <- validate_id(id),
+         cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
+         ticket_path = Path.join(cfg.tickets, "#{id}.md"),
+         {:ok, text} <- read_ticket_text(ticket_path, id),
+         :ok <- writable_text?(text, state, id) do
+      updated = Ticket.set_key(text, "state", state)
+
+      if updated == text, do: :ok, else: File.write!(ticket_path, updated)
+
+      {:ok, %{ticket: id, state: state}}
+    end
+  end
+
+  # The ticket must exist, and its bytes must be readable, before anything is written back over them.
+  defp read_ticket_text(path, id) do
+    if File.exists?(path), do: {:ok, File.read!(path)}, else: {:error, {:no_such_ticket, id}}
+  end
+
+  # Everything written through the host is text, and both halves of the write have to be text: the
+  # ticket being edited *and* the value being put into it. A caller whose own argument arrives broken
+  # is refused here rather than written, because front matter with a half character in it is a file no
+  # reader can trust again.
+  defp writable_text?(ticket_text, value, id) do
+    cond do
+      not String.valid?(ticket_text) -> {:error, {:ticket_not_utf8, id}}
+      not String.valid?(value) -> {:error, {:value_not_utf8, id}}
+      true -> :ok
     end
   end
 

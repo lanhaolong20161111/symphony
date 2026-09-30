@@ -18,6 +18,11 @@ defmodule SymphonyElixir.Janitor.TicketTest do
   - [ ] `findstr /C:"x" README.md` exits 0
   """
 
+  # Chinese text from the ticket that started this: ALPHA-2's description and the comment its run left.
+  # Both are the point of the tests below -- a shell editor destroys exactly these characters.
+  @chinese_body "只做这一件事，不要探索仓库、不要跑测试套件、不要读别的文件（省 token ✓）。\n\n在 `README.md` 最后追加**一行**：\n"
+  @chinese_comment "提交 420cc28、push 退出码 0、PR 链接 ✓、**凭据前 4 字符** ✓（ghs_ = App 令牌 ✓）"
+
   describe "split/1" do
     test "parses front matter and body" do
       assert {:ok, %{front_matter: fm, body: body}} = Ticket.split(@ticket)
@@ -287,6 +292,60 @@ defmodule SymphonyElixir.Janitor.TicketTest do
     test "a quoted title with a colon is fine" do
       refute :unquoted_colon_in_title in
                Ticket.problems("---\ntitle: \"Smoke test: add a line\"\n---\n")
+    end
+
+    test "reports bytes that are not UTF-8, which is what a lossy writer leaves behind" do
+      # Measured shape (ALPHA-2, 2026-09-30): an agent moved the ticket's state with Windows
+      # PowerShell 5.1, whose Get-Content/Set-Content default to the ANSI code page. The file was
+      # re-encoded through CP936, and every byte pair that decoder rejected came back as `?` with the
+      # byte after it consumed -- so `。\n` (E3 80 82 0A) became E3 80 3F. The surrounding Chinese is
+      # fine, which is exactly why this has to be reported: the file looks like a ticket.
+      damaged = "---\nid: ALPHA-2\nstate: ready\n---\n" <> "中文" <> <<0xE3, 0x80, 0x3F, 0x0A>>
+
+      refute String.valid?(damaged)
+      assert :invalid_utf8 in Ticket.problems(damaged)
+      refute :no_front_matter in Ticket.problems(damaged)
+    end
+  end
+
+  describe "the ticket write path and multi-byte text" do
+    # The rule every writer here keeps: a ticket is UTF-8, and its only safe writer is one that never
+    # re-encodes it. These tests pin the path the host owns -- the one an agent must use instead of
+    # editing the file itself -- against the characters a shell round trip destroys.
+
+    test "a description and a comment of Chinese text round-trip byte for byte" do
+      ticket =
+        "---\n" <>
+          "id: ALPHA-2\n" <>
+          "title: \"E2E e2e-alpha ticket 2 中文标题\"\n" <>
+          "state: ready\n" <>
+          "---\n" <> @chinese_body
+
+      updated =
+        ticket
+        |> Ticket.set_key("state", "in-review")
+        |> Ticket.add_link("https://example.test/pull/2", "PR 2", "pr")
+        |> Ticket.append_comment("agent", @chinese_comment, "local-1")
+
+      assert String.valid?(updated)
+
+      # Read it back the way the tracker does: the state moved, and nothing else did.
+      assert {:ok, %{front_matter: fm, body: body}} = Ticket.split(updated)
+      assert Ticket.get(fm, "state") == "in-review"
+      assert Ticket.get(fm, "title") == "E2E e2e-alpha ticket 2 中文标题"
+      assert binary_part(body, 0, byte_size(@chinese_body)) == @chinese_body
+      assert body =~ @chinese_comment
+    end
+
+    test "every character survives the state change itself" do
+      ticket = "---\nid: ALPHA-2\nstate: ready\n---\n" <> @chinese_body
+
+      read_back = Ticket.set_key(ticket, "state", "in-review")
+
+      # The only difference between the two is the state line.
+      before = String.replace(ticket, "state: ready", "state: in-review")
+      assert read_back == before
+      assert String.valid?(read_back)
     end
   end
 end

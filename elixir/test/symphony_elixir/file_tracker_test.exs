@@ -279,9 +279,11 @@ defmodule SymphonyElixir.FileTrackerTest do
       assert FileTracker.secret_environment_names(settings(dir)) == []
 
       # This tracker has no provider API, but its host-side caretaker does have work the agent cannot
-      # do itself (commit/push/PR) plus the one mutation an edit cannot do safely (a comment), so it
-      # advertises exactly those two tools.
-      assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}] =
+      # do itself (commit/push/PR) plus the two mutations an edit cannot do safely: a comment, and the
+      # state change that used to be a shell edit -- which is how ALPHA-2 was corrupted (a Windows
+      # PowerShell `Get-Content`/`Set-Content` pair re-encodes the whole file through the ANSI code
+      # page). So it advertises exactly those three tools.
+      assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}, %{"name" => "ticket_state"}] =
                FileTracker.agent_tool_specs()
     end
 

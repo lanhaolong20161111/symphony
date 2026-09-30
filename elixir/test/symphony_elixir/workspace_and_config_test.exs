@@ -304,6 +304,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "a truncated hook log line is cut on a character boundary, never inside one" do
+    # The limit is a byte count, because what makes a log line dangerous is its size -- but a cut at
+    # 2048 bytes can land inside a multi-byte character, and the line then ends in an incomplete UTF-8
+    # sequence. Measured on the ALPHA-2 ticket: this is the shape of a half character, and it is what
+    # the log must never carry.
+    chinese = String.duplicate("中", 700)
+    assert byte_size(chinese) == 2_100
+
+    truncated = Workspace.sanitize_hook_output_for_log(chinese)
+
+    assert String.valid?(truncated)
+    assert String.ends_with?(truncated, "... (truncated)")
+    # 2048 bytes is 682 whole characters (2046 bytes) plus two bytes of the 683rd; the cut moves back.
+    assert String.length(truncated) == 682 + String.length("... (truncated)")
+    refute truncated =~ "?"
+  end
+
+  test "every byte limit leaves whole characters behind" do
+    text = String.duplicate("中文✓abc", 40)
+
+    for limit <- 1..24 do
+      truncated = Workspace.sanitize_hook_output_for_log(text, limit)
+
+      assert String.valid?(truncated), "limit #{limit} split a character"
+      refute truncated =~ "?"
+    end
+  end
+
+  test "output under the limit is handed back untouched" do
+    assert Workspace.sanitize_hook_output_for_log("echo nope\n") == "echo nope\n"
+    assert Workspace.sanitize_hook_output_for_log(["a", ?b, "中"]) == "ab中"
+  end
+
   @tag :posix_paths
   test "workspace retries after_create after a failed new workspace bootstrap" do
     test_root =

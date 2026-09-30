@@ -20,7 +20,7 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
   test "advertises its tools, each taking the ticket as an argument" do
     specs = AgentTool.tool_specs()
 
-    assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}] = specs
+    assert [%{"name" => "symphony_publish"}, %{"name" => "ticket_comment"}, %{"name" => "ticket_state"}] = specs
 
     for %{"description" => description, "inputSchema" => schema} <- specs do
       assert is_binary(description)
@@ -30,6 +30,18 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
     end
 
     assert Enum.at(specs, 1)["inputSchema"]["required"] == ["body"]
+    assert Enum.at(specs, 2)["inputSchema"]["required"] == ["state"]
+  end
+
+  test "the state tool carries the boundary rule that keeps tickets intact" do
+    # The rule has to travel with the tool: the description is the only thing every run reads, and it
+    # is where "move the ticket with this, not with a shell command" is said. The corruption it
+    # prevents is measured, so the reason is named too -- a rule without a reason gets ignored.
+    [_, _, state] = AgentTool.tool_specs()
+
+    assert state["description"] =~ "instead of editing the ticket file"
+    assert state["description"] =~ "ANSI"
+    assert state["description"] =~ "UTF-8"
   end
 
   test "publishes the ticket the call names, and reports branch and pull request" do
@@ -89,7 +101,9 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
     response = AgentTool.execute("something_else", %{}, publish: stub(:never_used))
 
     refute response["success"]
-    assert Jason.decode!(response["output"])["error"]["supportedTools"] == ["symphony_publish", "ticket_comment"]
+
+    assert Jason.decode!(response["output"])["error"]["supportedTools"] ==
+             ["symphony_publish", "ticket_comment", "ticket_state"]
   end
 
   test "an exception while publishing becomes a failed result, not a crashed session" do
@@ -150,6 +164,62 @@ defmodule SymphonyElixir.Janitor.AgentToolTest do
       payload = Jason.decode!(response["output"])
       assert payload["error"]["ticket"] == "SYM-999"
       assert payload["error"]["message"] =~ "no ticket file"
+    end
+  end
+
+  describe "ticket_state" do
+    test "sets the state the call names, and reports it" do
+      set_state = fn ticket, state ->
+        send(self(), {:state_set, ticket, state})
+        {:ok, %{ticket: ticket, state: state}}
+      end
+
+      response =
+        AgentTool.execute("ticket_state", %{"ticket" => "SYM-26", "state" => "in-review"},
+          set_state: set_state
+        )
+
+      assert response["success"]
+      assert_received {:state_set, "SYM-26", "in-review"}
+
+      payload = Jason.decode!(response["output"])
+      assert payload["ticket"] == "SYM-26"
+      assert payload["state"] == "in-review"
+    end
+
+    test "falls back to the running ticket, like publish does" do
+      set_state = fn ticket, state -> {:ok, %{ticket: ticket, state: state}} end
+
+      response =
+        AgentTool.execute("ticket_state", %{"state" => "in-review"},
+          issue: %{identifier: "SYM-31"},
+          set_state: set_state
+        )
+
+      assert response["success"]
+      assert Jason.decode!(response["output"])["ticket"] == "SYM-31"
+    end
+
+    test "a call with no state is a failure, not a no-op" do
+      response = AgentTool.execute("ticket_state", %{"ticket" => "SYM-26"}, set_state: stub(:never_used))
+
+      refute response["success"]
+      assert Jason.decode!(response["output"])["error"]["message"] =~ "needs a state"
+    end
+
+    test "a ticket whose bytes are not UTF-8 is refused, naming the ticket and the reason" do
+      set_state = fn _ticket, _state -> {:error, {:ticket_not_utf8, "ALPHA-2"}} end
+
+      response =
+        AgentTool.execute("ticket_state", %{"ticket" => "ALPHA-2", "state" => "in-review"},
+          set_state: set_state
+        )
+
+      refute response["success"]
+      payload = Jason.decode!(response["output"])
+      assert payload["error"]["ticket"] == "ALPHA-2"
+      assert payload["error"]["message"] =~ "not valid UTF-8"
+      assert payload["error"]["message"] =~ "refusing to rewrite"
     end
   end
 end

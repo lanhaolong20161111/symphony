@@ -266,6 +266,12 @@ defmodule SymphonyElixir.Janitor.Ticket do
   @doc """
   Reports conditions that make a file a bad ticket, without changing anything.
 
+  * `:invalid_utf8` -- the bytes are not valid UTF-8, which is the worst of these and is reported
+    first: a ticket is text, and text that is not UTF-8 cannot be read, compared or written back
+    without guessing. It is what a lossy writer leaves behind -- measured on ALPHA-2, where a Windows
+    PowerShell `Get-Content -Raw` + `Set-Content -NoNewline` pair (both default to the **ANSI** code
+    page) re-encoded a whole ticket through CP936 and replaced 15 characters with `?`. Nothing else
+    here is worth reading once this is true, so it is not a smell but a stop sign.
   * `:bom` -- a leading UTF-8 BOM. Parsing tolerates it, because on Windows the obvious way to write a
     file adds one; it is reported because it means some tool wrote the ticket, and that tool may have
     changed more than the BOM.
@@ -276,6 +282,7 @@ defmodule SymphonyElixir.Janitor.Ticket do
   @spec problems(String.t()) :: [atom()]
   def problems(text) when is_binary(text) do
     []
+    |> add_if(not String.valid?(text), :invalid_utf8)
     |> add_if(String.starts_with?(text, @bom), :bom)
     |> add_if(split(text) == :skip, :no_front_matter)
     |> add_if(unquoted_colon_in_title?(text), :unquoted_colon_in_title)

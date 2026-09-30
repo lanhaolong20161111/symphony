@@ -459,15 +459,39 @@ defmodule SymphonyElixir.Workspace do
     {:error, {:workspace_hook_failed, hook_name, status, output}}
   end
 
-  defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
+  @doc """
+  Truncates hook output for a log line, **on a character boundary**.
+
+  The limit is a byte count, because what makes a log line dangerous is its size. But `binary_part/3`
+  does not care where a character ends: a cut at `max_bytes` can land inside a multi-byte character,
+  and the log line then ends in an incomplete UTF-8 sequence -- which is no longer text, and reads as
+  a byte dump rather than as the message the hook printed. So the cut is moved back to the start of
+  the character it landed inside: at most three bytes back, and only for a log line.
+
+  Public so the rule can be pinned directly; the caller is `handle_hook_command_result/4`.
+  """
+  @spec sanitize_hook_output_for_log(iodata(), pos_integer()) :: String.t()
+  def sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
     binary_output = IO.iodata_to_binary(output)
 
-    case byte_size(binary_output) <= max_bytes do
-      true ->
-        binary_output
+    if byte_size(binary_output) <= max_bytes do
+      binary_output
+    else
+      binary_output
+      |> binary_part(0, max_bytes)
+      |> trim_partial_character()
+      |> Kernel.<>("... (truncated)")
+    end
+  end
 
-      false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
+  # Shrinking by one byte is enough: a UTF-8 character is at most four bytes, so at most three bytes
+  # can be a character's tail. Bytes that are not UTF-8 at all are trimmed the same way, which is the
+  # only honest thing to do with them -- the log line carries text or it carries nothing.
+  defp trim_partial_character(text) do
+    cond do
+      String.valid?(text) -> text
+      byte_size(text) == 0 -> text
+      true -> text |> binary_part(0, byte_size(text) - 1) |> trim_partial_character()
     end
   end
 

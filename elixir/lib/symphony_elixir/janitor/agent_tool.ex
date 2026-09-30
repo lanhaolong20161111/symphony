@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Janitor.AgentTool do
 
   @publish_tool "symphony_publish"
   @comment_tool "ticket_comment"
+  @state_tool "ticket_state"
 
   @publish_description """
   Commit this ticket's workspace, push its branch and open the pull request, then report the branch
@@ -32,6 +33,18 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   needs -- why you stopped, what you could not verify, an assumption you made -- instead of editing the
   ticket's body, which cannot be done without risking its structure. The host assigns the comment id
   and answers with it.
+  """
+
+  @state_description """
+  Move a ticket to a new state, by rewriting one front-matter key with the host's own writer: `ready`,
+  `in-progress`, `in-review`, `paused`, `blocked`, `done` or `cancelled`.
+
+  Use this instead of editing the ticket file to change its state. A ticket is UTF-8 text and this is
+  the only writer that never re-encodes it, so the body and every non-ASCII character in it survive
+  exactly. A shell editor does not: on Windows, PowerShell 5.1 defaults `Get-Content` and `Set-Content`
+  to the **ANSI** code page, so reading a ticket and writing it back turns multi-byte text into `?` and
+  leaves a file that is no longer valid UTF-8 -- it corrupts the ticket on the very line you meant to
+  edit. This tool is refused, naming the ticket, when that has already happened to it.
   """
 
   @publish_input_schema %{
@@ -61,6 +74,22 @@ defmodule SymphonyElixir.Janitor.AgentTool do
     }
   }
 
+  @state_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["state"],
+    "properties" => %{
+      "ticket" => %{
+        "type" => "string",
+        "description" => "Ticket to move, for example SYM-26. Defaults to the running ticket."
+      },
+      "state" => %{
+        "type" => "string",
+        "description" => "The state to set, for example in-review."
+      }
+    }
+  }
+
   @doc """
   The tool specs this module advertises.
   """
@@ -76,6 +105,11 @@ defmodule SymphonyElixir.Janitor.AgentTool do
         "name" => @comment_tool,
         "description" => @comment_description,
         "inputSchema" => @comment_input_schema
+      },
+      %{
+        "name" => @state_tool,
+        "description" => @state_description,
+        "inputSchema" => @state_input_schema
       }
     ]
   end
@@ -92,6 +126,7 @@ defmodule SymphonyElixir.Janitor.AgentTool do
     case tool do
       @publish_tool -> publish(arguments, opts)
       @comment_tool -> comment(arguments, opts)
+      @state_tool -> set_state(arguments, opts)
       other -> failure(%{"error" => unsupported_error(other)})
     end
   end
@@ -147,6 +182,32 @@ defmodule SymphonyElixir.Janitor.AgentTool do
 
   defp comment_fun(opts), do: Keyword.get(opts, :comment, &Janitor.comment_on_ticket/2)
 
+  # The state change, beside the comment, for the same reason: the host owns every write to a ticket
+  # file, so a run never needs a shell command that reads one and writes it back.
+  defp set_state(arguments, opts) do
+    with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
+         state when is_binary(state) <- arguments |> arguments_map() |> Map.get("state") |> presence() do
+      case state_fun(opts).(ticket, state) do
+        {:ok, result} -> success(Map.merge(%{"ticket" => ticket}, result))
+        {:error, reason} -> failure(%{"error" => %{"message" => describe(reason), "ticket" => ticket}})
+      end
+    else
+      _ ->
+        failure(%{
+          "error" => %{
+            "message" =>
+              "ticket_state needs a state and a ticket identifier, for example " <>
+                "{\"ticket\": \"SYM-26\", \"state\": \"in-review\"}.",
+            "supportedTools" => [@state_tool]
+          }
+        })
+    end
+  rescue
+    error -> failure(%{"error" => %{"message" => Exception.message(error)}})
+  end
+
+  defp state_fun(opts), do: Keyword.get(opts, :set_state, &Janitor.set_ticket_state/2)
+
   defp ticket_from(arguments, opts) do
     from_arguments = arguments |> arguments_map() |> Map.get("ticket") |> presence()
 
@@ -176,13 +237,20 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   defp describe({:no_such_ticket, id}), do: "no ticket file for #{id}"
   defp describe({:not_a_workspace, path}), do: "no workspace to publish at #{path}"
 
+  # Both halves of the write are text. The first is the one that has actually happened here: a shell
+  # editor re-encoded the ticket through the ANSI code page, so its bytes stopped being UTF-8.
+  defp describe({:ticket_not_utf8, id}), do: "the ticket file for #{id} is not valid UTF-8; refusing to rewrite it"
+
+  defp describe({:value_not_utf8, id}),
+    do: "the text to write into #{id} is not valid UTF-8; refusing to write it"
+
   defp describe(:no_issues_repo),
     do: "no issues repository is declared (janitor.issues_repo), and this refuses to guess one"
 
   defp unsupported_error(tool) do
     %{
       "message" => "Unsupported dynamic tool: #{inspect(tool)}.",
-      "supportedTools" => [@publish_tool, @comment_tool]
+      "supportedTools" => [@publish_tool, @comment_tool, @state_tool]
     }
   end
 
