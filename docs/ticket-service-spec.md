@@ -257,10 +257,11 @@ running agent. Check that before starting: a ticket in `ready` or `in-progress` 
 ticket page is the console's job and is unaffected by this procedure. Do this first so the queue being
 migrated is a record, not work in flight.
 
-**2. Clear the throwaway ticket from the service (if any).** Any ticket created while proving the
-adapter works is not a real ticket; the service has no delete, so the clean way is: stop the service,
-move `~/.symphony-tickets/tickets.db` aside as a backup, start it again (an empty database is created on
-first use), and keep the backup until the cutover is verified.
+**2. Do not delete anything to make room.** The service assigns its own identifiers, so a ticket that
+is already in it cannot collide with an import -- and a ticket already in the service may be the very one
+whose pull request is waiting to be landed, which is a reason to keep it rather than to clear it. Import
+alongside: nothing needs the service stopped and nothing is deleted. If a backup is wanted anyway, copy
+the database file to one side first.
 
 **3. Import the queue's tickets.** `POST /tickets` once per ticket, with the body in a **file** and
 `--data-binary @file`: never build JSON by string interpolation in a shell, because a Windows shell
