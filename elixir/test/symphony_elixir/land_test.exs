@@ -5,6 +5,26 @@ defmodule SymphonyElixir.LandTest do
 
   @codex "chatgpt-codex-connector[bot]"
 
+  # The pull request and the branch a ticket records, for the one-shot `land/3` below.
+  @pull_request "https://github.com/me/repo/pull/7"
+  @branch "symphony/SYM-7"
+
+  # The contract this whole file exists for, in one place: which facts hand `verdict/1` which of the
+  # skill's numbers. The first six rows are one fact each producing one code; the last three pin the
+  # precedence the `cond` in `verdict/1` encodes, so a reordering that let a failed check outrank
+  # feedback (or a moved head outrank a conflict) fails here rather than in a merge.
+  @verdict_table [
+    {"a conflict", %{conflicting: true}, 5},
+    {"a head that moved", %{head_moved: true}, 4},
+    {"unanswered feedback", %{feedback: true}, 2},
+    {"a failed check", %{checks: %{pending: false, failed: true, failures: ["build: failure"]}}, 3},
+    {"checks absent past the deadline", %{checks_absent_seconds: 120}, 3},
+    {"nothing in the way", %{}, :ok},
+    {"a conflict outranks everything", %{conflicting: true, head_moved: true, feedback: true, checks: %{failed: true}}, 5},
+    {"a moved head outranks feedback and checks", %{head_moved: true, feedback: true, checks: %{failed: true}}, 4},
+    {"feedback outranks failed checks", %{feedback: true, checks: %{failed: true}}, 2}
+  ]
+
   describe "checks/1" do
     test "a check that is still running is pending, and the same check passing is not" do
       running = [%{"name" => "ci", "status" => "in_progress"}]
@@ -292,6 +312,12 @@ defmodule SymphonyElixir.LandTest do
 
       assert Land.verdict(input) == 2
     end
+
+    test "the table from facts to the skill's exit code" do
+      for {name, facts, code} <- @verdict_table do
+        assert Land.verdict(verdict_input(facts)) == code, "#{name} should give #{code}"
+      end
+    end
   end
 
   defp check(name, conclusion, completed_at) do
@@ -422,6 +448,134 @@ defmodule SymphonyElixir.LandTest do
     end
   end
 
+  # The one-shot landing the console's ticket page runs: the same judgement as the watch, asked once,
+  # and a merge only when it says to. `gh` is still a script here, and it is a script that *records*
+  # what it was asked, so "the merge was never run" is checked rather than assumed.
+  describe "land/3" do
+    test "a clean pull request is squash-merged with its branch deleted, and nothing else is run" do
+      {stub, agent} = land_gh(clean_queues())
+
+      assert Land.land(@pull_request, @branch, run_gh: stub) == {:ok, %{number: 7, url: @pull_request}}
+
+      # The skill's own merge, exactly: squash, delete the branch, and no flag that overrides anybody.
+      assert merge_commands(agent) == [["pr", "merge", "7", "--squash", "--delete-branch"]]
+      refute Enum.any?(argv(agent), &override?/1)
+    end
+
+    test "a conflicting pull request is refused with 5, and the merge is never run" do
+      {stub, agent} = land_gh(%{pr: [pr_reply("sha1", "CONFLICTING")]})
+
+      assert {:refused, 5, [message]} = Land.land(@pull_request, @branch, run_gh: stub)
+      assert message =~ "merge conflicts"
+      assert merge_commands(agent) == []
+    end
+
+    test "unanswered feedback is refused with 2, and the merge is never run" do
+      issue = [comment(1, "please handle the nil case", "2024-05-01T00:00:00Z", "alice")]
+      # A page of comments, then an empty page: `paginate/5` reads pages until one comes back empty,
+      # so a single-entry queue would repeat the same page forever (which is what a one-element queue
+      # does everywhere else here, deliberately).
+      queues = %{pr: [pr_reply("sha1")], issue: [{:ok, JSON.encode!(issue)}, {:ok, "[]"}]}
+
+      {stub, agent} = land_gh(queues)
+
+      assert {:refused, 2, ["Review comments detected. Address before merge."]} =
+               Land.land(@pull_request, @branch, run_gh: stub)
+
+      assert merge_commands(agent) == []
+    end
+
+    test "a failed check is refused with 3 and named, and the merge is never run" do
+      queues = %{pr: [pr_reply("sha1")], checks: [checks_reply([run("build", "completed", "failure")])]}
+      {stub, agent} = land_gh(queues)
+
+      assert {:refused, 3, ["Checks failed:", "- build: failure"]} =
+               Land.land(@pull_request, @branch, run_gh: stub)
+
+      assert merge_commands(agent) == []
+    end
+
+    test "a check that has not finished is refused rather than merged" do
+      queues = %{pr: [pr_reply("sha1")], checks: [checks_reply([run("ci", "in_progress")])]}
+      {stub, agent} = land_gh(queues)
+
+      assert {:refused, 3, [message]} = Land.land(@pull_request, @branch, run_gh: stub)
+      assert message =~ "still running"
+      assert merge_commands(agent) == []
+    end
+
+    test "checks that never appeared are refused rather than merged" do
+      {stub, agent} = land_gh(%{pr: [pr_reply("sha1")]})
+
+      assert {:refused, 3, ["No checks detected after 120s; check CI configuration"]} =
+               Land.land(@pull_request, @branch, run_gh: stub)
+
+      assert merge_commands(agent) == []
+    end
+
+    test "a head that moves between the two reads is refused with 4, and the merge is never run" do
+      # The pull request is read, its checks are fetched for that head, and it is read again: the same
+      # two readings the watch's first poll makes, which is what a one-shot read cannot replace.
+      {stub, agent} = land_gh(%{pr: [pr_reply("sha1"), pr_reply("sha2")]})
+
+      assert {:refused, 4, [message]} = Land.land(@pull_request, @branch, run_gh: stub)
+      assert message =~ "PR head updated"
+      assert merge_commands(agent) == []
+    end
+
+    test "a pull request whose head is not the branch the ticket records is refused, not merged" do
+      {stub, agent} = land_gh(%{pr: [pr_reply("sha1", "MERGEABLE", "someone/else")]})
+
+      assert {:error, {:branch_mismatch, "symphony/SYM-7", "someone/else"}} =
+               Land.land(@pull_request, @branch, run_gh: stub)
+
+      # The refusal happens on the first answer, so nothing else was even asked.
+      assert length(argv(agent)) == 1
+      assert merge_commands(agent) == []
+    end
+
+    test "a merge gh refuses is an error that names the merge, not a refusal verdict" do
+      queues = %{clean_queues() | merge: [{:error, "pull request is not mergeable"}]}
+      {stub, agent} = land_gh(queues)
+
+      assert {:error, {:merge_failed, "pull request is not mergeable"}} =
+               Land.land(@pull_request, @branch, run_gh: stub)
+
+      assert merge_commands(agent) == [["pr", "merge", "7", "--squash", "--delete-branch"]]
+    end
+  end
+
+  defp clean_queues do
+    %{
+      pr: [pr_reply("sha1")],
+      checks: [checks_reply([run("ci", "completed", "success")])],
+      merge: [{:ok, "Merged pull request #7"}]
+    }
+  end
+
+  # A `:run_gh` that answers from `queues` -- the same shape `gh_stub/1` takes -- and records every
+  # command it was asked to run, so a test can assert what was *not* called.
+  defp land_gh(queues) do
+    {:ok, agent} = Agent.start_link(fn -> %{state: %{}, argv: []} end)
+
+    stub = fn args ->
+      Agent.get_and_update(agent, fn acc ->
+        {reply, state} = next_reply(queues, acc.state, gh_key(args))
+        {reply, %{acc | state: state, argv: acc.argv ++ [args]}}
+      end)
+    end
+
+    {stub, agent}
+  end
+
+  defp argv(agent), do: Agent.get(agent, & &1.argv)
+
+  defp merge_commands(agent), do: agent |> argv() |> Enum.filter(&match?(["pr", "merge" | _rest], &1))
+
+  # No flag that merges over a judgement: the skill's safety rules are these three words, and a merge
+  # that carried one of them would be a merge nobody said yes to.
+  defp override?(args), do: Enum.any?(args, &(&1 in ["--force", "--admin", "--auto"]))
+
   defp watch_opts(queues, overrides \\ []) do
     Keyword.merge([run_gh: gh_stub(queues), interval_ms: 0, now: fake_clock(60_000)], overrides)
   end
@@ -451,8 +605,12 @@ defmodule SymphonyElixir.LandTest do
   end
 
   defp empty_reply(:pr), do: {:error, "no pull request reply scripted"}
+  # A merge is never answered by a default: a test that forgot to script one has to fail loudly, not
+  # read the fallback as a merge that happened.
+  defp empty_reply(:merge), do: {:error, "no merge reply scripted"}
   defp empty_reply(_list_endpoint), do: {:ok, "[]"}
 
+  defp gh_key(["pr", "merge" | _rest]), do: :merge
   defp gh_key(["pr" | _rest]), do: :pr
 
   defp gh_key(["api", "--method", "GET", endpoint | _rest]) do
@@ -470,14 +628,15 @@ defmodule SymphonyElixir.LandTest do
     fn _args -> Agent.get_and_update(agent, fn [reply | rest] -> {reply, rest} end) end
   end
 
-  defp pr_reply(head_sha, mergeable \\ "MERGEABLE") do
+  defp pr_reply(head_sha, mergeable \\ "MERGEABLE", branch \\ @branch) do
     merge_state = if mergeable == "CONFLICTING", do: "DIRTY", else: "CLEAN"
 
     {:ok,
      JSON.encode!(%{
        "number" => 7,
-       "url" => "https://github.com/me/repo/pull/7",
+       "url" => @pull_request,
        "headRefOid" => head_sha,
+       "headRefName" => branch,
        "mergeable" => mergeable,
        "mergeStateStatus" => merge_state
      })}
