@@ -33,7 +33,8 @@ Already true, and worth not redoing:
   the file tracker's adapter alone, so a service-tracked project -- whose adapter advertises no tracker
   tools -- was advertised **nothing**, which the `svcprobe` run measured before the fix (§13.1, §14).
   Two registry workflows declare a gate: `symphony.md`'s is committed (registry `dfecc0d`, 2026-10-01
-  03:26:14) and `svcprobe.md` is still untracked.
+  03:26:14) and `svcprobe.md` is still untracked. And it has since been used for real: a
+  service-tracked ticket's run called `symphony_gate` on 2026-10-01 (`707a11e`, §14).
 - The console's ticket pages read **whichever tracker a project configures** (§12, `d376ae8`): one seam,
   `elixir/lib/symphony_elixir_web/ticket_reader.ex` (584 lines), asks the tracker for a ticket's deep
   read; the file tracker keeps byte-for-byte its old behaviour and the service answers in one call.
@@ -231,7 +232,9 @@ variable `BEEKEEPER_AGENT_TOKEN`, then one variable for every project, `SYMPHONY
 an agent will ever push `.github/workflows/*`). It is the credential SYM-57 measured. It still exists
 on this machine -- both User-scope variables are present, 93 characters each, checked 2026-09-30 -- and
 it can be revoked, because every workflow in the registry now names `codex.app_token.private_key_path`
-instead: `symphony.md:194-196` and the two e2e workflows. The variable survives only in the comments
+instead: `symphony.md:202-204` (measured 2026-10-01 -- the `app_token:` block replaced the `child_env:`
+lines the earlier `:194-196` pointed at, and the gate block the same commit added sits above it) and the
+two e2e workflows. The variable survives only in the comments
 that describe the older mechanism. That history is kept rather than deleted, because it explains the
 `SEC_E_NO_CREDENTIALS` paragraphs above. The security property is better than it was, and still worth
 stating: an hour-long installation token is scoped to whatever the installation was granted and no
@@ -760,8 +763,9 @@ and the suite. Measured 2026-10-01 at `3e0ad76`: `test/symphony_tickets/export_t
 answers `{"ok":true}`. The empty-request rule above was then watched live rather than only in its test:
 `GET /tickets` answered `{"tickets":[]}` and created **no database file at all**, and the first query
 that named a state (`GET /tickets?state=ready`) is what created
-`~/.symphony-tickets/tickets.db` (65,536 bytes; re-checked 2026-10-01, and its last write is the
-`svcprobe` run of §13.1 at 01:41:34). There is **no auto-start**: no scheduled task and no
+`~/.symphony-tickets/tickets.db` (65,536 bytes then; **73,728** bytes and last written 2026-10-01
+03:46:45 now -- the `svcprobe` run of §13.1 wrote it first, the SYM-2 run of §14 last). There is **no
+auto-start**: no scheduled task and no
 `HKCU\...\Run` entry names the service, the hub or any project (re-checked 2026-10-01: no matching
 scheduled task, and the `Run` key holds OneDrive, ctfmon, iFlyInput, JianyingPro, WorkBuddy and Edge
 and nothing else), so a reboot takes the whole loop down until a person starts the processes. The loop
@@ -965,19 +969,39 @@ no session (the MCP stdio server, the HTTP endpoint) the workspace is derived fr
 names, through `Workspace.workspace_key/1` (`gate_tool.ex:215-248`) -- either way a path the host
 resolved, never one an argument named.
 
-**Measured state, round 27: the fix is committed and tested, and no running instance serves it yet.**
+**Measured state: the design rule holds, the fix is deployed, and the tool has been used for real.**
 Round 26's reading was "declared and exercised, advertised to nobody"; `df2941a` answered that, and the
 answer is the design rule the measurement earned: **running a gate is a property of the project, not of
 where its tickets come from**, so the host's own tools are composed at the tracker boundary for every
-kind (the paragraph above). The registry now both declares and commits the declaration -- `symphony.md` carries
-`gate.command: cd elixir && mix lint && mix test` with `timeout_ms: 900000` (registry `dfecc0d`,
-2026-10-01 03:26:14, whose message says the tool "is advertised from the tracker boundary, so this
-declaration is all a project needs"), while `svcprobe.md` (`grep -q svc-probe-1 README.md`) is still
-untracked. **What is not true is that any of this is running**: the 4001 escript's own mtime is
-2026-10-01 01:32:16, before `d376ae8` (02:44:52), `df2941a` (02:44:53) and `6ba1b04` (03:06:23), so the
-hub that is up predates the change and no project has been offered the tool through the new boundary.
-A service-tracked run after a rebuild is what would turn "advertised to every kind" from a tested code
-path into a measured deployment; nothing has run against the service since the fix.
+kind (the paragraph above). The registry both declares and commits the main deployment's declaration --
+`symphony.md` carries `gate.command: cd elixir && mix lint && mix test` with `timeout_ms: 900000`
+(`:151`, `:155-156`; registry `dfecc0d`, 2026-10-01 03:26:14, whose message says the tool "is advertised
+from the tracker boundary, so this declaration is all a project needs"), while `svcprobe.md`
+(`grep -q svc-probe-1 README.md`, `:150`, `:154`) is still untracked.
+
+**And then it was measured rather than assumed (`707a11e`).** The escript was rebuilt
+(`elixir/bin/symphony`, mtime 2026-10-01 03:36:47, after `6ba1b04` at 03:06:23) and both instances were
+restarted from it -- 4001's process at 03:36:47, the `svcprobe` instance's on 4021 at 03:36:51. A ticket
+created **in the service** -- SYM-2, labels `[probe]`, 03:36:35, whose description asks the agent to
+append a line to `README.md` and then run the project's declared gate and report the exit status -- was
+dispatched and worked by a run whose agent called **`symphony_gate`**, which is the answer to the
+question round 26 left open. The call is in the run's own record as exactly one `dynamicToolCall`:
+`{"ticket": "SYM-2"}`, `status: failed`, the gate's exit code **1**, 516 ms, workspace
+`c:/Users/lhl20/code/symphony-svcprobe-workspaces/SYM-2`. The line-count comparison says the same thing
+from the other side: the run's rollout
+(`~/.codex/sessions/2026/10/01/rollout-2026-10-01T03-36-54-*.jsonl`) carries `symphony_gate` on **31
+lines**, where the same check over the earlier run's rollout and over all **88** rollouts existing
+before it found **0** (`707a11e`). A rollout is appended to while a run goes, so that count is a
+snapshot rather than a total -- a read a few minutes later found **50** lines, and the run's thread was
+then ingested into `~/.codex/thread_history_1.sqlite` (thread
+`01a0f3d1-e605-7d72-a404-61f40cc08e27`), where the call is one `dynamicToolCall` among 125 items and
+`symphony_gate` is named in 25 of them. While the run went, `/api/v1/state` on 4021 reported
+`running=1`; it has since finished, and the ticket stands at `in-review`. The gate the tool ran is the
+project's own and it **failed on purpose**: `svcprobe.md` declares `grep -q svc-probe-1 README.md`, that
+marker belongs to the sibling ticket, and the agent's own comment says it deliberately did not add the
+string just to make the gate green. The run reported its own commit (`f6ae91c`) and its own pull request
+(#4). What the run does not change is the tool *set*: the service adapter still advertises no tracker
+tools, so the gate arrived beside nothing (§18 item 10).
 
 What was measured of the code at `6ba1b04` on 2026-10-01: `mix lint` exits 0 with `found no issues`
 (**172** files analysed by credo, 7.2s; the earlier 169 was `11af6ed`, 164 was `979a319`), and the four
@@ -1138,7 +1162,8 @@ front door of §16 as a tunnel rather than a bind address.
 
 ## 18. Open, after this batch
 
-None of these is finished, and none should be read as though it were.
+One item below was closed by the batch that its own measurement called for (item 7, the gate tool's
+first real use); the rest are unfinished, and none of them should be read as though it were.
 
 1. **`project.isolation: shared` is declared and refused** (§10). The implementation is parked outside
    the repository, and nothing in the tree honours the setting.
@@ -1150,32 +1175,35 @@ None of these is finished, and none should be read as though it were.
    running instance too, not a new gap.
 4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
    carry the in-process MFA, and the fix path is recorded there.
-5. **Slices 3, 4 and 5 are delivered; slice 6 is not, and nothing has been retired.** The adapter
-   (`fb31a7f`, §13.1), the console reading whichever tracker a project configures (`d376ae8`, §12) and
-   the markdown export (`3e0ad76`, §13) are all in. What is not: **slice 6** -- the file tracker, the
-   GitHub mirror, the ticket queue and the janitor's second parser of the ticket file format are all
-   still in the tree and in use, because every registry workflow still declares the file tracker. The
-   specification's order put slice 4 before slice 6, and that condition now holds, so what the
-   retirement waits on is the operator's sequencing decision -- it is semi-irreversible
-   (`docs/ticket-service-spec.md:158-165`).
+5. **Slices 3, 4 and 5 are delivered; slice 6 is not, and almost nothing has been retired.** The
+   adapter (`fb31a7f`, §13.1), the console reading whichever tracker a project configures (`d376ae8`,
+   §12) and the markdown export (`3e0ad76`, §13) are all in. What is not: **slice 6** -- the file
+   tracker, the GitHub mirror, the ticket queue and the janitor's second parser of the ticket file
+   format are all still in the tree, and the main deployment still uses the file layer: `symphony.md`'s
+   `tracker.kind: file` reads the queue at `C:/Users/lhl20/code/symphony-work`. One part has been
+   switched **off** rather than removed: the mirror's `tickets_repo` line is commented in the registry
+   with its reason written beside it (`f941278`, 2026-10-01 03:35:34), while `issues_repo`, the tickets
+   repository and the boards are untouched. The order the rest happens in is written down as a
+   rehearsed procedure (`docs/ticket-service-spec.md:242`): **switch the main deployment to the service
+   tracker** -- which needs a plan for the tickets that live in the file queue -- **then remove the
+   queue, then delete the second parser**. It stays semi-irreversible, and the specification's own
+   precondition (slice 4 before slice 6) holds (`docs/ticket-service-spec.md:158-165`).
 6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
    credential replaced them and no workflow in the registry names them any more, so revocation is the
    operator's call rather than a prerequisite for anything.
-7. **The gate tool is offered to every kind now, and no live run has been measured with it.**
-   `df2941a`/`6ba1b04` moved the composition to the tracker boundary (§14), which is the design
-   correction the `svcprobe` measurement earned; the fix is committed, lint-clean and unit-tested, and
-   **no running instance serves it**: the 4001 escript's own mtime is 2026-10-01 01:32:16, before
-   `d376ae8` (02:44:52) and `df2941a` (02:44:53) and `6ba1b04` (03:06:23), so the hub that is up
-   predates the change. Of the two registry declarations, `symphony.md`'s gate is now **committed**
-   (registry `dfecc0d`, 2026-10-01 03:26:14) and `svcprobe.md` is still untracked -- and whether a
-   service-tracked run now uses the tool is unmeasured, because nothing has run against the service
-   since the fix.
-8. **Nothing here survives a reboot** (§13). Re-measured while round 27 was written: all three listeners
-   are still up and all three are hand-started -- 4001 (`symphony.md`, PID 14220), 4020 (the ticket
-   service, PID 19384, `{"ok":true}` on `/health`) and 4021 (`svcprobe.md`, PID 2688), each bound to
-   `127.0.0.1`. The auto-start half is round 26's measurement and was **not** repeated here: no
-   scheduled task and no `Run` entry names the hub, the service or any project. The loop dies with the
-   machine and comes back only when a person starts the processes it needs.
+7. **Closed in this batch: the gate has a live user now, measured.** `df2941a`/`6ba1b04` moved the
+   composition to the tracker boundary (§14); this batch rebuilt the escript (`elixir/bin/symphony`,
+   mtime 2026-10-01 03:36:47) and restarted both instances from it, and a service-tracked ticket (SYM-2)
+   was worked by a run whose agent called `symphony_gate` -- measured as 31 lines in the run's rollout
+   against 0 in the 88 rollouts existing before it (`707a11e`, §14). What that leaves open is not the
+   gate but the tools beside it: item 10.
+8. **Nothing here survives a reboot** (§13). Re-measured in this batch: all three listeners are still up
+   and all three are hand-started -- 4001 (`symphony.md`, PID 20988, started 03:36:47), 4020 (the ticket
+   service, PID 19384, started 2026-09-30 23:59:37, `{"ok":true}` on `/health`) and 4021 (`svcprobe.md`,
+   PID 19972, started 03:36:51), each bound to `127.0.0.1`. The auto-start half was re-checked this time
+   too: no scheduled task names the hub, the service or any project, and `HKCU\...\Run` holds OneDrive,
+   ctfmon, iFlyInput, JianyingPro, WorkBuddy and Edge and nothing else. The loop dies with the machine
+   and comes back only when a person starts the processes it needs.
 9. **An automatic landing sweep has no policy.** Landing exists as one button pressed by a person
    (§15). Which tickets may merge unattended -- which states, which labels, which projects, what
    happens when the verdict is not `ok` -- is a decision nobody has made, and the sweep should not
@@ -1187,6 +1215,13 @@ None of these is finished, and none should be read as though it were.
     `symphony_gate`. What it is still not offered is `ticket_comment` or `symphony_publish`: the
     service adapter is a reader by design (`ticket_service.ex:10-11`), so whether a service-backed
     tracker should advertise **writer** tools is a decision that still nobody has made (§13.1).
+11. **The throwaway projects and their instances are still there** (`e2e-alpha.md`, `e2e-beta.md` and
+    `svcprobe.md`, all three untracked in the registry root). The `svcprobe` instance is up on 4021 with
+    the SYM-1/SYM-2 pair in the service (both `probe`, both `in-review`); the two `e2e` instances,
+    started by hand on 4002 and 4003 for the 2026-09-30 four-ticket run, are not up now -- measured:
+    4001, 4020 and 4021 are the only loopback listeners. Nothing about them has been cleaned up, and
+    `svcprobe.md` is also the file this batch's gate measurement was made with, so it is a probe that
+    grew a history rather than a scratch file.
 
 And the one item the upstream audit found that this batch did not touch: the `paused` early return in
 `orchestrator.ex` (§6).
@@ -1690,3 +1725,38 @@ rounds, which are counted separately.
   kind" stops being a tested code path and becomes a measured deployment; then decide when slice 6
   happens, since the specification's precondition for it now holds; and then a policy for the landing
   sweep.
+- **Round 28 (2026-10-01)**: the fix stopped being a tested code path and became a measured deployment,
+  and the mirror was switched off by decision.
+  - **Rebuilt and restarted.** `elixir/bin/symphony` was rebuilt (mtime 2026-10-01 03:36:47, after
+    `6ba1b04` at 03:06:23) and both instances were restarted from it -- 4001 (`symphony.md`, PID 20988,
+    03:36:47) and 4021 (`svcprobe.md`, PID 19972, 03:36:51) -- so the running hub is finally the one that
+    serves the tracker-boundary gate tool.
+  - **And a service-tracked ticket used it.** SYM-2 in the service (`[probe]`, created 03:36:35) asks
+    for one line appended to `README.md`, then the project's declared gate run and its exit status
+    reported. The run's agent called **`symphony_gate`** -- the run's own record holds exactly one
+    `dynamicToolCall`: `{"ticket": "SYM-2"}`, `status: failed`, the gate's exit code 1, 516 ms -- and the
+    ticket ended at `in-review` in the service, its description rewritten to carry the gate's exit code,
+    with a comment naming the run's own commit `f6ae91c` and its own pull request (#4). The gate
+    "failed" because `svcprobe.md` declares `grep -q svc-probe-1 README.md`, the sibling ticket's marker,
+    and the agent says it did not write that string just to make the gate green. The counts are in §14
+    (`707a11e`): `symphony_gate` on 31 lines of the run's rollout against 0 in the 88 rollouts before it.
+  - **The mirror is off, by decision** (registry `f941278`, 2026-10-01 03:35:34). The tickets live in the
+    service and the console reads it, and the export can write them back out as markdown whenever a
+    diffable copy is wanted, so the mirror stops earning its keep: `symphony.md`'s `tickets_repo` line is
+    **commented, not deleted**, with the reason written beside it and "uncomment to mirror to GitHub
+    again" in the commit message. `issues_repo`, the tickets repository and the boards are untouched.
+  - **The cutover, written down as a rehearsed sequence** (`949b16e`, `docs/ticket-service-spec.md` §10):
+    know what the queue holds and that its tickets are non-active, land or park them, clear the throwaway
+    ticket from the service, import the queue through an HTTP body in a **file**, rebuild the escript
+    **before** switching the tracker block, verify through the console and a dispatched ticket, and only
+    then remove the queue and the janitor's second parser -- with rollback being the old tracker block
+    and the queue left in place. The import path was rehearsed against a copy of the database.
+  - **And what is still open, re-stated rather than dropped** (§18): the file tracker, the queue and the
+    janitor's second parser are not retired, and the order they go in is the §10 procedure above;
+    nothing survives a reboot (item 8, re-measured); the unattended-merge policy is still an operator
+    decision (item 9); the ticket service still runs by hand on 4020 (§13); and the throwaway projects
+    and instances are still there (item 11).
+  Next: decide when slice 6 happens, since its precondition holds and the procedure for it now exists;
+  then the decision item 10 leaves open (whether a service-tracked tracker advertises **writer** tools);
+  then a policy for the landing sweep; and then the registry's two still-untracked project files
+  (`svcprobe.md`, `e2e-alpha.md`, `e2e-beta.md`).
