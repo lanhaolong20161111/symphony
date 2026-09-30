@@ -289,14 +289,14 @@ never reads. Leave the old queue exactly where it is: it is the record, and it i
 **5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
 should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
 read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
-report written back into the service. **Move the queue out of reach** -- rename the directory -- rather than leaving it beside the
-deployment "read-only for a few rounds". The write actions on a ticket page (the state picker, the
-comment box, the land action) still submit to the janitor, and the janitor writes to
-`janitor.tickets_path`: with no queue it refuses loudly, which is what you want, but a stale queue left
-in place means a write on a service-backed deployment silently edits a file the service never reads
-under the same identifier. Renaming keeps the old record, makes that refusal loud, and leaves the
-rollback one rename plus one line. Only after that:
-delete the renamed queue, and then delete the janitor's second parser of the ticket format.
+**5. Verify, then retire the file layer.** After a restart, `GET /api/v1/state` on the deployment's port
+should show the imported tickets; the ticket pages under `/control/tickets` should render their bodies
+read through the adapter; and the next dispatched ticket should reach `in-review` with its state and its
+report written back into the service. Leave the old queue exactly where it is -- it is the record, and it
+is what makes the rollback one rename plus one line (see step 4, which re-points the janitor at a fresh
+empty directory precisely so the queue can stay put). Retiring the queue and deleting the janitor's second
+parser of the ticket format are a separate, later decision, taken only after a few rounds of the service
+carrying the tickets on its own.
 
 **Rollback.** Point `tracker.kind` back at `file` and restart. The queue was never deleted, the service
 keeps whatever it was given, and the export (`mix symphony_tickets.export --out DIR`) can produce a
