@@ -1,9 +1,24 @@
 defmodule SymphonyElixir.SSHTest do
   use ExUnit.Case, async: false
-  @moduletag :needs_ssh
 
   alias SymphonyElixir.SSH
 
+  # `:needs_ssh` is per-test here, not per-module: it marks the tests whose only way to observe the
+  # argv `SSH` builds is a fake `ssh` **shell script** on `PATH`, and that shim is POSIX-only. It is
+  # written without a filename extension, and on Windows `System.find_executable/1` skips
+  # extensionless files outright -- a `.cmd` shim does resolve, but `System.cmd/3` and
+  # `Port.open({:spawn_executable, _})` both raise `:eacces` on one; starting a `.cmd` requires
+  # `cmd.exe /c`, which `SymphonyElixir.SSH` does not do.
+  #
+  # So read the tag as "needs an executable POSIX fake `ssh` on `PATH`", **not** "needs a remote
+  # host": none of these tests contacts a machine. Do not try to repair this by switching
+  # `install_fake_ssh!/3`'s hard-coded ":" `PATH` separator -- with the separator fixed the shim is
+  # still neither resolvable nor spawnable, and the run reaches the real `ssh.exe` either way.
+  #
+  # The two tests that never touch ssh (`run/3 returns an error when ssh is unavailable` and
+  # `remote_shell_command/1 ...`) run on every host and stay untagged on purpose.
+
+  @tag :needs_ssh
   test "run/3 keeps bracketed IPv6 host:port targets intact" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-ipv6-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -24,6 +39,7 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "printf ok"
   end
 
+  @tag :needs_ssh
   test "run/3 leaves unbracketed IPv6-style targets unchanged" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-ipv6-raw-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -44,6 +60,7 @@ defmodule SymphonyElixir.SSHTest do
     refute trace =~ "-p 2200"
   end
 
+  @tag :needs_ssh
   test "run/3 passes host:port targets through ssh -p" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -68,6 +85,7 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "echo ready"
   end
 
+  @tag :needs_ssh
   test "run/3 keeps the user prefix when parsing user@host:port targets" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-user-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -88,6 +106,8 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "printf ok"
   end
 
+  # Untagged: no ssh process is started, and none is needed -- the assertion is precisely that a
+  # `PATH` with no ssh on it yields the lookup error, so this holds on every host.
   test "run/3 returns an error when ssh is unavailable" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-missing-test-#{System.unique_integer([:positive])}")
     previous_path = System.get_env("PATH")
@@ -103,6 +123,7 @@ defmodule SymphonyElixir.SSHTest do
     assert {:error, :ssh_not_found} = SSH.run("localhost", "printf ok")
   end
 
+  @tag :needs_ssh
   test "start_port/3 supports binary output without line mode" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-port-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -133,6 +154,7 @@ defmodule SymphonyElixir.SSHTest do
     refute trace =~ " -F "
   end
 
+  @tag :needs_ssh
   test "start_port/3 supports line mode" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-line-port-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -158,6 +180,7 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "-T -p 2222 localhost bash -lc"
   end
 
+  # Untagged: pure string logic -- no process, no `PATH`, no host.
   test "remote_shell_command/1 escapes embedded single quotes" do
     assert SSH.remote_shell_command("printf 'hello'") ==
              "bash -lc 'printf '\"'\"'hello'\"'\"''"
