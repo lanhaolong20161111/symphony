@@ -45,3 +45,4 @@ help with the setup:
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
+symphony-agent-token: SYM-1
