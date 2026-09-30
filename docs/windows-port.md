@@ -29,12 +29,25 @@ Already true, and worth not redoing:
   a multi-project control plane: §7-§12.
 - The agent can run its project's **declared gate** and read the answer (§14, `cf4a7da`) -- the check
   the sandbox cannot make for itself on this host. The tool is advertised only to a project that
-  declares `gate.command`, and no workflow in the registry declares one yet.
+  declares `gate.command`; two registry workflows declare one now, and the declaration was exercised
+  in production for the first time in the `svcprobe` run (§13.1, §14) -- where the running agent read
+  the gate out of the workflow and ran it itself, because a project tracked by the ticket service is
+  advertised no tools at all.
 - The last step of the loop is on the ticket's own page (§15, `97329cb`): the pull request the ticket
   records is judged with `Land`'s own core, merged only on a verdict to land, and the outcome is
   written onto the ticket.
 - The ticket service is **running** on 4020 (§13), and the operator reaches this machine from outside
   through `tailscale serve`, tailnet-only, with both applications still on loopback (§16).
+- **The orchestrator reads tickets from that service** (§13.1, `fb31a7f`): the tracker kind
+  `ticket_service` speaks the service's own HTTP surface, with the address in the tracker's free-form
+  `provider.url`. Registering the kind made the executable contract refuse it three times before it
+  would accept it; with the three acknowledgements written by hand, the contract passes **25/25**.
+- **One real deployment has used it end to end, and the chain ran green** (§13.1). A throwaway project
+  (`~/code/symphony-projects/svcprobe.md`) declares `tracker.kind: ticket_service` against
+  `http://127.0.0.1:4020`, with its own workspace root and the janitor disabled, and was started on
+  port 4021. A ticket created **in the service** (SYM-1, `ready`/`unstarted`) was picked up,
+  dispatched, worked and finished on 2026-10-01 with the agent's own commit `e8cf28f`, the agent's own
+  pull request (#3, `symphony/SYM-1`) and the ticket moved to `in-review` **in the service**.
 
 What was not true when this file was first written -- the whole distance to upstream -- and where each
 one stands now:
@@ -452,7 +465,7 @@ the App credential end to end):
 | 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0. **Re-achieved on all four tickets of the 2026-09-30 run, with the App credential** (§3): each agent pushed its own branch and opened its own PR with a `ghs_` token, each PR's head SHA equalled its workspace's HEAD, and the host's publish tool answered `pushed=false, committed=false` on each |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). Round 25 re-measured both at its own last commit (`979a319`; HEAD has since moved to `5bec515`, the deploy batch, which is not measured here): `mix lint` exits 0, `found no issues`, 164 source files (6.8s), and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**, 208.4s -- measured while the next feature was already being written into the same working tree, so the tree was not clean; what makes it a reading of this commit's tests is its total, which is exactly HEAD's own test set: 912 at `b03d3c5` plus the 37 this round added (18 + 10 + 9). The three test files that round added were also run on their own: **82 passed** (18 + 55 + 9). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). Round 25 re-measured both at its own last commit (`979a319`; HEAD has since moved to `5bec515`, the deploy batch, which is not measured here): `mix lint` exits 0, `found no issues`, 164 source files (6.8s), and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**, 208.4s -- measured while the next feature was already being written into the same working tree, so the tree was not clean; what makes it a reading of this commit's tests is its total, which is exactly HEAD's own test set: 912 at `b03d3c5` plus the 37 this round added (18 + 10 + 9). The three test files that round added were also run on their own: **82 passed** (18 + 55 + 9). A later reading, on 2026-10-01 with HEAD at `11af6ed`: `mix lint` exits 0 with `found no issues` (**169** source files -- 164 at `979a319`), the two files the ticket-service round touched pass on their own (`tracker_contract_test.exs` **25 passed**, `ticket_service_tracker_test.exs` **30 passed**), and the whole suite is **not** measured at that commit: `mix test` failed before running a test, three times, in `mix deps.compile` (`** (File.Error) could not remove files and directories recursively from "...\_build\test\lib\lazy_html": file already exists`) while another Mix process was working in the same tree, so no pass/skip/excluded total is claimed for `11af6ed`. The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
 
 ### The fork against upstream, audited
 
@@ -652,7 +665,8 @@ The tracker work of §4 is finished, and its successor is being built rather tha
 service that owns tickets, in a **new sibling repository**
 `~/Desktop/android_cli_demos/symphony-tickets` (its own git repository, its own SQLite through
 `exqlite`; no Ecto at all, and Phoenix only for the HTTP surface -- `mix.exs:56-59` lists `exqlite`,
-`phoenix`, `bandit` and `jason`). Three slices are committed, and none of them is in this fork:
+`phoenix`, `bandit` and `jason`). Three slices are committed in that repository, and the fork's own
+side of the contract -- the adapter -- is committed here as of `fb31a7f` (§13.1):
 
 - **The store** (`7c31f50`, 42 tests): tickets with both a machine state type and a display name,
   labels, blocker relations that resolve rather than disappear, threaded comments, attachments keyed
@@ -690,24 +704,23 @@ gating decision belongs to the scheduler, not to the store. `mix precommit`: 90 
 answers `{"ok":true}`. The empty-request rule above was then watched live rather than only in its test:
 `GET /tickets` answered `{"tickets":[]}` and created **no database file at all**, and the first query
 that named a state (`GET /tickets?state=ready`) is what created
-`~/.symphony-tickets/tickets.db` (65,536 bytes). There is **no auto-start**: no scheduled task and no
-`HKCU\...\Run` entry names the service or the hub (checked 2026-10-01), so a reboot takes the whole
-loop down until a person starts two processes. The loop as it stands is: a ticket is created, the
-agent develops and -- once a project declares a gate (§14) -- verifies its own work, opens its own
-pull request, and the operator lands it from the phone (§15). The **deploy action is being written
-right now** -- the next round's work, not this one's. When it was first measured,
-`elixir/lib/symphony_elixir/deploy.ex`, `deploy_test.exs` and `control_deploy_test.exs` were in the
-working tree and uncommitted, and `config/schema.ex:617` already declared a `Deploy` block; while
-these documents were being written, two commits landed for it (`cd04499`, then `5bec515`), which is
-where HEAD now is. Nothing in this document describes its design. An automatic landing sweep is an
-open decision that needs a policy first: which tickets may merge unattended (§18).
+`~/.symphony-tickets/tickets.db` (65,536 bytes; re-checked 2026-10-01, and its last write is the
+`svcprobe` run of §13.1 at 01:41:34). There is **no auto-start**: no scheduled task and no
+`HKCU\...\Run` entry names the service, the hub or any project (re-checked 2026-10-01: no matching
+scheduled task, and the `Run` key holds OneDrive, ctfmon, iFlyInput, JianyingPro, WorkBuddy and Edge
+and nothing else), so a reboot takes the whole loop down until a person starts the processes. The loop
+as it stands is: a ticket is created, the agent develops, runs the check the project declares (§14),
+opens its own pull request, and the operator lands it from the phone (§15). The **deploy action landed
+after round 25** (`cd04499`, then `5bec515`), and this document still does not describe its design. An
+automatic landing sweep is an open decision that needs a policy first: which tickets may merge
+unattended (§18).
 
-**And what would actually replace the file tracker is paused.** The batch calls that bundle slice 2c;
-the specification's own numbering is slice 3 (a thin adapter in this fork that speaks the service), 4
-(the console reading through it) and 6 (retiring the mirror and the janitor's second parser)
-(`docs/ticket-service-spec.md:158-165`). It is paused, plainly, because the last three batches were
-about making the pipeline that exists usable from a phone -- and saying it any other way would read as
-progress on a plan that has not moved.
+**Slice 3 of the replacement is no longer paused: the adapter is committed and proved live (§13.1).**
+What remains is the rest of the plan, and the specification fixes the order: slice 4 (the console
+reading through the service) has to move before slice 6 (retiring the file tracker, the mirror and the
+janitor's second parser), because the console's pages read whichever tracker the project's workflow
+declares and every registry workflow still declares the file tracker. Slice 5 (a markdown export) is
+not written either (`docs/ticket-service-spec.md:158-165`).
 
 The design is `docs/ticket-service-spec.md` -- the contract, the minimal surface, the interface, six
 slices, and the operator's five decisions, which supersede the document's own recommendations: a
@@ -733,6 +746,93 @@ an empty option list and one adapter reads a bare non-empty string as a query do
 assertion as written would have made a real request to a real API. The adapter's transport is now
 injected and the four REST adapters get stubs that fail the test if they are ever reached, which turns
 "refused before the wire" from a reading of the source into a fact.
+
+### 13.1 The adapter, and the run that proved it (`fb31a7f`, round 26)
+
+The orchestrator is a consumer of the service now. `SymphonyElixir.Tracker.TicketService`
+(`elixir/lib/symphony_elixir/tracker/ticket_service.ex`, **457 lines**) is registered under the kind
+`ticket_service` (`elixir/lib/symphony_elixir/tracker.ex:21`), and its address lives in the tracker's
+free-form `provider` map under `url` (`:15-31`): there is no schema field for it and no default, and
+`validate_config/1` fails closed with `:missing_ticket_service_url` rather than polling a port this
+adapter guessed at (`:173-182`). It is a **reader** -- it advertises no agent tools, deliberately
+(`:10-11`), so writing tickets through a tool stays a separate decision.
+
+It makes two calls (`:35-43`): `GET {url}/tickets?state=<name>`, one repeated `state` parameter per
+declared state in the declared order, and `GET {url}/tickets?ids=<id>,<id>`. A state name the service
+does not know answers `[]` -- the contract's rule, not a refusal invented here. A requested id the
+service cannot read is `{:error, {:ticket_service_ticket_not_found, value}}` rather than the records
+that did exist (`:42-43`), so a short list can never look like "that is all there is". The
+empty-request rule holds at this boundary too, ahead of resolving the URL (`:116`, `:146`).
+`dispatchable` is the **stricter** of two answers (`:52-56`, `:392-400`): the service's stored column
+is a veto a person can set, and the blocker rule is derived here from the live blockers and the
+workflow's first active state exactly as the file adapter derives it -- so a stored `true` cannot lift
+a blocker, and a stored `false` cannot be overridden by an adapter that found none. Labels are **not**
+normalized here (`:340-344`), because the store keeps the name it was given and `Issue.routable?/2`
+normalizes both sides of every comparison anyway. `GET /states` and `GET /health` are deliberately not
+called (`:45-48`), and `secret_environment_names/1` answers `[]` as a value (`:58-62`).
+
+**The contract refused the new kind three times, which is the suite doing its job.** Registering it
+broke `tracker_contract_test.exs` in three independent places, and each was answered by hand after
+reading the failure text rather than by widening an assertion: the kind list the suite pins
+(`@registered_kinds`), the advertised-tool map (`@advertised_tools`, `[]` for this kind, which is a
+value), and the per-kind stub function the tool assertion calls (`tool_opts/1` -- `[]`, because there
+is nothing to stub). With those added the contract passes **25/25** -- measured 2026-10-01,
+`mix test test/symphony_elixir/tracker_contract_test.exs` in `elixir/`: `25 passed`, 1.0s. Its seven
+rule groups run against all eight registered kinds (`asana file github gitlab jira linear memory
+ticket_service`), and `registered_kinds/0 == @registered_kinds` is itself asserted, so a ninth kind
+cannot slip in unacknowledged. The adapter's own file,
+`elixir/test/symphony_elixir/ticket_service_tracker_test.exs` (404 lines), reports **30 passed**,
+measured the same way.
+
+**And a real deployment ran the whole chain green.** `~/code/symphony-projects/svcprobe.md` (a project
+file created for this round, untracked in the registry, created 01:30:25) declares
+`tracker.kind: ticket_service` against `http://127.0.0.1:4020` (`:21-23`), its own workspace root
+(`~/code/symphony-svcprobe-workspaces`) and the janitor **disabled** (`:65`); its instance was started
+on port **4021** (`--port 4021` on the command line; measured 2026-10-01: `Get-NetTCPConnection
+-State Listen -LocalPort 4021` answers `127.0.0.1`, PID 2688, started 01:32:16). A ticket created **in
+the service** (SYM-1, `ready`/`unstarted`, created 01:32:01+08:00) was picked up and dispatched at
+01:32:18, and finished like this:
+
+- the agent's own commit `e8cf28f` (`docs(readme): append the svc-probe-1 marker for SYM-1`) on its
+  own branch `symphony/SYM-1`, pushed by the agent -- the ticket's comment carries `git push` exit 0
+  and the raw `[new branch]` output;
+- **PR #3 opened by the agent itself**, checked against GitHub:
+  `gh pr view 3 --repo lanhaolong20161111/symphony-e2e-beta` answers `state OPEN`,
+  `headRefName symphony/SYM-1`,
+  `headRefOid e8cf28ff3ac8b8e4e0a41fd8b546552546064b15`, base `master`, author
+  `app/symphony-agent-2027`;
+- the ticket moved to **`in-review` in the service** -- its state object is
+  `{"name":"in-review","type":"started","display_name":"in-review"}` -- with the activity trail
+  recorded as from-to pairs (`GET /tickets/1/activity`): `state_type` `unstarted`->`started`,
+  `state_name` `ready`->`in-progress`, `state_display_name` `ready`->`in-progress`, then
+  `state_name`/`state_display_name` `in-progress`->`in-review`. There is no second `state_type` entry
+  because the type did not change, which is what a from-to pair means;
+- the agent rewrote the ticket's **description** to carry the check it ran and the answer it got (the
+  text says the command was run "with Git's grep (D:\Program Files\Git\usr\bin\grep.exe) and returned
+  exit 0"), and that rewrite is its own from-to entry in the trail;
+- and one comment, authored `codex`, reporting the commit hash, the push result, the pull-request URL,
+  the gate result and -- worth keeping -- that `mix lint` / `mix test` / `mix pr_body.check` could not
+  run there because the target repository is a README-only repository with no Elixir project.
+
+Nothing in that run touched the file tracker or the mirror: the project's tracker kind is the service,
+the janitor is off, and the file the prompt named (`~/code/symphony-work/SYM-1.md`, a *file-tracker*
+ticket that happens to share the identifier) was left alone, as the agent's own comment says. That
+collision is real and worth knowing before it bites: two deployments can each have a `SYM-1`, and the
+prompt a run receives still names a file path that a service-backed tracker never reads.
+
+**The gate was exercised in production for the first time in this run, and the honest shape of that is
+narrower than "the tool was used".** The workflow declares `gate.command:
+grep -q svc-probe-1 README.md` (`svcprobe.md:150-155`); the agent found it by reading the workflow, and
+ran the command **itself**, in its sandbox, with Git's own grep -- which is what the ticket says. The
+`symphony_gate` tool was **not** advertised to it: this project's tracker is the service adapter, whose
+tool list is empty by design, and the gate tool is composed only by the file adapter
+(`tracker/file.ex:171`). Measured: `symphony_gate` appears nowhere in the run's Codex rollout
+(`~/.codex/sessions/2026/10/01/rollout-2026-10-01T01-35-03-01a0f362-...jsonl`, whose only call items
+are `exec_command` and `write_stdin`), nor anywhere in the 88 rollouts under `~/.codex/sessions`. So
+the capability is built and tested (§14) and the declaration is real, but on a service-backed project
+the agent gets **no tools at all** -- not the gate, not `ticket_comment`, not `symphony_publish` --
+and it finished the run by writing to the service over HTTP itself. That is an open gap, not a feature
+(§18).
 
 ## 14. The gate, run host-side, where `mix` works
 
@@ -791,17 +891,26 @@ is editing; where there is no session (the MCP stdio server, the HTTP endpoint) 
 derived from the ticket the call names, through `Workspace.workspace_key/1`
 (`gate_tool.ex:210-243`) -- either way a path the host resolved, never one an argument named.
 
-**Measured state, which is not the same thing as "in use".** No workflow in the registry declares a
-`gate:` block (searched 2026-10-01 over `~/code/symphony-projects/*.md`), so on this deployment the
-tool is advertised to nobody and no agent has run a gate through it. And the instance on 4001 was
-started 2026-09-30 23:16:26 -- before `cf4a7da` -- so the running service does not serve the tool
-either; it needs the same rebuild-and-restart every batch has needed. What is measured is the code and
-its tests: `mix lint` exits 0 with `found no issues` (164 source files), the three test files this
-batch added report **82 passed** when run together -- 18 in `gate_tool_test.exs`, 55 in
-`land_test.exs`, 9 in `control_ticket_land_test.exs` -- and the suite as a whole exits 0 with **949
-passed, 6 skipped, 23 excluded** (208.4s; the caveat on that number is in §6 item 6). Those readings
-were taken with HEAD at `979a319`; HEAD moved to `5bec515` while these documents were being written,
-and the deploy batch's own commits are not measured here.
+**Measured state, corrected in round 26: declared and exercised, still advertised to nobody.** Two
+registry workflows declare a gate now -- `symphony.md`, whose command is
+`cd elixir && mix lint && mix test` (an uncommitted working-tree change; `git diff` in the registry
+shows the block being added), and `svcprobe.md`, whose command is `grep -q svc-probe-1 README.md`
+(`:150-155`) -- so the earlier "no workflow declares one" reading is retired. The declaration was used
+in the `svcprobe` run, where the agent read it out of the workflow and ran it itself; the **tool** was
+not advertised to that run, because the project's tracker kind is the service adapter and a
+service-backed tracker advertises no tools at all (§13.1, §18). The fork's own 4001 instance *does*
+serve the tool: it was rebuilt and restarted from the same escript at 2026-10-01 01:32:16 (the
+process's start time and the escript's own mtime are the same minute), so a project that declares a
+gate **and** uses the file tracker would be offered it.
+
+What is measured of the code is otherwise unchanged: `mix lint` exits 0 with `found no issues` --
+**169** source files at `11af6ed` on 2026-10-01, against 164 at `979a319` -- and the three test files
+of round 25 still report **82 passed** together (18 + 55 + 9). The whole-suite figure for HEAD is not
+claimed here: `mix test` was attempted at `11af6ed` and failed **before running a test**, in
+`mix deps.compile` (`** (File.Error) could not remove files and directories recursively from
+"...\_build\test\lib\lazy_html": file already exists`), three attempts, while another Mix process was
+working in the same tree. The counted runs of that day are the two files this round's adapter work
+touched (§13.1) and the service's own suite (§13).
 
 ## 15. Landing a ticket from its own page
 
@@ -962,20 +1071,24 @@ None of these is finished, and none should be read as though it were.
    running instance too, not a new gap.
 4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
    carry the in-process MFA, and the fix path is recorded there.
-5. **Nothing in this fork talks to the ticket service yet, and the slices that would are paused.** The
-   service is running on 4020 and its store, HTTP surface and list rows are committed in
-   `symphony-tickets` (§13), but the adapter that would speak to it is slice 3 of
-   `docs/ticket-service-spec.md` and it is not written. The batch calls the bundle that would actually
-   replace the file tracker **slice 2c**; the specification's own numbering is 3 (this fork's thin
-   adapter), 4 (the console reading through it) and 6 (retiring the mirror and the janitor's second
-   parser) (`docs/ticket-service-spec.md:158-165`). It is paused, and that is the honest state of the
-   plan: the last three batches went into making the pipeline that exists usable from a phone.
+5. **The fork reads from the service, but the console does not, and nothing has been retired.** The
+   adapter is done and proved live (§13.1), so slice 3 of `docs/ticket-service-spec.md` is delivered.
+   What is not: slice 4 (the console's pages still read whichever tracker the project's workflow
+   declares, and every registry workflow still declares the file tracker), slice 5 (there is no
+   markdown export -- the string `export` appears in no module or test in `symphony-tickets`), and
+   slice 6 (the file tracker, the GitHub mirror and the janitor's second parser of the ticket file
+   format are all still in the tree and in use). Slice 6 needs slice 4 first, because the pages have to
+   read the service before the files they read can go away
+   (`docs/ticket-service-spec.md:158-165`).
 6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
    credential replaced them and no workflow in the registry names them any more, so revocation is the
    operator's call rather than a prerequisite for anything.
-7. **No workflow declares a gate yet** (§14). `gate.command` appears in no registry workflow, so
-   `cf4a7da`'s tool is advertised to nobody and no agent has verified its own work through it. The
-   capability is built and tested; turning it on is one setting per project.
+7. **The gate is declared in two workflows, and the tool is still advertised to nobody.**
+   `symphony.md` (uncommitted) and `svcprobe.md` both declare `gate.command` (§14); in the `svcprobe`
+   run the agent ran the declared command itself rather than through the tool, because that project's
+   tracker advertises no tools (§13.1, item 10). So "capability built and tested" now has a second
+   half: the declaration is used, and the tool still has no user. Both declarations are also still
+   uncommitted or untracked in the registry.
 8. **Nothing here survives a reboot** (§13). The hub and the ticket service are both started by hand,
    and no scheduled task or `Run` entry names either. The loop dies with the machine and comes back
    only when a person starts two processes.
@@ -983,6 +1096,11 @@ None of these is finished, and none should be read as though it were.
    (§15). Which tickets may merge unattended -- which states, which labels, which projects, what
    happens when the verdict is not `ok` -- is a decision nobody has made, and the sweep should not
    exist before the answer does.
+10. **A service-backed project advertises the agent no tools at all** (§13.1). The new adapter is a
+   reader by design, so a run against it has no `symphony_gate`, no `ticket_comment` and no
+   `symphony_publish`: the `svcprobe` run finished by writing to the service over HTTP itself, and ran
+   its declared gate in its own sandbox. Which tools a service-backed tracker should advertise -- and
+   whether the gate tool belongs to the tracker or to the session -- is a decision nobody has made.
 
 And the one item the upstream audit found that this batch did not touch: the `paused` early return in
 `orchestrator.ex` (§6).
@@ -1346,3 +1464,68 @@ rounds, which are counted separately.
   Next: the deploy action's own round; then a policy for the landing sweep, so "merge unattended" is a
   decision rather than an absence of one; then `gate.command` in a registry workflow, so the gate tool
   stops being untested-in-use; and then the paused slice 3 of the ticket service.
+- **Round 26 (2026-10-01)**: the orchestrator became a consumer of the ticket service, and a real
+  deployment proved the chain end to end.
+  - `fb31a7f` added `SymphonyElixir.Tracker.TicketService`
+    (`elixir/lib/symphony_elixir/tracker/ticket_service.ex`, **457 lines**), registered under the kind
+    `ticket_service` (`tracker.ex:21`), reading the service's list and by-id calls with the address in
+    the tracker's free-form `provider.url` and no default (`:15-31`, `:173-182`). It is a
+    **reader** -- no agent tools -- and `dispatchable` is the stricter of the service's stored column
+    and the file adapter's own blocker rule (`:52-56`, `:392-400`). Its test file,
+    `elixir/test/symphony_elixir/ticket_service_tracker_test.exs` (404 lines), reports **30 passed**.
+  - Registering the kind broke the executable contract in **three independent places**, and all three
+    were acknowledged by hand after reading the failure text instead of widening an assertion: the
+    pinned kind list, the advertised-tool map, and the per-kind stub function. The contract then passed
+    **25/25** (measured 2026-10-01: `25 passed`, 1.0s) -- seven rule groups over all eight registered
+    kinds, with `registered_kinds/0 == @registered_kinds` asserted so a ninth cannot slip in.
+  - A throwaway project, `~/code/symphony-projects/svcprobe.md`, ran on port **4021** with
+    `tracker.kind: ticket_service` against 4020, its own workspace root and the janitor off. A ticket
+    created **in the service** (SYM-1, `ready`) was dispatched at 01:32:18 and finished with the
+    agent's own commit **`e8cf28f`**, the agent's own **PR #3** (`symphony/SYM-1`; verified on GitHub:
+    `state OPEN`, head `e8cf28ff3ac8b8e4e0a41fd8b546552546064b15`, author `app/symphony-agent-2027`),
+    and the ticket moved to `in-review` **in the service** with a from-to activity trail (`state_type`
+    `unstarted`->`started`, `state_name` and `state_display_name` `ready`->`in-progress`, then
+    `in-progress`->`in-review`), a description the agent rewrote to carry the gate command and its
+    exit status, and one comment authored `codex`. Nothing in the run touched the file tracker or the
+    mirror -- and the *file-tracker* ticket that happens to share the identifier `SYM-1` was left
+    alone, which is a collision worth knowing about before it bites (§13.1).
+  - The gate **declaration** ran in production for the first time there, and the host-side **tool** did
+    not: the project's tracker advertises no tools, so `symphony_gate` was never offered, and the agent
+    ran the declared `grep -q svc-probe-1 README.md` itself with Git's grep -- `symphony_gate` appears
+    0 times in that run's rollout, and in all 88 rollouts under `~/.codex/sessions`. `symphony.md`
+    itself now declares `cd elixir && mix lint && mix test` as its gate, as an uncommitted change.
+    Built, tested and declared; what is missing is a project whose tracker can offer it
+    (§18 items 7 and 10).
+  - **Three mistakes of this round, recorded because this log is where the port's errors live.**
+    (a) A failed ticket creation was reported by the round's own script as a success, because the
+    script parsed the service's error body happily. The service's failure envelope is
+    `{"error": {"code": ..., "message": ...}}` with a status that says what happened -- a duplicate
+    identifier is **409** `duplicate_identifier`, an unknown state **400**
+    (`symphony-tickets`, `lib/symphony_tickets_web/store_error.ex:18-29`) -- so a script that wants to
+    believe a 201 must put the body through a file and check for the `error` key first.
+    (b) The adapter was committed without rebuilding `bin/symphony`, so the first start failed with
+    `unsupported_tracker_kind`: the running escript is a build artifact, not the source. Measured: the
+    commit is 01:29:44, the failed attempt's logs directory was created 01:30:27, the escript was
+    rebuilt at **01:32:16** (its own mtime), and the surviving log's first line is 01:32:18. The
+    failure itself left no log line here, so it is recorded as that account plus those timestamps.
+    (c) The new project's workflow was generated from `symphony.md` and carried its
+    `cd elixir && mix deps.get` hook line, which is right for the fork's own repository and fatal for a
+    README-only target. The log shows the trap firing **four times** --
+    `Workspace hook failed hook=after_create ... status=1 output="Cloning into '.'...\n/usr/bin/bash:
+    line 15: cd: elixir: No such file or directory\n"` at 01:32:20, 01:32:32, 01:32:55 and 01:33:37,
+    each followed by `{:workspace_hook_failed, "after_create", 1, ...}` and a retry -- before the line
+    was removed; `svcprobe.md`'s `after_create` still ends with the comment that introduced it and no
+    command after it (`:94-95`). The earlier end-to-end round had already paid for this trap, which is
+    why it is a mistake rather than a discovery.
+  - The gate, measured with HEAD at `11af6ed`: `mix lint` exits 0 with `found no issues` (**169**
+    source files; the earlier 164 was `979a319`), the contract file **25 passed** and the adapter's own
+    file **30 passed** on their own, and the service's suite **90 passed** (9s, `mix test` in
+    `symphony-tickets` at `87b2efe`). The whole-suite figure is **not** claimed for this HEAD:
+    `mix test` failed before running a test, three times, in `mix deps.compile`
+    (`** (File.Error) could not remove ... _build/test/lib/lazy_html: file already exists`) with
+    another Mix process working in the same tree.
+  Next: a decision about which tools a service-backed project is advertised, so "the agent verifies its
+  own work" reaches the deployment that currently has no tools at all; then slice 4 of
+  `docs/ticket-service-spec.md` -- the console reading through the service -- which is what unblocks
+  slice 6; then a policy for the landing sweep; and then the two registry gate declarations, which are
+  still uncommitted.
