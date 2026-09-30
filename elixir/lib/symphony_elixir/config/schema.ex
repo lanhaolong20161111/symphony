@@ -121,6 +121,52 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  # How a project's tickets are *worked* and how their work is *published*. Two settings rather than
+  # one menu, because the four combinations are not a sequence: "one clone per ticket" and "the host
+  # opens a pull request" are independent choices, and the three shapes this machine runs are
+  # per_ticket+pull_request (one clone and one `symphony/<ticket>` branch per ticket),
+  # per_ticket+direct (still one clone per ticket, but the work is pushed to the project's own
+  # branch) and shared+direct (one tree for the whole project, so a ticket branch would be
+  # meaningless).
+  defmodule Project do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @isolations ["per_ticket", "shared"]
+    @publishes ["pull_request", "direct"]
+
+    @primary_key false
+    embedded_schema do
+      # `per_ticket` is the default because it is what every project on this machine already does and
+      # what makes two tickets in one repository safe: each gets its own clone under
+      # `workspace.root`, so neither can overwrite the other's files, and `shared` is the exception
+      # that has to be asked for.
+      field(:isolation, :string, default: "per_ticket")
+
+      # `pull_request` is the default because it is the safer half: the work waits on a branch until
+      # somebody looks at it, and nothing lands on the project's own branch without review. `direct`
+      # writes to that branch, so it stays something a project opts into.
+      field(:publish, :string, default: "pull_request")
+    end
+
+    @doc false
+    @spec isolations() :: [String.t()]
+    def isolations, do: @isolations
+
+    @doc false
+    @spec publishes() :: [String.t()]
+    def publishes, do: @publishes
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:isolation, :publish], empty_values: [])
+      |> validate_inclusion(:isolation, @isolations)
+      |> validate_inclusion(:publish, @publishes)
+    end
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -451,6 +497,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:project, Project, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -548,6 +595,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
+    |> cast_embed(:project, with: &Project.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
@@ -557,6 +605,32 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:janitor, with: &Janitor.changeset/2)
+    |> validate_shared_isolation()
+  end
+
+  # The one rule about *two* sections at once, so it cannot live in either section's own changeset:
+  # `shared` means the project has one working tree, and `agent.max_concurrent_agents` is how many
+  # runs may edit at the same time. More than one, and two agents overwrite each other's files
+  # mid-edit -- a lost edit nobody sees, because both runs report success.
+  #
+  # Refused here rather than "documented in the workflow", because `max_concurrent_agents` defaults to
+  # 10: a file that says `shared` and nothing else is exactly the dangerous case, and a workflow that
+  # does not load is one a person finds out about immediately.
+  defp validate_shared_isolation(changeset) do
+    project = get_field(changeset, :project)
+    agent = get_field(changeset, :agent)
+
+    if project != nil and project.isolation == "shared" and agent != nil and agent.max_concurrent_agents > 1 do
+      add_error(
+        changeset,
+        :project,
+        "isolation: shared needs agent.max_concurrent_agents to be 1, got %{limit} -- " <>
+          "a shared working tree is one checkout for the whole project, so two runs at once would overwrite each other's edits",
+        limit: agent.max_concurrent_agents
+      )
+    else
+      changeset
+    end
   end
 
   defp finalize_settings(settings) do

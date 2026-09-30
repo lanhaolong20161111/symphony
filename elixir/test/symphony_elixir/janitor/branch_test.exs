@@ -65,6 +65,26 @@ defmodule SymphonyElixir.Janitor.BranchTest do
     end
   end
 
+  describe "ticket_branch/3" do
+    test "direct is the project's own branch, whatever the ticket names" do
+      # `direct` pushes to the project's own branch, so a `branch_name` left over from a
+      # `pull_request` round names a branch this mode never creates and must not become the name a
+      # reader follows.
+      text = "---\nid: SYM-26\nbranch_name: feat/keep-it\n---\n\nbody\n"
+
+      assert Janitor.ticket_branch(text, "SYM-26", "direct") == "main"
+      assert Janitor.ticket_branch("# notes\n", "SYM-26", "direct") == "main"
+    end
+
+    test "every other mode is the branch ticket_branch/2 already picked" do
+      text = "---\nid: SYM-26\nbranch_name: feat/keep-it\n---\n\nbody\n"
+
+      assert Janitor.ticket_branch(text, "SYM-26", "pull_request") == "feat/keep-it"
+      assert Janitor.ticket_branch(text, "SYM-26", "pull_request") == Janitor.ticket_branch(text, "SYM-26")
+      assert Janitor.ticket_branch("# notes\n", "SYM-26", "pull_request") == "symphony/SYM-26"
+    end
+  end
+
   describe "with_branch_name/2" do
     test "adds the key, keeping the front matter the tracker matches on" do
       text = "---\nid: SYM-26\nstate: in-review\n---\n\nbody\n"

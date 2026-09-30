@@ -12,6 +12,20 @@ defmodule SymphonyElixir.Janitor do
     5. publish  a ticket in `in-review` whose workspace is dirty (or whose branch has no PR) gets
                 committed, pushed and turned into a PR, with the PR link commented back on the issue
 
+  ## Two publish modes
+
+  `project.publish` decides what step 5 does with the commit:
+
+    * `pull_request` (the default) — the host creates `symphony/<ticket>` (or the ticket's own
+      `branch_name`), pushes it and opens a pull request, then records the PR link on the ticket.
+    * `direct` — the host commits on the **project's own branch** and pushes it, and opens no pull
+      request at all. The ticket records that branch and carries no PR link. Nothing `gh`-shaped runs
+      on this path, so a deployment that never opened a pull request does not need `gh` to publish.
+
+  `project.isolation` matters to step 5 as well: the sweep maps a workspace *directory* back to a
+  ticket, which only works when the directory is named after one. Under `shared` it skips, saying so
+  — see `publish_sweep/1`.
+
   ## Why the host does this and not the agent
 
   Two measured facts, neither of which is a configuration mistake:
@@ -46,6 +60,13 @@ defmodule SymphonyElixir.Janitor do
   @command_timeout 120_000
   @terminal_states ~w(done cancelled)
 
+  # Where `publish: direct` commits and pushes. A literal, and the same name `create_pull_request/5`
+  # already passes as `--base`: the project's own branch is the one the pull request path treats as
+  # the trunk, and discovering it per-round (`origin/HEAD`) would let a workspace that an agent had
+  # already branched decide where "direct" pushes. A project whose trunk is not `main` surfaces as a
+  # failed push in the log rather than as a silent push to a branch nobody reads.
+  @direct_branch "main"
+
   # A ticket identifier is also a path segment under two configured roots, and the caller of
   # `publish_now/2` is a language model. Anything that could climb out of those roots (a separator, a
   # leading dot, `..`, an absolute path) is refused rather than joined.
@@ -64,24 +85,33 @@ defmodule SymphonyElixir.Janitor do
           repo: String.t() | nil,
           tickets_repo: String.t() | nil,
           state_file: String.t(),
-          interval_seconds: pos_integer()
+          interval_seconds: pos_integer(),
+          isolation: String.t(),
+          publish: String.t()
         }
 
   @doc """
   Builds the configuration, filling in this machine's defaults.
 
   Options: `:tickets`, `:workspace_root`, `:repo`, `:tickets_repo`, `:state_file`,
-  `:interval_seconds`.
+  `:interval_seconds`, `:isolation`, `:publish`.
 
   The paths have defaults because they are this machine's own directories; **the two repositories do
   not**, because one is a name somebody else owns. A deployment that does not declare `:repo` gets
   `nil`, and every path that needs `owner/name` skips (or, for a caller that asked for one thing,
   fails closed) rather than reaching for a repository nobody named -- see `run_once/1`,
   `publish_sweep/1` and `publish_now/2`.
+
+  `:isolation` and `:publish` are the two `project`-level settings, and they are read from the running
+  workflow rather than from the janitor's own block, because they are choices about the *project*:
+  the janitor's options carry only `janitor.*` keys, and every entry point (the supervised server,
+  the agent tool, the mix task, the sweep) builds its configuration through here, so resolving them
+  in this one place is what keeps those callers from disagreeing about the mode.
   """
   @spec config(keyword()) :: config()
   def config(opts \\ []) do
     home = System.user_home!()
+    project = project_settings()
 
     %{
       tickets: Keyword.get(opts, :tickets, Path.join([home, "code", "symphony-tickets"])),
@@ -93,9 +123,31 @@ defmodule SymphonyElixir.Janitor do
       repo: Keyword.get(opts, :repo),
       tickets_repo: Keyword.get(opts, :tickets_repo),
       state_file: Keyword.get(opts, :state_file, Path.join([home, "code", "symphony-janitor-state.json"])),
-      interval_seconds: Keyword.get(opts, :interval_seconds, 30)
+      interval_seconds: Keyword.get(opts, :interval_seconds, 30),
+      isolation: Keyword.get(opts, :isolation) || project_isolation(project),
+      publish: Keyword.get(opts, :publish) || project_publish(project)
     }
   end
+
+  # Rescued rather than required: a unit test or a start-up ordering race may have no workflow
+  # loaded, and both defaults are the safe ones -- `per_ticket` is what this machine already does and
+  # `pull_request` never writes to a project's own branch.
+  defp project_settings do
+    Config.settings!().project
+  rescue
+    _error -> %{}
+  end
+
+  defp project_isolation(project), do: project_field(project, :isolation, ["per_ticket", "shared"], "per_ticket")
+  defp project_publish(project), do: project_field(project, :publish, ["pull_request", "direct"], "pull_request")
+
+  defp project_field(project, key, allowed, default) do
+    value = Map.get(project, key)
+    if value in allowed, do: value, else: default
+  end
+
+  defp direct?(cfg), do: cfg.publish == "direct"
+  defp shared?(cfg), do: cfg.isolation == "shared"
 
   @doc """
   The janitor's options from a workflow's `janitor` settings.
@@ -567,20 +619,36 @@ defmodule SymphonyElixir.Janitor do
   # Criterion: the ticket is `in-review` AND (the workspace is dirty OR the branch has no PR yet).
   #
   # The second half is not redundant: when the push succeeds and `gh pr create` fails, the workspace
-  # is already clean, so a dirty-only trigger would never retry.
+  # is already clean, so a dirty-only trigger would never retry. It is meaningless under
+  # `publish: direct`, where there is no pull request to look for -- there the criterion is the dirty
+  # tree alone.
   #
   # The sweep decides *whether* to publish from `gh` (`has_pull_request?`), so with no repository
   # declared it is skipped whole rather than half-run: pushing a branch whose pull request can never
   # be opened is a new failure mode, and skipping is already what this function does when there is
-  # no workspace root to look in.
+  # no workspace root to look in. `direct` needs no repository, so that gate does not apply to it.
   defp publish_sweep(cfg) do
-    if repository?(cfg.repo) do
-      case File.ls(cfg.workspace_root) do
-        {:ok, entries} -> Enum.each(entries, &publish_ticket(&1, cfg))
-        {:error, reason} -> Logger.warning("janitor: no workspace root: #{inspect(reason)}")
-      end
-    else
-      Logger.warning("janitor: no issues repository declared (janitor.issues_repo); skipping the publish sweep")
+    cond do
+      # The sweep's input is a directory name (`publish_ticket/2` joins it onto the workspace root),
+      # and that is the whole mapping from a workspace back to a ticket. Under `shared` there is one
+      # tree for the project, so the entries are the checkout's own files and no ticket id can be
+      # recovered -- guessed names would be wrong rather than merely missing. Skipped, and named, so
+      # a `shared` project publishes when a caller names the ticket (`symphony_publish` /
+      # `publish_now/2`) instead of never.
+      shared?(cfg) ->
+        Logger.warning(
+          "janitor: isolation=shared means one tree for the whole project, so a workspace directory cannot be " <>
+            "mapped back to a ticket; skipping the publish sweep (publish a ticket by name instead)"
+        )
+
+      repository?(cfg.repo) or direct?(cfg) ->
+        case File.ls(cfg.workspace_root) do
+          {:ok, entries} -> Enum.each(entries, &publish_ticket(&1, cfg))
+          {:error, reason} -> Logger.warning("janitor: no workspace root: #{inspect(reason)}")
+        end
+
+      true ->
+        Logger.warning("janitor: no issues repository declared (janitor.issues_repo); skipping the publish sweep")
     end
   end
 
@@ -595,7 +663,7 @@ defmodule SymphonyElixir.Janitor do
          true <- File.exists?(ticket_path),
          text = File.read!(ticket_path),
          true <- text =~ ~r/^state:\s*in-review\s*$/m do
-      branch = ticket_branch(text, id)
+      branch = ticket_branch(text, id, cfg.publish)
 
       # Always: the ticket records its own branch and pull request, whether or not this sweep has
       # anything left to push. An agent that pushed and opened the PR itself leaves a clean tree and a
@@ -603,8 +671,7 @@ defmodule SymphonyElixir.Janitor do
       # neither field. Measured on SYM-53.
       record_publish_metadata(ticket_path, branch, cfg)
 
-      if git(workspace, ["status", "--porcelain"]) != {:ok, "", 0} or
-           not has_pull_request?(branch, cfg) do
+      if needs_publish?(workspace, branch, cfg) do
         publish(id, workspace, ticket_path, branch, cfg)
       else
         Logger.debug("janitor: #{id} nothing left to publish (workspace=#{workspace})")
@@ -621,6 +688,14 @@ defmodule SymphonyElixir.Janitor do
         :ok
     end
   end
+
+  defp needs_publish?(workspace, branch, cfg) do
+    # `direct` has no pull request to be missing, so asking `gh` about one would make every clean
+    # round look like "the branch has no PR yet" and publish forever.
+    dirty?(workspace) or (not direct?(cfg) and not has_pull_request?(branch, cfg))
+  end
+
+  defp dirty?(workspace), do: git(workspace, ["status", "--porcelain"]) != {:ok, "", 0}
 
   @doc """
   Adds a comment to a ticket: the file tracker's counterpart of Linear's `commentCreate`.
@@ -653,15 +728,19 @@ defmodule SymphonyElixir.Janitor do
   Publishes one ticket now: commits its workspace, pushes its branch and opens the pull request.
   Returns what happened, so a caller can report the branch and the pull-request URL.
 
+  Under `publish: direct` the same call commits and pushes the project's own branch and opens no pull
+  request (`pull_request: nil`); the ticket records that branch either way.
+
   `publish_sweep/1` decides *when* a ticket should be published; this is the same work without that
   decision, for a caller that has already made it -- the agent, through
   `SymphonyElixir.Janitor.AgentTool`. Both paths are idempotent, so they tolerate each other.
 
   Fails closed on anything it cannot identify: an `id` that is not a plain ticket name, a ticket file
   that does not exist, a workspace that is not a git work tree, or a deployment that declares no
-  `janitor.issues_repo` (`publish_sweep/1` skips its unattended round in that case, but a caller that
-  asked for this one ticket gets the reason instead of silence). Nothing is created or pushed in
-  those cases.
+  `janitor.issues_repo` while publishing pull requests (`publish_sweep/1` skips its unattended round
+  in that case, but a caller that asked for this one ticket gets the reason instead of silence).
+  Nothing is created or pushed in those cases. `direct` does not need that repository, because it
+  never calls `gh`.
   """
   @spec publish_now(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def publish_now(id, opts \\ []) when is_binary(id) do
@@ -671,15 +750,17 @@ defmodule SymphonyElixir.Janitor do
          ticket_path = Path.join(cfg.tickets, "#{id}.md"),
          :ok <- publishable(id, workspace, ticket_path),
          :ok <- repository_declared(cfg) do
-      branch = ticket_branch(File.read!(ticket_path), id)
+      branch = ticket_branch(File.read!(ticket_path), id, cfg.publish)
       {:ok, publish(id, workspace, ticket_path, branch, cfg)}
     end
   end
 
-  # Last, so a caller hears about what it actually passed first. Publishing is `gh` from end to end
-  # (`pr list`, `pr create`, `issue comment`), and "no repository" is not something to guess at.
+  # Last, so a caller hears about what it actually passed first. Publishing a pull request is `gh`
+  # from end to end (`pr list`, `pr create`, `issue comment`), and "no repository" is not something
+  # to guess at. The `direct` path touches only git, so it is not gated on a repository it never
+  # uses.
   defp repository_declared(cfg) do
-    if repository?(cfg.repo), do: :ok, else: {:error, :no_issues_repo}
+    if repository?(cfg.repo) or direct?(cfg), do: :ok, else: {:error, :no_issues_repo}
   end
 
   defp validate_id(id) do
@@ -698,12 +779,19 @@ defmodule SymphonyElixir.Janitor do
   # commits and pushes, and this sweep is often the first thing to notice that the pull request exists.
   # Both writes are idempotent, so a round that does publish records the same values twice and changes
   # nothing the second time.
+  #
+  # Under `direct` there is no pull request to look for, so `gh` is not asked -- the branch is still
+  # recorded, because that name is how a later reader finds the work.
   defp record_publish_metadata(ticket_path, branch, cfg) do
-    record_branch(ticket_path, branch)
+    record_branch(ticket_path, branch, direct?(cfg))
 
-    case existing_pull_request(branch, cfg) do
-      {:ok, url} -> record_pull_request(ticket_path, url)
-      _ -> :ok
+    if direct?(cfg) do
+      :ok
+    else
+      case existing_pull_request(branch, cfg) do
+        {:ok, url} -> record_pull_request(ticket_path, url)
+        _ -> :ok
+      end
     end
   end
 
@@ -720,6 +808,20 @@ defmodule SymphonyElixir.Janitor do
   """
   @spec ticket_branch(String.t(), String.t()) :: String.t()
   def ticket_branch(ticket_text, id) when is_binary(ticket_text) and is_binary(id) do
+    ticket_branch(ticket_text, id, "pull_request")
+  end
+
+  @doc """
+  The same, for a publish *mode*.
+
+  Under `direct` the answer is the project's own branch and nothing else: this mode pushes there, so
+  a ticket's own `branch_name` (which may be left over from a round that ran under `pull_request`)
+  must not become the name a reader follows. Every other mode keeps the ticket's own branch.
+  """
+  @spec ticket_branch(String.t(), String.t(), String.t()) :: String.t()
+  def ticket_branch(_ticket_text, _id, "direct"), do: @direct_branch
+
+  def ticket_branch(ticket_text, id, _publish) when is_binary(ticket_text) and is_binary(id) do
     case Ticket.split(ticket_text) do
       {:ok, %{front_matter: front_matter}} ->
         presence(Ticket.get(front_matter, "branch_name")) || "symphony/#{id}"
@@ -752,24 +854,45 @@ defmodule SymphonyElixir.Janitor do
 
   # Recorded on the ticket before the first push, so the name a person reads there is the name every
   # later round uses -- including when the push itself fails and the round retries.
-  defp record_branch(ticket_path, branch) do
+  #
+  # `overwrite?` is the `direct` case: that mode pushes the project's own branch, and a `branch_name`
+  # left over from an earlier `pull_request` round names a branch this mode never creates. The ticket
+  # is the record of where the work went, so it is corrected rather than preserved.
+  defp record_branch(ticket_path, branch, overwrite? \\ false) do
     text = File.read!(ticket_path)
-    updated = with_branch_name(text, branch)
+    updated = if overwrite?, do: force_branch_name(text, branch), else: with_branch_name(text, branch)
 
     if updated == text, do: :ok, else: File.write!(ticket_path, updated)
   end
 
+  # The same front-matter write as `with_branch_name/2`, without the "unless it already names one"
+  # rule -- see `record_branch/3`. A file with no front matter is left untouched, exactly as there.
+  defp force_branch_name(ticket_text, branch) do
+    case Ticket.split(ticket_text) do
+      {:ok, _front_matter_and_body} -> Ticket.set_key(ticket_text, "branch_name", branch)
+      :skip -> ticket_text
+    end
+  end
+
+  # The two publish paths. Same first steps in both -- the branch is recorded, then the tree is
+  # committed -- and they diverge on where the commit goes: onto the ticket's own branch with a pull
+  # request on top, or onto the project's own branch with no pull request at all.
   defp publish(id, workspace, ticket_path, branch, cfg) do
+    if direct?(cfg) do
+      publish_direct(id, workspace, ticket_path, branch)
+    else
+      publish_pull_request(id, workspace, ticket_path, branch, cfg)
+    end
+  end
+
+  defp publish_pull_request(id, workspace, ticket_path, branch, cfg) do
     record_branch(ticket_path, branch)
 
-    dirty? = git(workspace, ["status", "--porcelain"]) != {:ok, "", 0}
-
     committed =
-      if dirty? do
+      if dirty?(workspace) do
         git(workspace, ["checkout", "-B", branch])
         git(workspace, ["add", "-A"])
-        git(workspace, ["-c", "user.name=symphony", "-c", "user.email=symphony@local",
-                        "commit", "-q", "-m", "symphony/#{id}: automated change"])
+        commit(workspace, "symphony/#{id}: automated change")
         Logger.info("janitor: #{id} committed on #{branch}")
         true
       else
@@ -791,8 +914,116 @@ defmodule SymphonyElixir.Janitor do
       committed: committed,
       moved_to_branch: moved,
       pushed: pushed,
-      pull_request: publish_pull_request(id, workspace, ticket_path, branch, cfg)
+      pull_request: open_pull_request(id, workspace, ticket_path, branch, cfg)
     }
+  end
+
+  # `publish: direct` -- the project's own branch, and **no pull request**.
+  #
+  # It never runs a `gh` command, which is the whole difference: there is no branch to open a pull
+  # request from, so the repository a `pull_request` deployment must declare is not needed here
+  # either (`publish_now/2`).
+  #
+  # Two safety rules are unchanged, and they are not mode-dependent:
+  #
+  #   * **never force.** `checkout <branch>`, never `checkout -B <branch>` -- the reset form would
+  #     move the branch the project already had. If the workspace is not on that branch, nothing is
+  #     committed and nothing is pushed, and the log says which branch it did find.
+  #   * **never claim a push git did not confirm.** `git push origin <branch>`, with no `+` refspec
+  #     and no `--force`: a trunk that has moved on the remote is rejected by git, and the rejection
+  #     is logged rather than papered over. An auth failure lands on the same path, so it stops at
+  #     that round and says what git said.
+  defp publish_direct(id, workspace, ticket_path, branch) do
+    record_branch(ticket_path, branch, true)
+
+    case ensure_on_branch(workspace, branch) do
+      {:ok, moved?} ->
+        committed =
+          if dirty?(workspace) do
+            git(workspace, ["add", "-A"])
+            commit(workspace, "symphony/#{id}: automated change (direct)")
+            Logger.info("janitor: #{id} committed on #{branch} (direct, no pull request)")
+            true
+          else
+            false
+          end
+
+        %{
+          branch: branch,
+          committed: committed,
+          moved_to_branch: moved?,
+          pushed: push_direct(id, workspace, branch),
+          pull_request: nil
+        }
+
+      :error ->
+        %{branch: branch, committed: false, moved_to_branch: false, pushed: false, pull_request: nil}
+    end
+  end
+
+  defp commit(workspace, message) do
+    git(workspace, [
+      "-c",
+      "user.name=symphony",
+      "-c",
+      "user.email=symphony@local",
+      "commit",
+      "-q",
+      "-m",
+      message
+    ])
+  end
+
+  # On the project's own branch, or not at all: see `publish_direct/4`. `moved?` says whether this
+  # call switched branches (false when the workspace was already there), which is what the caller
+  # reports back.
+  defp ensure_on_branch(workspace, branch) do
+    case git(workspace, ["branch", "--show-current"]) do
+      {:ok, current, 0} ->
+        cond do
+          String.trim(current) == branch -> {:ok, false}
+          switch(workspace, branch) -> {:ok, true}
+          true -> :error
+        end
+
+      other ->
+        Logger.warning("janitor: cannot read the current branch in #{workspace}: #{inspect(other)}")
+        :error
+    end
+  end
+
+  defp switch(workspace, branch) do
+    case git(workspace, ["checkout", branch]) do
+      {:ok, _output, 0} ->
+        true
+
+      other ->
+        Logger.warning(
+          "janitor: cannot switch to #{branch} (direct publishing needs it): #{inspect(other)}; " <>
+            "nothing was committed or pushed"
+        )
+
+        false
+    end
+  end
+
+  # `main` always exists on the remote, so unlike `push_branch/3` this cannot skip on "the remote
+  # already has it": what it is pushing is the new commit. Pushing nothing is not a failure -- git
+  # exits 0 with `Everything up-to-date`.
+  defp push_direct(id, workspace, branch) do
+    case git(workspace, ["push", "-u", "origin", branch]) do
+      {:ok, _output, 0} ->
+        Logger.info("janitor: #{id} pushed #{branch} (direct)")
+        true
+
+      {:ok, output, status} ->
+        Logger.warning("janitor: #{id} direct push to #{branch} exited #{status}: #{String.trim(output)}")
+        false
+
+      {:error, reason} ->
+        Logger.warning("janitor: #{id} direct push to #{branch} failed: #{inspect(reason)}")
+        false
+    end
   end
 
   # `checkout -B` on a clean tree just moves the branch to the commit that is already there, which is
@@ -836,7 +1067,7 @@ defmodule SymphonyElixir.Janitor do
   # An existing pull request is the answer, not a reason to make a second one. A `gh` failure is not
   # treated as "no pull request": the sweep tries again next round, and inventing a branch because
   # GitHub could not be reached is how duplicates happen.
-  defp publish_pull_request(id, workspace, ticket_path, branch, cfg) do
+  defp open_pull_request(id, workspace, ticket_path, branch, cfg) do
     case existing_pull_request(branch, cfg) do
       {:ok, url} ->
         record_pull_request(ticket_path, url)
