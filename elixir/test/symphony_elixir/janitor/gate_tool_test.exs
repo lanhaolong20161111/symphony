@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.Janitor.GateToolTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Janitor.GateTool
+  alias SymphonyElixir.MCP.TrackerServer
   alias SymphonyElixir.Shell
   alias SymphonyElixir.Tracker.File, as: FileTracker
 
@@ -28,10 +30,13 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
 
   # The workflow a person would write, with or without the gate block. `workspace.root` goes into a
   # YAML double-quoted scalar, so it is written with forward slashes: a Windows backslash is an escape
-  # there, which is the trap `TestSupport` documents.
+  # there, which is the trap `TestSupport` documents. The tracker is `memory` by default because most
+  # cases here are about the gate itself; the transport case needs `file`, since that is the adapter
+  # whose tool list the gate joins.
   defp write_gate_workflow!(command, opts \\ []) do
     root = Keyword.get_lazy(opts, :workspace_root, fn -> tmp_dir("symphony-gate-workspaces") end)
     timeout = Keyword.get(opts, :timeout_ms, @declared_timeout)
+    kind = Keyword.get(opts, :tracker, "memory")
 
     gate =
       case command do
@@ -41,9 +46,7 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
 
     contents = """
     ---
-    tracker:
-      kind: memory
-    workspace:
+    #{tracker_block(kind)}workspace:
       root: "#{String.replace(root, "\\", "/")}"
     #{gate}---
     Gate tool test workflow.
@@ -53,6 +56,17 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
     assert :ok = WorkflowStore.force_reload()
 
     root
+  end
+
+  defp tracker_block("memory"), do: "tracker:\n  kind: memory\n"
+
+  defp tracker_block("file") do
+    # A directory that exists, because a file tracker without a readable path is a workflow that fails
+    # to validate -- and a failed reload keeps the previous configuration.
+    tickets = tmp_dir("symphony-gate-tickets")
+
+    "tracker:\n  kind: file\n  provider:\n    path: \"#{String.replace(tickets, "\\", "/")}\"\n" <>
+      "  active_states: [ready]\n  terminal_states: [done]\n"
   end
 
   defp recording_runner(result) do
@@ -412,6 +426,32 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
 
       assert decode_payload(unsupported)["error"]["supportedTools"] ==
                ["symphony_publish", "ticket_comment", "ticket_state"]
+    end
+
+    test "the transports advertise it, and the MCP path runs it" do
+      write_gate_workflow!(@gate_command, tracker: "file")
+
+      # The three transports all read `Tracker.bind_agent_tools/0`: the Codex app-server sends
+      # `binding.tool_specs` as `dynamicTools`, the ACP path's stdio MCP server answers `tools/list`
+      # with the same list, and the HTTP endpoint answers `no_agent_tools` when it is empty. Both ends
+      # of that list, plus one call through the MCP path, are what this pins.
+      expected = ["symphony_publish", "ticket_comment", "ticket_state", "symphony_gate"]
+
+      listed = TrackerServer.handle_line(~s({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+      assert spec_names(listed["result"]["tools"]) == expected
+
+      assert spec_names(DynamicTool.bind().tool_specs) == expected
+
+      # A call with no ticket is refused by the gate tool -- not by "unsupported tool" -- which is what
+      # says the MCP path reaches this module. It names no workspace, so nothing is run.
+      call =
+        TrackerServer.handle_line(
+          ~s({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "symphony_gate", "arguments": {}}})
+        )
+
+      assert [%{"type" => "text", "text" => text}] = call["result"]["content"]
+      assert text =~ "needs a ticket identifier"
+      refute text =~ "Unsupported dynamic tool"
     end
   end
 end

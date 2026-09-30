@@ -915,8 +915,8 @@ defmodule SymphonyElixir.Land do
   def land(pr_url, branch, opts \\ []) when is_binary(pr_url) and is_binary(branch) do
     with {:ok, pr} <- pr_view(pr_url, opts),
          :ok <- recorded_branch?(pr, branch),
-         {:ok, _landable} <- judge_once(pr, opts) do
-      merge(pr, opts)
+         {:ok, landable} <- judge_once(pr_url, pr, opts) do
+      merge(landable, opts)
     end
   end
 
@@ -927,14 +927,16 @@ defmodule SymphonyElixir.Land do
     end
   end
 
-  defp judge_once(pr, opts) do
+  # The second read asks the same question of the same pull request -- the caller's own reference, not
+  # the `url` field of the first answer, so nothing depends on a field that could be missing.
+  defp judge_once(target, pr, opts) do
     number = Map.get(pr, "number")
 
     with {:ok, check_runs} <- check_runs(Map.get(pr, "headRefOid"), opts),
          {:ok, issue} <- issue_comments(number, opts),
          {:ok, review} <- review_comments(number, opts),
          {:ok, reviews} <- reviews(number, opts),
-         {:ok, head} <- pr_view(Map.get(pr, "url"), opts) do
+         {:ok, head} <- pr_view(target, opts) do
       judge(pr, head, check_runs, %{issue: issue, review: review, reviews: reviews})
     end
   end

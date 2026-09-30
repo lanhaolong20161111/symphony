@@ -599,6 +599,99 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  # The deploy a project declares: one shell command, an optional working directory, and a deadline.
+  # Run **host-side** by `SymphonyElixir.Deploy`, and only because a person pressed the button on
+  # `/control` -- nothing schedules it, and nothing infers it.
+  #
+  # Shaped after `Gate` above, for the reason that block exists: the command and the deadline belong
+  # together, and "this project declares no deploy" has to stay a state a workflow can be in. A project
+  # that declares none simply has no deploy action; `command` is therefore neither required nor
+  # validated for blankness, and a blank one means exactly what an absent one means.
+  #
+  # `working_directory` is the addition `gate` does not need. A gate runs in the calling ticket's
+  # workspace, which the session already names; a deploy belongs to a *checkout* -- the project's own
+  # directory on this host -- and the orchestrator's own directory is almost never it. It must be
+  # **absolute**: a relative path would resolve against whatever directory the orchestrator happened to
+  # be started in, a fact no line of the file states and no reader can see. Leaving it out is a
+  # legitimate declaration and means "run where the orchestrator runs".
+  defmodule Deploy do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @default_timeout_ms 1_800_000
+
+    # Absolute on either host's shape: `/...` (POSIX), `C:\...` or `C:/...` (a drive), or `\\host\share`
+    # (a Windows UNC path). Deliberately a textual rule rather than `Path.type/1`, which answers for the
+    # host reading the file: a workflow written on one machine is read on the other here, and the value
+    # is handed to a shell that understands both.
+    @windows_absolute ~r/\A[A-Za-z]:[\\\/]/
+    @unc_absolute ~r/\A[\\\/]{2}[^\\\/]/
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string)
+      field(:working_directory, :string)
+      field(:timeout_ms, :integer, default: @default_timeout_ms)
+    end
+
+    @doc false
+    @spec default_timeout_ms() :: pos_integer()
+    def default_timeout_ms, do: @default_timeout_ms
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :working_directory, :timeout_ms], empty_values: [])
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_working_directory()
+    end
+
+    # `validate_change/3` fires only for a value a file actually wrote, so an omitted key and an
+    # explicit `null` both pass through untouched -- which is what keeps "no directory declared" and
+    # "a directory declared and wrong" different answers.
+    defp validate_working_directory(changeset) do
+      validate_change(changeset, :working_directory, fn :working_directory, directory ->
+        directory_errors(directory)
+      end)
+    end
+
+    defp directory_errors(directory) do
+      cond do
+        not is_binary(directory) ->
+          [working_directory: "must be a path"]
+
+        String.contains?(directory, <<0>>) ->
+          [working_directory: "must not contain a NUL byte"]
+
+        String.trim(directory) == "" ->
+          [working_directory: blank_directory_message()]
+
+        not absolute_directory?(directory) ->
+          [working_directory: relative_directory_message(directory)]
+
+        true ->
+          []
+      end
+    end
+
+    defp blank_directory_message do
+      "must not be blank: drop the key entirely to run in the orchestrator's own directory"
+    end
+
+    defp relative_directory_message(directory) do
+      "must be an absolute path, got " <>
+        inspect(directory) <>
+        " -- a relative one would be resolved against the orchestrator's own directory, which no line of the workflow states"
+    end
+
+    defp absolute_directory?(directory) do
+      String.starts_with?(directory, "/") or
+        Regex.match?(@windows_absolute, directory) or
+        Regex.match?(@unc_absolute, directory)
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -694,6 +787,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:commandcode, CommandCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:gate, Gate, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:deploy, Deploy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:janitor, Janitor, on_replace: :update, defaults_to_struct: true)
@@ -793,6 +887,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:commandcode, with: &CommandCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:gate, with: &Gate.changeset/2)
+    |> cast_embed(:deploy, with: &Deploy.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:janitor, with: &Janitor.changeset/2)

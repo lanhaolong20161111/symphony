@@ -212,11 +212,23 @@ defmodule SymphonyElixirWeb.Layouts do
 
   A failure from either action stays **in the row** (`@outcomes`), never on the page: one project
   that will not start must not take the table down with it.
+
+  ## Deploy
+
+  A row whose workflow declares a `deploy` block gets a `Deploy` button beside those two, on the same
+  terms: a project that declares none offers none and says so in the cell, and the outcome lives in
+  the row (`@deploy_outcomes`). It is a **heavier** action than either of them -- it runs a command on
+  the host -- so it is confirmed in the browser with the exact command and directory it will use,
+  neither of which this page chose: both come from the project's own workflow file, through
+  `SymphonyElixir.Deploy`, and there is no event that can supply either. The row then shows the exit
+  status and the bounded tail of what the command printed.
   """
   attr(:projects, :list, required: true)
   attr(:conflicts, :map, default: %{})
   attr(:controls, :map, default: %{})
   attr(:outcomes, :map, default: %{})
+  attr(:deploys, :map, default: %{})
+  attr(:deploy_outcomes, :map, default: %{})
 
   @spec project_overview(map()) :: Phoenix.LiveView.Rendered.t()
   def project_overview(assigns) do
@@ -240,7 +252,7 @@ defmodule SymphonyElixirWeb.Layouts do
         </p>
       <% else %>
         <div class="table-wrap">
-          <table class="data-table" style="min-width: 1250px;">
+          <table class="data-table" style="min-width: 1450px;">
             <thead>
               <tr>
                 <th>project</th>
@@ -252,6 +264,7 @@ defmodule SymphonyElixirWeb.Layouts do
                 <th>issues / tickets</th>
                 <th>pages</th>
                 <th>control</th>
+                <th>deploy</th>
               </tr>
             </thead>
             <tbody>
@@ -280,6 +293,13 @@ defmodule SymphonyElixirWeb.Layouts do
                     status={status(project)}
                     action={Map.get(@controls, project.name)}
                     outcome={Map.get(@outcomes, project.name)}
+                  />
+                </td>
+                <td>
+                  <.project_deploy
+                    project={project}
+                    deploy={Map.get(@deploys, project.name)}
+                    outcome={Map.get(@deploy_outcomes, project.name)}
                   />
                 </td>
               </tr>
@@ -440,6 +460,66 @@ defmodule SymphonyElixirWeb.Layouts do
     "Stop #{project.name}? This kills pid #{project[:hub][:pid]} and its whole process tree" <>
       carried(status) <> ". Work in flight is lost."
   end
+
+  # The deploy column: one action, and only for a project whose workflow declares one. `@deploy` is
+  # `nil` for every other row -- the declaration is read from the project's own file by
+  # `SymphonyElixir.Deploy`, so a row with no `deploy` block has no action to offer, which is a
+  # legitimate state and is said rather than left blank.
+  attr(:project, :map, required: true)
+  attr(:deploy, :map, default: nil)
+  attr(:outcome, :any, default: nil)
+
+  defp project_deploy(assigns) do
+    ~H"""
+    <div class="detail-stack">
+      <%= if @deploy do %>
+        <button
+          type="button"
+          class="subtle-button"
+          phx-click="deploy_project"
+          phx-value-project={@project.name}
+          data-confirm={deploy_confirm(@project, @deploy)}
+        >Deploy</button>
+        <span class="muted event-meta" title={@deploy.command}>{deploy_line(@deploy)}</span>
+      <% else %>
+        <span class="muted event-meta">no deploy declared</span>
+      <% end %>
+
+      <%= if @outcome do %>
+        <span class={outcome_class(@outcome)}>{deploy_outcome_text(@outcome)}</span>
+        <%= if deploy_output(@outcome) != "" do %>
+          <pre class="mono">{deploy_output(@outcome)}</pre>
+        <% end %>
+      <% end %>
+    </div>
+    """
+  end
+
+  # What a deploy would run, said before it runs. The command and the directory are the two things a
+  # person has to agree to, and neither is visible on the page -- the row shows the key, the confirm
+  # shows the command. Both come from the workflow file; this page has no way to change either.
+  defp deploy_confirm(project, deploy) do
+    "Deploy #{project.name}? This runs `#{deploy.command}` in #{deploy_directory(deploy)} " <>
+      "-- the command the project's workflow declares, which nothing on this page can change."
+  end
+
+  defp deploy_line(deploy) do
+    "deploy.command, in " <> deploy_directory(deploy) <> " (deadline #{deploy.timeout_ms} ms)"
+  end
+
+  defp deploy_directory(%{working_directory: directory}) when is_binary(directory), do: directory
+
+  defp deploy_directory(_deploy) do
+    "the orchestrator's own directory (the workflow declares no working_directory)"
+  end
+
+  # `outcome_text/1` joins the status to its message, but a deploy's message is a map field rather than
+  # the outcome itself -- so the map is read here and the same check/cross prefix is reused.
+  defp deploy_outcome_text({status, %{message: message}}), do: outcome_text({status, message})
+  defp deploy_outcome_text(other), do: outcome_text(other)
+
+  defp deploy_output({_status, %{output: output}}) when is_binary(output), do: output
+  defp deploy_output(_outcome), do: ""
 
   defp carried(%{counts: %{running: running, retrying: retrying, blocked: blocked}}) do
     " (#{running} running, #{retrying} retrying, #{blocked} blocked -- from the last probe)"

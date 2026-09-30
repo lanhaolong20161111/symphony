@@ -29,10 +29,21 @@ defmodule SymphonyElixirWeb.ControlLive do
   The event carries a **project name**, never a path: `InstanceRegistry.start_instance/2` looks the
   name up in the registry, which is what makes "start an arbitrary file" unrepresentable rather than
   merely discouraged.
+
+  ## Deploying a project
+
+  The projects table's `Deploy` button is the third of those events, and the one that runs a command:
+  it runs the **declared** `deploy.command` from that project's own workflow file, in the declared
+  `deploy.working_directory`, through `SymphonyElixir.Deploy`. This page cannot name a command: the
+  event carries the project name, the module looks it up in the registry, and the command comes out of
+  the file -- so a crafted `phx-value-command` reaches nothing. A project that declares no deploy gets
+  no button (the cell says so), and nothing here runs on mount, on render, or on a timer: a deploy
+  happens because a person pressed the button and confirmed it.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.Deploy
   alias SymphonyElixir.{InstanceRegistry, Orchestrator, Projects, ProjectStatus, RecorderClient, Settings, TaskComposer}
   alias SymphonyElixirWeb.{Endpoint, Layouts, ObservabilityPubSub, Presenter}
 
@@ -44,7 +55,8 @@ defmodule SymphonyElixirWeb.ControlLive do
      socket
      |> assign_panels()
      |> assign(:control_error, nil)
-     |> assign(:instance_outcomes, %{})}
+     |> assign(:instance_outcomes, %{})
+     |> assign(:deploy_outcomes, %{})}
   end
 
   @impl true
@@ -60,7 +72,12 @@ defmodule SymphonyElixirWeb.ControlLive do
 
   @impl true
   def handle_event("refresh", _params, socket) do
-    {:noreply, socket |> assign_panels() |> assign(:control_error, nil) |> assign(:instance_outcomes, %{})}
+    {:noreply,
+     socket
+     |> assign_panels()
+     |> assign(:control_error, nil)
+     |> assign(:instance_outcomes, %{})
+     |> assign(:deploy_outcomes, %{})}
   end
 
   @impl true
@@ -68,6 +85,9 @@ defmodule SymphonyElixirWeb.ControlLive do
 
   @impl true
   def handle_event("stop_instance", %{"project" => name}, socket), do: instance_action(socket, name, :stop)
+
+  @impl true
+  def handle_event("deploy_project", params, socket), do: deploy_action(socket, params)
 
   @impl true
   def render(assigns) do
@@ -239,6 +259,8 @@ defmodule SymphonyElixirWeb.ControlLive do
         conflicts={@queue_conflicts}
         controls={@instance_controls}
         outcomes={@instance_outcomes}
+        deploys={@deploys}
+        deploy_outcomes={@deploy_outcomes}
       />
 
       <%= if @site do %>
@@ -381,13 +403,33 @@ defmodule SymphonyElixirWeb.ControlLive do
     socket
     |> assign(:projects, projects)
     |> assign(:instance_controls, Map.new(projects, &{&1.name, InstanceRegistry.action(&1)}))
+    |> assign(:deploys, deploy_declarations(rows))
     |> assign(:queue_conflicts, Projects.queue_conflicts(projects))
   rescue
     _error ->
       socket
       |> assign(:projects, [])
       |> assign(:instance_controls, %{})
+      |> assign(:deploys, %{})
       |> assign(:queue_conflicts, %{})
+  end
+
+  # Which rows get a deploy button, and what each one runs. `Projects.list/1` does not carry the
+  # declaration -- the deploy is read from each project's own workflow file, by `SymphonyElixir.Deploy`,
+  # through the same parser the registry uses -- so this is one extra parse per project per refresh.
+  # That is the price of the command coming out of the file and nowhere else, and it buys the thing
+  # that matters: the row can only ever offer a command the workflow declares.
+  #
+  # The rows are handed in, so the lookup does not re-list the registry, and a project whose file does
+  # not load (or that declares no command) simply is not in the map -- which is what "no deploy
+  # action" means here, rather than a button whose every press fails.
+  defp deploy_declarations(rows) do
+    Enum.reduce(rows, %{}, fn row, declarations ->
+      case Deploy.declared(row.name, projects: rows) do
+        {:ok, declaration} -> Map.put(declarations, row.name, declaration)
+        {:error, _reason} -> declarations
+      end
+    end)
   end
 
   # What a start or a stop did, put in the row it belongs to and nowhere else -- and wrapped, because
@@ -411,11 +453,19 @@ defmodule SymphonyElixirWeb.ControlLive do
     if Enum.any?(socket.assigns[:projects] || [], &(&1.name == name)) do
       socket
     else
-      assign(socket, :control_error, "#{name}: #{reason}")
+      assign(socket, :control_error, "#{name}: #{outcome_reason(reason)}")
     end
   end
 
   defp put_unroutable_outcome(socket, _name, _outcome), do: socket
+
+  # An instance action answers with a string; a deploy answers with a result map whose `message` is the
+  # line to render. Both land in the same error card, so the reason is read out here rather than
+  # interpolated -- interpolating a map is a protocol error, which is exactly the page-taking-down
+  # failure this wrapper exists to prevent.
+  defp outcome_reason(reason) when is_binary(reason), do: reason
+  defp outcome_reason(%{message: message}) when is_binary(message), do: message
+  defp outcome_reason(reason), do: inspect(reason)
 
   defp safe_instance_outcome(name, :start, opts) do
     case InstanceRegistry.start_instance(name, opts) do
@@ -440,6 +490,45 @@ defmodule SymphonyElixirWeb.ControlLive do
     error -> {:error, "the hub raised: #{Exception.message(error)}"}
   catch
     kind, reason -> {:error, "the hub exited: #{kind} #{inspect(reason)}"}
+  end
+
+  # One deploy, from one press. The parameters are destructured to the **name** and nothing else: a
+  # crafted request that also carries `command`, `cwd` or `timeout_ms` is not refused, it is simply
+  # never read -- `SymphonyElixir.Deploy` takes a project name, looks the declaration up in that
+  # project's workflow, and has no argument that could carry a command.
+  #
+  # The outcome is wrapped for the same reason an instance action's is: "the page renders" outranks
+  # "the page explains", so a runner that raises still leaves the row with a reason in it.
+  defp deploy_action(socket, %{"project" => name}) when is_binary(name) do
+    outcome = safe_deploy(name, deploy_opts())
+
+    {:noreply,
+     socket
+     |> assign(:deploy_outcomes, Map.put(socket.assigns[:deploy_outcomes] || %{}, name, outcome))
+     |> assign_panels()
+     |> put_unroutable_outcome(name, outcome)}
+  end
+
+  # A `phx-value-project` is a string, but the event payload is whatever the client sent: a request with
+  # no project, or with one that is not a name, gets a sentence instead of a crash.
+  defp deploy_action(socket, _params) do
+    {:noreply, assign(socket, :control_error, "a deploy needs the name of one registry project")}
+  end
+
+  defp safe_deploy(name, opts) do
+    Deploy.run(name, opts)
+  rescue
+    error -> {:error, Deploy.failure(name, "the deploy raised: #{Exception.message(error)}")}
+  catch
+    kind, reason -> {:error, Deploy.failure(name, "the deploy exited: #{kind} #{inspect(reason)}")}
+  end
+
+  # The deploy's own injection, read the way the instance registry's four are: one endpoint key, `nil`
+  # meaning "use the real runner". Tests replace `Shell.run/3` through it, so no test starts a shell --
+  # and, more to the point, so this page has no way to be told what to run.
+  defp deploy_opts do
+    [runner: Endpoint.config(:deploy_runner)]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   # The four functions the hub would otherwise have to spawn a process, open a socket or kill one to
