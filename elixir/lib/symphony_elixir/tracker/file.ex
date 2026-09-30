@@ -73,7 +73,7 @@ defmodule SymphonyElixir.Tracker.File do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Janitor.AgentTool
+  alias SymphonyElixir.Janitor.{AgentTool, GateTool}
   alias SymphonyElixir.Tracker.Issue
 
   @ticket_extensions ~w(.md .markdown .yaml .yml)
@@ -154,21 +154,33 @@ defmodule SymphonyElixir.Tracker.File do
   def secret_environment_names(_tracker_settings), do: []
 
   @doc """
-  The janitor's tool, not a provider tool.
+  The janitor's tools, not provider tools.
 
   A file ticket is changed by editing it, so this tracker has never needed a provider API. What it
   does need is a publisher: the agent cannot commit, push or open a pull request (see
   `SymphonyElixir.Janitor`), so the janitor -- this tracker's host-side caretaker -- offers
-  `symphony_publish` and the agent calls it when the work is done.
+  `symphony_publish` and the agent calls it when the work is done. `ticket_comment` and `ticket_state`
+  are there because the host owns every write to a ticket file.
+
+  `GateTool` joins them for the same reason: the agent's own shell cannot run this project's gate
+  (the sandbox cannot start `mix` here), and the host can. It is advertised only when the project
+  declares `gate.command`, so this list is still exactly the three janitor tools for a project that
+  declares none.
   """
   @spec agent_tool_specs() :: [map()]
-  def agent_tool_specs, do: AgentTool.tool_specs()
+  def agent_tool_specs, do: AgentTool.tool_specs() ++ GateTool.tool_specs()
 
   @doc """
-  Runs one agent tool call. Only the janitor's `symphony_publish` exists for this tracker.
+  Runs one agent tool call: the janitor's, or the gate's when the call names it.
   """
   @spec execute_agent_tool(String.t() | nil, term(), keyword()) :: map()
-  def execute_agent_tool(tool, arguments, opts), do: AgentTool.execute(tool, arguments, opts)
+  def execute_agent_tool(tool, arguments, opts) do
+    if GateTool.handles?(tool) do
+      GateTool.execute(tool, arguments, opts)
+    else
+      AgentTool.execute(tool, arguments, opts)
+    end
+  end
 
   @doc """
   Validate the tracker block.

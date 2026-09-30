@@ -86,9 +86,12 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
+    # The turn's own workspace travels with `:issue`, so a host-side tool that has to work *in* the
+    # workspace (the janitor's gate runner) runs in the same directory this turn is editing rather
+    # than deriving one.
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
+        DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue, workspace: workspace)
       end)
 
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do

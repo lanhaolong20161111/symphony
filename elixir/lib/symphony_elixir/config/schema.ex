@@ -570,6 +570,35 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  # The gate a project declares for its own agent runs: one shell command and a deadline for it. It is
+  # run **host-side** by `SymphonyElixir.Janitor.GateTool`, because an agent's turn is sandboxed and on
+  # this host `mix` cannot even start there -- `Mix.Sync.PubSub` stats the user profile directory and
+  # that stat is refused for the sandbox account. A block rather than two loose fields, for the reason
+  # `hooks` is one: the command and the deadline belong together.
+  #
+  # `command` is deliberately **not** required and not validated for blankness. "This project declares
+  # no gate" has to stay a state the workflow can be in -- the tool is then simply not advertised
+  # (`GateTool.tool_specs/0` answers `[]`), and an explicit call gets a failure that says so, rather
+  # than a workflow that refuses to load over a setting nothing needs.
+  defmodule Gate do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string)
+      field(:timeout_ms, :integer, default: 900_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :timeout_ms], empty_values: [])
+      |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -664,6 +693,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:acp, Acp, on_replace: :update, defaults_to_struct: true)
     embeds_one(:commandcode, CommandCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:gate, Gate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:janitor, Janitor, on_replace: :update, defaults_to_struct: true)
@@ -762,6 +792,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:acp, with: &Acp.changeset/2)
     |> cast_embed(:commandcode, with: &CommandCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:gate, with: &Gate.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:janitor, with: &Janitor.changeset/2)
