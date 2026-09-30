@@ -18,6 +18,9 @@ Already true, and worth not redoing:
   by the ticket reaching `in-review` or by the agent calling `symphony_publish`. Measured: PRs
   #35 (sweep), #37 (agent's tool call) and #39/#41/#43 (probe tickets). Since SYM-57 the agent
   publishes inside its own session too (§3, §6 item 3); the host path stays the documented fallback.
+- The agent's own GitHub credential is a **GitHub App installation token minted per run** (§3): the
+  child receives `GH_TOKEN` and nothing long-lived sits in its environment, and a four-ticket run on
+  2026-09-30 had every run push its branch and open its own pull request.
 - The tracker is a git repository of Markdown tickets, mirrored to GitHub Issues by the janitor.
 - The deployment drives **this fork**: the registry directory `~/code/symphony-projects/` holds
   `symphony.md`, whose target repository is this one, and the retired deployment's `beekeeper.md` sits
@@ -31,7 +34,7 @@ one stands now:
 | gap | state |
 |---|---|
 | the agent can write git metadata (commit, branch) | **done** (`8000fdb`): `codex.git_metadata_writable` |
-| the agent can authenticate to push / open a PR | **done** (`9417b04`, `d4d6019`, `08a2a31`, §3): on SYM-57 the agent pushed the ticket's branch and opened PR #63 itself |
+| the agent can authenticate to push / open a PR | **done, twice over** (`9417b04`, `d4d6019`, `08a2a31`, then `ea65cf1`, `4f43689`, §3): SYM-57 did it with a long-lived token, and the four-ticket run of 2026-09-30 did it with a per-run GitHub App installation token (`ghs_`) |
 | the agent has the skills upstream's workflow assumes | **done** (`934dbdc` in the target repository, §5): five skills, upstream's document as the spine |
 | the file tracker matches Linear's capability surface | **done** (rounds 3-6, §4): the ten items of §4.1 and the emulations of §4.2 |
 
@@ -141,18 +144,68 @@ demanding it would have blocked every push for a reason unrelated to the change.
 to report that and continue with the check the ticket names (target repository `1df8639`); the
 repository gate is re-run where it can run.
 
-**This is the one place the port makes the machine weaker**, so it is stated plainly: the token
-available here (`gho_…`, scopes `repo`/`workflow`/`delete_repo`/`gist`/`read:org`) can write to every
-repository it can see, and anything in the child's environment is readable by the agent. A fine-grained
-PAT, rather than that broad token, is the honest choice for `codex.child_env`. The decision taken on the
-retired deployment: a fine-grained PAT with **Contents: Read and write** and **Pull requests: Read and
-write**, on `lanhaolong20161111/beekeeper` only, handed over as the User-scope variable
-`BEEKEEPER_AGENT_TOKEN` (never pasted into a transcript) -- the retired deployment's variable, replaced
-now by `SYMPHONY_AGENT_TOKEN`: one variable serves every project, because the workflow decides which
-repository the agent works on. The current workflow fills it either with one PAT set to **All
-repositories** (the same two scopes, plus **Workflows: write** only if an agent will ever push
-`.github/workflows/*`) or not at all, in which case the host publishes as it has all along. That was the
-credential in place on the retired deployment, and SYM-57's push is the measurement that it reaches git.
+**The credential is now a GitHub App, and it is minted per run (round 22).** `ea65cf1` added
+`SymphonyElixir.GitHubAppToken` (`elixir/lib/symphony_elixir/github_app_token.ex`). It signs a
+short-lived JWT itself with OTP's `public_key` -- no `openssl`, no `gh`, no new dependency -- with
+`iat = now - 60s` and `exp = now + 540s` (`:69-70`), discovers the installation (or takes one, or
+selects by account, refusing to guess when several match), exchanges it for an installation token,
+and caches it in `:persistent_term` under a key that records which App it belongs to, so a second App
+cannot be served the first one's token (`:84`, `:150-173`). A cached token is reused while more than
+the refresh slack -- 300 seconds -- is left on it, which is the margin for a push that begins just
+before expiry (`:72-74`, `:160`). Every failure is a value rather than a raise: a key that cannot be
+read, one that will not decode, a signing failure, an API that refuses or answers nonsense, a missing
+or ambiguous installation (`@type error`, `:93`).
+
+`4f43689` wired it into the run. `codex.app_token` names the App and its key
+(`config/schema.ex:314-370`), the mint is an injection point so the tests need neither a key file nor
+a network, the child's environment receives the token as `GH_TOKEN` -- whichever name the workflow
+mapped in `child_env`, and when `app_token` is configured that mapping is not passed through, with a
+warning (`codex/app_server.ex:288-291`, `:334`) -- and the git credential header receives the same
+token, because the header cannot be built from an environment-variable name. A mint that fails fails
+the run with the reason; falling back to a long-lived credential would quietly undo the reason for
+configuring the App at all (`:463-515`). Verified against the real App, not a stub: the JWT was
+accepted, the installation (166465349 on the account) was found, a token was minted, and that token
+then listed **44 repositories** -- which is also the check that the installation covers repositories
+created later, so no per-repository setup is needed as repositories are added. That number stands on
+`ea65cf1`'s record rather than on a fresh measurement here: the operator's own `gh` token cannot list
+App installations (HTTP 403, tried 2026-09-30), which is itself a small argument for the App being the
+only credential that can see what it was granted.
+
+**And the four tickets that exercised it (round 22).** Two throwaway projects, `e2e-alpha` and
+`e2e-beta` (`~/code/symphony-projects/e2e-alpha.md`, `e2e-beta.md`), two tickets each, one instance per
+project with `max_concurrent_agents: 1`. All four runs did the whole chain themselves: the agent
+committed, pushed its own branch and opened its own pull request with an App installation token --
+every ticket's own comment reports the credential prefix `ghs_` -- and the host's `symphony_publish`
+answered `pushed=false, committed=false`, i.e. there was nothing left for it to do. Each pull
+request's head SHA equals its workspace's HEAD, checked against GitHub on 2026-09-30: alpha#1
+`10fd0f5`, alpha#2 `420cc28`, beta#1 `24a7ac1`, beta#2 `edac4cf`. All four were then merged: `#2` in
+each repository cleanly at 12:10Z, and `#1` in each at 12:12Z only after the branch was updated from
+the trunk -- the conflict path `land/SKILL.md` describes, exercised for real, with the merge commit
+left in the branch's history. The four runs' input tokens, summed from the four codex rollouts in
+`~/.codex/sessions/2026/09/30/`, are 271,737 + 324,472 + 267,216 + 408,459 = **1,271,884**, which is
+the "roughly 1.27M" the run is remembered by.
+
+**Which endpoint, and how that is known.** The workflow says `model_provider='"deepseek"'` and
+`model="deepseek-flash"` (`e2e-alpha.md:163`), each rollout's `session_meta` carries
+`"model_provider":"deepseek"`, and `~/.codex/config.toml:86-89` defines that provider as
+`base_url = "https://api.deepseek.com/"`. That is **configuration resolution, not an observation of
+the wire**: no request or response was captured, so "the official DeepSeek endpoint" is what the
+configuration resolves to, and it is recorded here in exactly those terms.
+
+**What it replaced, and what that costs.** The earlier credential was a long-lived personal access
+token: first a fine-grained PAT scoped to the retired repository and handed over as the User-scope
+variable `BEEKEEPER_AGENT_TOKEN`, then one variable for every project, `SYMPHONY_AGENT_TOKEN`
+(**Contents: Read and write** and **Pull requests: Read and write**, plus **Workflows: write** only if
+an agent will ever push `.github/workflows/*`). It is the credential SYM-57 measured. It still exists
+on this machine -- both User-scope variables are present, 93 characters each, checked 2026-09-30 -- and
+it can be revoked, because every workflow in the registry now names `codex.app_token.private_key_path`
+instead: `symphony.md:194-196` and the two e2e workflows. The variable survives only in the comments
+that describe the older mechanism. That history is kept rather than deleted, because it explains the
+`SEC_E_NO_CREDENTIALS` paragraphs above. The security property is better than it was, and still worth
+stating: an hour-long installation token is scoped to whatever the installation was granted and no
+long-lived secret sits in the child's environment, but the installation's grant is the whole grant --
+those **44 repositories** are writable by anything holding that token, and anything in the child's
+environment is readable by the agent.
 
 ## 4. The tracker: what "as consistent as Linear" means
 
@@ -200,7 +253,13 @@ has nothing to be consistent *with* here: a file ticket's mutation API is editin
 9. Agent tool results keep `%{"success", "output", "contentItems"}` and the "unknown tool -> structured
    failure, the session continues" rule -- for every tracker, including one that advertises no tools.
 10. `secret_environment_names` stays a declared, enforced contract; `[]` for the file tracker is a
-    value, not an exemption.
+    value, not an exemption. **It was declared and then discarded twice over** -- absent from the
+    tracker embed's cast list, and overwritten by the adapter-derived value during finalisation -- so a
+    workflow that set it got silence; `19c8e15` casts it, combines it with the derived names rather
+    than replacing them (the derived names are a safety property and the configured ones additional,
+    so the result is their union), and refuses a value that is not a list of non-empty strings with the
+    setting named instead of quietly emptying it. The unconfigured path is unchanged, and a test pins
+    that for two adapter kinds (`config/schema.ex:106`, `:124`, `:849-850`, `:878`).
 
 ### 4.2 Emulated, and labelled as emulation
 
@@ -276,11 +335,11 @@ What is in each file now, and how far each one is from upstream's:
 
 | skill | lines | state |
 |---|---|---|
-| `commit` | 96 | ported: the capability is platform-neutral; heredoc and temp files become repeated `-m` (or `-F -`), the `Co-authored-by: Codex` trailer is gone, and a run never blanket `git add -A` |
-| `pull` | 204 | ported: the conflict path, plus the line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) and the fresh-clone preconditions that executing it turned up |
-| `push` | 190 | ported: the gate is `mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/` -- the fork's project root (this host has no `make`), `$env:TEMP` replaces `/tmp`, `&&`/`||` are unrolled because PowerShell 5.1 cannot parse them, the PR title/body discipline is kept -- and **a run never pushes `main`** |
-| `land` | 482 | ported **in full, not reduced**: the manual loop, the helper's five exit codes and `## Review Handling` are all here, because executing the skill is what showed which of upstream's steps are load-bearing |
-| `debug` | 276 | ported and retargeted (round 10): the queue before the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), `rg`'s own `--glob`, no `| sort -u` (PATH's `sort` is Windows `sort.exe`), and the lifecycle lines this host actually emits |
+| `commit` | 67 | ported: the capability is platform-neutral; heredoc and temp files become repeated `-m` (or `-F -`), the `Co-authored-by: Codex` trailer is gone, and a run never blanket `git add -A` |
+| `pull` | 178 | ported: the conflict path, plus the line-ending precondition (`core.autocrlf=true` with no `.gitattributes` rule turns `zdiff3` into whole-file churn) and the fresh-clone preconditions that executing it turned up |
+| `push` | 146 | ported: the gate is `mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/` -- the fork's project root (this host has no `make`), `$env:TEMP` replaces `/tmp`, `&&`/`||` are unrolled because PowerShell 5.1 cannot parse them, the PR title/body discipline is kept -- and **a run never pushes `main`** |
+| `land` | 422 | ported **in full, not reduced**: the manual loop, the helper's five exit codes and `## Review Handling` are all here, because executing the skill is what showed which of upstream's steps are load-bearing |
+| `debug` | 217 | ported and retargeted (round 10): the queue before the log (a BOM or bad YAML makes a ticket vanish from the active set silently -- the SYM-48 failure), `rg`'s own `--glob`, no `| sort -u` (PATH's `sort` is Windows `sort.exe`), and the lifecycle lines this host actually emits |
 | `release`, `linear` | -- | **still deliberately unported**: `release` bumps and watches upstream's own repository on ubuntu-24.04, and `linear_graphql` is bound only by the Linear adapter -- the file tracker advertises `symphony_publish` instead |
 | `land/land_watch.py` | -- | **not ported as Python, and not dropped either**: its signals are now `SymphonyElixir.Land` in this fork's own code (`c5a55f2`, `b06c82d`), which also runs inside the agent sandbox (round 19) |
 
@@ -290,15 +349,17 @@ What is in each file now, and how far each one is from upstream's:
 section order and wording where it is host-neutral, puts a one-line `> **Differs from upstream:** ...`
 note directly above every changed instruction, and ends with `## Differences from upstream (this host)`,
 whose bullets index those notes; an upstream instruction that cannot work here is declared "not
-applicable, because ..." rather than deleted. **The line counts above are counted in the fork's own
-`.codex/skills/`**, where the five skills live now -- the retired target repository's `1712c55` was the
-same table's earlier reading. One correction moved with them: the gate every skill names is the fork's,
-`mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/`. The retired target
-repository gated at its root with `mix precommit`, and every gate reference in this file -- the round
-log below included -- has been corrected to the fork's. The fork's copies are not new files: upstream's
-own `main` ships `.codex/skills/{commit,push,pull,land,debug}/SKILL.md` (they arrive with `be10a1b`,
-the commit this fork is based on), and `e592ebe` **replaced their content in place** with the
-Windows-adapted versions -- so the diff against upstream is the port, not an added directory.
+applicable, because ..." rather than deleted. **The line counts above are the fork's own
+`.codex/skills/`, measured 2026-09-30** -- `commit` 67, `pull` 178, `push` 146, `land` 422, `debug`
+217, against upstream's 59, 90, 93, 200 and 92 at `be10a1b`, so every ported file is longer than the
+document it is based on. The retired target repository's `1712c55` was an earlier, wrong reading of the
+same table. One correction moved with the skills from that repository: the gate every skill names is
+the fork's, `mix lint` (specs.check + `credo --strict`) then `mix test`, both from `elixir/`. The
+retired target repository gated at its root with `mix precommit`, and every gate reference in this
+file -- the round log below included -- has been corrected to the fork's. The fork's copies are not new
+files: upstream's own `main` ships `.codex/skills/{commit,push,pull,land,debug}/SKILL.md` (they arrive
+with `be10a1b`, the commit this fork is based on), and `e592ebe` **replaced their content in place**
+with the Windows-adapted versions -- so the diff against upstream is the port, not an added directory.
 
 **And the rule the SYM-57 run earned** (`b0e8fd8`): that run pushed `main` first, then noticed the
 convention, moved the commit to `symphony/SYM-57` and restored `main` with `--force-with-lease`
@@ -332,6 +393,21 @@ working; `problems/1` still reports `:bom`, because whatever wrote it may have c
 BOM. On a POSIX host a BOM is exotic; on Windows it is one `Set-Content` away, which is exactly why
 this belongs in the port.
 
+**Three incidents in this batch were one family, and they produced the rule the batch now follows.**
+PowerShell 5.1's `Get-Content`/`Set-Content` default to the ANSI code page and re-encode the whole file
+between them; an agent edited its own ticket with that pair, the ticket came back not valid UTF-8, and
+replaying CP936 decode-and-encode over the last good revision reproduces the damaged commit with **zero
+differing bytes** (`4fd8f70`; the damaged file and its two revisions are in
+`~/code/symphony-e2e-alpha-work/ALPHA-2.md`). Erlang encodes a spawned process's arguments through the
+same ANSI code page, so a Chinese label handed to `gh` arrived mangled and the mirror could never add
+it -- every round, for every state change (`1ea2391`; the vocabulary that leaves the process is ASCII
+now, the console's own Chinese is untouched, and a missing label is created on demand rather than
+failing the whole mirror). And twice, editing these very documents with a shell -- a block replacement
+that left an orphan line, and an `Add-Content` that introduced a stray carriage return -- broke a file
+(`3ad7c04`, whose own commit message records the third incident). The rule now applied, here and in the
+batch's commits: **write text files whole, or verify the read before writing; never perform line
+surgery through a bare write call.**
+
 **One dormant POSIX script, deliberately not "fixed".** This fork's own `.codex/worktree_init.sh` is
 `#!/usr/bin/env bash` and ends in `make setup`, which does not exist on this host -- and nothing in the
 repository references it (no workflow, doc or example calls it). It is left alone and recorded here
@@ -355,16 +431,17 @@ The port is done when, on this Windows machine, one real ticket run can show all
    changed and how to get upstream behaviour back.
 
 **Where that stands after the 2026-09-29/30 work** (the running service carries the credential fix and
-the `land` CLI; SYM-57 and SYM-58 are the two runs that exercised this work):
+the `land` CLI; SYM-57 and SYM-58 exercised that work, and the four-ticket run of 2026-09-30 exercised
+the App credential end to end):
 
 | # | state |
 |---|---|
 | 1 | **on and demonstrated**: `codex.git_metadata_writable: true` in the deployment; SYM-50's run committed in a sandbox that had refused exactly that before |
 | 2 | **demonstrated**: the agent wrote its own commit, on the ticket's branch, with a real message (`docs: append branch-fix smoke marker to README.md`) rather than the janitor's fixed `symphony/<id>: automated change` |
-| 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0 |
+| 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0. **Re-achieved on all four tickets of the 2026-09-30 run, with the App credential** (§3): each agent pushed its own branch and opened its own PR with a `ghs_` token, each PR's head SHA equalled its workspace's HEAD, and the host's publish tool answered `pushed=false, committed=false` on each |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | **the rule every round**: `mix lint` clean and the suite green -- measured 2026-09-30 for this batch: `mix test` in `elixir/` exits 0 with **796 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 223.1s. The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
 
 ### The fork against upstream, audited
 
@@ -546,7 +623,120 @@ unknown project, a workflow file that does not parse, and one that cannot be rea
 answers "no tickets": an empty list would read as "this project has no work", which is the one answer
 that must not be given for a file that could not be read.
 
-## 13. Open, after this batch
+**And the page can write (round 23).** `1ea2391` turned the single-ticket page from a reader into a
+writer: a state control limited to the states the workflow declares, and a comment box. Both write
+through the host's own functions -- the state through `Janitor.set_ticket_state/3`, the comment
+through `Janitor.comment_on_ticket/3`, which takes an author so an operator's words are not
+indistinguishable from an agent's (`control_ticket_live.ex:54`, `:385-423`) -- and neither ever edits
+a ticket's bytes from the view. A ticket that is not valid UTF-8 is refused with the write path's own
+reason rather than rewritten; a failure leaves the file byte-identical; a write made while reading
+another project's queue lands in that project's files; and nothing is written without a submit.
+`578e526` wrapped the host write so that a raise inside it becomes a refusal the page renders rather
+than a crashed LiveView; the page's two test files report 20 tests at that commit.
+
+## 13. The ticket service: the store, the surface, and the contract
+
+The tracker work of §4 is finished, and its successor is being built rather than argued about: a
+service that owns tickets, in a **new sibling repository**
+`~/Desktop/android_cli_demos/symphony-tickets` (its own git repository, its own SQLite through
+`exqlite`; no Ecto at all, and Phoenix only for the HTTP surface -- `mix.exs:56-59` lists `exqlite`,
+`phoenix`, `bandit` and `jason`). Two slices are working, and neither is in this fork:
+
+- **The store** (`7c31f50`, 42 tests): tickets with both a machine state type and a display name,
+  labels, blocker relations that resolve rather than disappear, threaded comments, attachments keyed
+  by URL, and an activity log of from-to field pairs with an actor. Two rules are proved rather than
+  asserted, and both were **falsified before being believed**: an empty request must not touch the
+  database at all -- the tests assert the database file is never created, with a negative control on
+  the same unused path -- and a request naming a record that cannot be read must fail rather than
+  quietly answer with the records it did find; breaking either rule makes the suite fail. The creation
+  grace period is real time the caller supplies, never a sleep: mutations inside the window still
+  happen, only the audit entry is withheld, and the creation entry is always written.
+- **The HTTP surface** (`322c80d`, 82 tests in total, the 42 still passing): one loopback listener on
+  4020, every endpoint mapped onto a store operation instead of re-implementing one, every store error
+  tag mapped onto exactly one status and code in a single module, collections always present as empty
+  lists, and activity its own call rather than inlined into the ticket. A finding changed the design:
+  Plug's query decoding keeps only the last value of a repeated scalar key, so a parameter repeated the
+  way the orchestrator will repeat it would have silently become a narrower question -- the query
+  string is read raw, both spellings are accepted, and a key that is present but not scalar is a bad
+  request. Text is proved end to end: a Chinese title and a multi-line Chinese description survive
+  create, read, list and update, then compare against the bytes in SQLite itself rather than only
+  against a symmetric JSON round trip.
+
+Then `87b2efe` gave list rows what a scheduler needs. The orchestrator polls "tickets in these states"
+every tick and must know, per ticket, whether it is blocked; a list row carried no relations, so the
+only correct consumer would have had to fetch each ticket individually -- an N+1 on a poll loop.
+Rows now carry their labels and their live blockers, read as two extra **batched** queries over the
+whole result set: three statements in total for any number of tickets, never one per ticket, with a
+test that counts the statements by tracing the one module that talks to SQLite and was verified to
+bite (replacing the batched read with a per-ticket loop makes it fail). Labels are returned exactly as
+stored, because the consumer already matches them case-insensitively and folding only in this path
+would make a row disagree with the ticket it names. `dispatchable` is still the stored column: the
+gating decision belongs to the scheduler, not to the store. `mix precommit`: 90 tests.
+
+The design is `docs/ticket-service-spec.md` -- the contract, the minimal surface, the interface, six
+slices, and the operator's five decisions, which supersede the document's own recommendations: a
+standalone application on port 4020; **the GitHub mirror is dropped rather than ported**; the
+janitor's second parser of the ticket file format is deleted with the last slice, not left reading a
+directory nothing writes to; the silently discarded tracker field is fixed in this work (§4.1 item 10);
+and the state vocabulary keeps **both** names, an English machine-facing type and the Chinese display
+copy that exists today, with the scheduler branching on the type and never on the display name.
+Service detail belongs in that document, not here.
+
+**And one slice of the contract is no longer prose.** `b03d3c5` made the tracker contract executable:
+`elixir/test/support/tracker_contract.exs` and `elixir/test/symphony_elixir/tracker_contract_test.exs`
+(998 lines, with one line added to `test_helper.exs`) assert the same rules against **every adapter in
+the registry**, and the registry is read from the source, so registering a new kind changes the suite
+rather than being skipped. Each rule carries the `path:line` that establishes it, which is how the
+specification's carried claims get re-derived. Where adapters genuinely differ, the difference is
+asserted and labelled as the rule it breaks rather than hidden -- the in-memory adapter has no error
+path, so unreadable and absent are the same answer to it, it returns configured structs without
+normalising labels, and it matches on id alone; those three are reported as the rules it fails and
+nothing was changed to make them pass. Two rules had been written and never run, because their helper
+functions had no caller; wiring them up needed care, since the tool assertion called the adapter with
+an empty option list and one adapter reads a bare non-empty string as a query document -- so the
+assertion as written would have made a real request to a real API. The adapter's transport is now
+injected and the four REST adapters get stubs that fail the test if they are ever reached, which turns
+"refused before the wire" from a reading of the source into a fact.
+
+## 14. The plan to deploy on Linux
+
+This is the operator's **stated intent**, recorded here rather than measured: the deployment
+eventually moves to Linux. It is attractive for one reason, and it is the reason this whole document
+exists -- the Windows-specific adaptations stop being needed:
+
+- the sandbox that cannot run `mix` (§5, round 19: it boots and dies at the first compile because
+  `File.mkdir_p/1` cannot stat an ancestor directory), and with it the gate-outside-the-sandbox dance;
+- the sandbox account dance of §2 -- a separate local account, per-path DENY ACEs, `safe.directory`,
+  and `codex.git_metadata_writable`, which is a **Windows-only** unblock (upstream's issue #14338 is
+  still open, so it must not be read as a portable mechanism);
+- argument encoding: Erlang encodes a spawned process's arguments through the ANSI code page, which is
+  what mangled the Chinese label before `gh` ever saw it (§5, `1ea2391`);
+- the shell re-encoding class: PowerShell 5.1's `Get-Content`/`Set-Content` ANSI default, the BOM that
+  `Set-Content -Encoding UTF8` writes, and `>` writing UTF-16 (§5, `4fd8f70`);
+- the git-metadata fix of §2, which exists only to make a checkout's `.git` writable to a sandbox
+  account.
+
+Two things must not travel with it, and both are stated as rules rather than advice:
+
+1. **The console has no authentication and must never be exposed.** The ticket service carries the same
+   warning at its own configuration: `config/config.exs` binds `ip: {127, 0, 0, 1}, port: 4020` and
+   says the only thing keeping it private is that it binds the loopback address; the host is refused at
+   boot when it is not a literal IP rather than quietly binding somewhere else (`symphony-tickets`,
+   `322c80d`; `config/config.exs:21-36`). The hub's control plane has the same property (§8), and a
+   Linux host does not change it. If it ever needs to be reachable from elsewhere, that is an SSH port
+   forward, not a bind address.
+2. **A `.gitattributes` with `* text=auto eol=lf` belongs in the new repository before it moves.** This
+   machine has `core.autocrlf=true` (measured 2026-09-30 in both `symphony` and `symphony-tickets`),
+   and the ticket service's repository has no `.gitattributes` today (measured: the file does not
+   exist). Without it a fresh clone materialises CRLF, and the shell scripts and checks that assume LF
+   break on their first run -- a failure this workspace has already paid for once, in
+   `elixir_wechatpay`, whose `.gitattributes` was added for exactly this reason (`ac79620`, "pin line
+   endings to LF so the conformance scripts survive a fresh clone").
+
+Nothing in the tree depends on the move, and no slice in `docs/ticket-service-spec.md` needs it; this
+section exists so the next session does not re-derive why Linux is the cheap direction.
+
+## 15. Open, after this batch
 
 None of these is finished, and none should be read as though it were.
 
@@ -560,15 +750,18 @@ None of these is finished, and none should be read as though it were.
    running instance too, not a new gap.
 4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
    carry the in-process MFA, and the fix path is recorded there.
-5. **The agent's own push/PR credential is not set.** `codex.child_env` maps
-   `GH_TOKEN=SYMPHONY_AGENT_TOKEN`, and the entry is inert while that variable is absent, so the host
-   publishes as it always has (§3). The channel is measured and works; the value is a decision nobody
-   has taken for the current deployment.
+5. **Nothing in this fork talks to the ticket service yet.** The store and its HTTP surface exist in
+   the sibling repository (§13); the adapter that would speak to port 4020 is slice 3 of
+   `docs/ticket-service-spec.md`, and slices 3-6 are unwritten -- including the last slice, which is
+   the only thing that retires the file tracker and the janitor's second parser.
+6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
+   credential replaced them and no workflow in the registry names them any more, so revocation is the
+   operator's call rather than a prerequisite for anything.
 
 And the one item the upstream audit found that this batch did not touch: the `paused` early return in
 `orchestrator.ex` (§6).
 
-## 14. Round log
+## 16. Round log
 
 These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
 rounds, which are counted separately.
@@ -818,5 +1011,58 @@ rounds, which are counted separately.
     after each batch and serves all of it, and `docs/quickstart.md`'s "the recorder serves this at
     `/symphony`" sentence was corrected: the recorder has been its own application, in its own
     repository, on its own port, with no reverse proxy, since the extraction.
-  Next: the five items in §13 -- `shared` decided or its parked slice redone with tests, a hub-side
+  Next: the five items in §15 -- `shared` decided or its parked slice redone with tests, a hub-side
   settings view for a project that is not answering, and the agent-credential decision.
+- **Round 22 (2026-09-30)**: the agent's credential became a GitHub App installation token, minted per
+  run, and the whole chain was exercised on four tickets. `ea65cf1` added `SymphonyElixir.GitHubAppToken`
+  (the JWT signed in-process, the installation discovered or named, the token cached in
+  `:persistent_term` with a 300s refresh slack, every failure a value) and `4f43689` wired
+  `codex.app_token` into the run, so the child gets `GH_TOKEN` and git gets the same token in its config
+  header. Verified against the real App: a token was minted and used to list **44 repositories**, which
+  also shows the installation covers repositories created later. Then two throwaway projects, two
+  tickets each, one instance per project and one agent at a time: all four agents committed, pushed
+  their own branch and opened their own pull request with a `ghs_` token, each PR's head SHA equalled
+  its workspace's HEAD, and the host's publish tool answered `pushed=false, committed=false` on all
+  four. All four PRs merged -- the two `#2`s cleanly at 12:10Z, the two `#1`s at 12:12Z only after the
+  branch was updated from the trunk, which is the `land` skill's conflict path run for real. Input
+  tokens for the four runs: **1,271,884**, summed from the four rollouts. The provider and model are
+  known by configuration resolution (`model_provider='"deepseek"'`, `model="deepseek-flash"`), not by
+  observing the wire (§3).
+  Next: the ticket the run itself damaged started round 23.
+- **Round 23 (2026-09-30)**: the encoding family, and the ticket page learned to write. A probe ticket
+  came back not valid UTF-8; the suspicion (a byte-boundary cut in the write path) was wrong --
+  PowerShell's `Get-Content`/`Set-Content` ANSI pair had re-encoded it, and replaying CP936 over the
+  last good revision reproduced the damaged commit with zero differing bytes (`4fd8f70`; the damaged
+  file is `~/code/symphony-e2e-alpha-work/ALPHA-2.md`). Every Elixir write path round-trips Chinese
+  byte-exactly, so the fix was two-sided: the host now offers the state change itself -- read the
+  bytes, replace one key, write the same bytes back -- and refuses to touch a ticket that is not UTF-8,
+  so damage is never rewritten under the host's authority. The same family's second member was found in
+  the mirror: Erlang encodes a spawned process's arguments through the ANSI code page, so a
+  three-character CJK label reached `gh` mangled and no mirror round could add it; the vocabulary that
+  leaves the process is ASCII now, the console's Chinese is untouched, and a missing label is created
+  on demand rather than failing the whole mirror (`1ea2391`). The single-ticket page gained a state
+  control limited to the workflow's declared states and a comment box, both writing through
+  `Janitor.set_ticket_state/3` and `Janitor.comment_on_ticket/3` -- the comment signed `operator`,
+  never `agent` -- with a non-UTF-8 ticket refused, a failure leaving the file byte-identical, a write
+  from another project's queue landing in that project's files, and nothing written without a submit
+  (`1ea2391`); `578e526` made a raise inside the host's write path a refusal the page renders rather
+  than a crashed LiveView. The third member of the family is in this document's own history: two shell
+  edits of it -- one leaving an orphan line, one an `Add-Content` carriage return -- broke a file
+  (`3ad7c04`), which is where the write-it-whole rule comes from (§5). And `19c8e15` fixed
+  `tracker.secret_environment_names`, which had been declared and then discarded twice over.
+  Next: the ticket service, which is where the whole file-writing class goes.
+- **Round 24 (2026-09-30)**: the ticket service exists in a new sibling repository, and the tracker
+  contract became executable. The design was written first (`ea5ff05`, `docs/ticket-service-spec.md`),
+  then the operator's five answers were appended rather than edited in (`3ad7c04`): standalone on 4020,
+  the GitHub mirror dropped, the janitor's second parser deleted with slice 6, the discarded tracker
+  field fixed here, and both state names kept. The store (`7c31f50`, 42 tests) and its HTTP surface
+  (`322c80d`, 82 in total) landed the same night, with two rules falsified before being believed;
+  `87b2efe` then gave list rows their labels and live blockers in three batched statements whatever the
+  size, because a poll loop must not become an N+1. Back in the fork, `b03d3c5` turned the tracker
+  contract into 998 lines of tests that run against every registered adapter, each rule carrying the
+  `path:line` that establishes it, and the gate this round re-measured: **912 passed, 6 skipped, 23
+  excluded** (261.0s). Finally the operator's intent to move the deployment to Linux was recorded
+  (§14), with the two things that must not travel: the unauthenticated console, and the missing
+  `.gitattributes`.
+  Next: slice 3 of `docs/ticket-service-spec.md` -- the adapter in this fork that speaks to port 4020 --
+  and the revocation of the old personal access tokens (§3).
