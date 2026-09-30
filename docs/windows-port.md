@@ -32,7 +32,8 @@ Already true, and worth not redoing:
   `gate.command`, for **every tracker kind**, since `df2941a` and `6ba1b04`: it had been composed by
   the file tracker's adapter alone, so a service-tracked project -- whose adapter advertises no tracker
   tools -- was advertised **nothing**, which the `svcprobe` run measured before the fix (§13.1, §14).
-  Two registry workflows declare a gate, and both declarations are still uncommitted.
+  Two registry workflows declare a gate: `symphony.md`'s is committed (registry `dfecc0d`, 2026-10-01
+  03:26:14) and `svcprobe.md` is still untracked.
 - The console's ticket pages read **whichever tracker a project configures** (§12, `d376ae8`): one seam,
   `elixir/lib/symphony_elixir_web/ticket_reader.ex` (584 lines), asks the tracker for a ticket's deep
   read; the file tracker keeps byte-for-byte its old behaviour and the service answers in one call.
@@ -47,7 +48,9 @@ Already true, and worth not redoing:
 - **The orchestrator reads tickets from that service** (§13.1, `fb31a7f`): the tracker kind
   `ticket_service` speaks the service's own HTTP surface, with the address in the tracker's free-form
   `provider.url`. Registering the kind made the executable contract refuse it three times before it
-  would accept it; with the three acknowledgements written by hand, the contract passes **25/25**.
+  would accept it; with the three acknowledgements written by hand, the contract passed **25/25** -- and
+  round 27's gate move made it refuse again, in its pinned per-kind tables, so it stands at **27 passed**
+  now (§13.1, §14).
 - **One real deployment has used it end to end, and the chain ran green** (§13.1). A throwaway project
   (`~/code/symphony-projects/svcprobe.md`) declares `tracker.kind: ticket_service` against
   `http://127.0.0.1:4020`, with its own workspace root and the janitor disabled, and was started on
@@ -471,7 +474,7 @@ the App credential end to end):
 | 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0. **Re-achieved on all four tickets of the 2026-09-30 run, with the App credential** (§3): each agent pushed its own branch and opened its own PR with a `ghs_` token, each PR's head SHA equalled its workspace's HEAD, and the host's publish tool answered `pushed=false, committed=false` on each |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). Round 25 re-measured both at its own last commit (`979a319`; HEAD has since moved to `5bec515`, the deploy batch, which is not measured here): `mix lint` exits 0, `found no issues`, 164 source files (6.8s), and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**, 208.4s -- measured while the next feature was already being written into the same working tree, so the tree was not clean; what makes it a reading of this commit's tests is its total, which is exactly HEAD's own test set: 912 at `b03d3c5` plus the 37 this round added (18 + 10 + 9). The three test files that round added were also run on their own: **82 passed** (18 + 55 + 9). A later reading, on 2026-10-01 with HEAD at `11af6ed`: `mix lint` exits 0 with `found no issues` (**169** source files -- 164 at `979a319`), the two files the ticket-service round touched pass on their own (`tracker_contract_test.exs` **25 passed**, `ticket_service_tracker_test.exs` **30 passed**), and the whole suite is **not** measured at that commit: `mix test` failed before running a test, three times, in `mix deps.compile` (`** (File.Error) could not remove files and directories recursively from "...\_build\test\lib\lazy_html": file already exists`) while another Mix process was working in the same tree, so no pass/skip/excluded total is claimed for `11af6ed`. The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). Round 25 re-measured both at its own last commit (`979a319`; HEAD has since moved to `5bec515`, the deploy batch, which is not measured here): `mix lint` exits 0, `found no issues`, 164 source files (6.8s), and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**, 208.4s -- measured while the next feature was already being written into the same working tree, so the tree was not clean; what makes it a reading of this commit's tests is its total, which is exactly HEAD's own test set: 912 at `b03d3c5` plus the 37 this round added (18 + 10 + 9). The three test files that round added were also run on their own: **82 passed** (18 + 55 + 9). A later reading, on 2026-10-01 with HEAD at `11af6ed`: `mix lint` exits 0 with `found no issues` (**169** source files -- 164 at `979a319`), the two files the ticket-service round touched pass on their own (`tracker_contract_test.exs` **25 passed**, `ticket_service_tracker_test.exs` **30 passed**), and the whole suite is **not** measured at that commit: `mix test` failed before running a test, three times, in `mix deps.compile` (`** (File.Error) could not remove files and directories recursively from "...\_build\test\lib\lazy_html": file already exists`) while another Mix process was working in the same tree, so no pass/skip/excluded total is claimed for `11af6ed`. **Round 27 did get the total, and the obstacle turned out to be the same one**: with no other Mix process in the tree, at `6ba1b04`, `mix lint` exits 0 with `found no issues` (**172** files analysed by credo, 7.2s) and the whole suite exits 0 with **1048 passed, 6 skipped, 23 excluded** (289.1s) -- the same three exclusions, and 1048 is `979a319`'s 949 plus the two rounds between. The four test files that round touched, run together and each on its own: **82 passed** (27 + 21 + 24 + 10). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
 
 ### The fork against upstream, audited
 
@@ -962,26 +965,31 @@ no session (the MCP stdio server, the HTTP endpoint) the workspace is derived fr
 names, through `Workspace.workspace_key/1` (`gate_tool.ex:215-248`) -- either way a path the host
 resolved, never one an argument named.
 
-**Measured state, corrected in round 26: declared and exercised, still advertised to nobody.** Two
-registry workflows declare a gate now -- `symphony.md`, whose command is
-`cd elixir && mix lint && mix test` (an uncommitted working-tree change; `git diff` in the registry
-shows the block being added), and `svcprobe.md`, whose command is `grep -q svc-probe-1 README.md`
-(`:150-155`) -- so the earlier "no workflow declares one" reading is retired. The declaration was used
-in the `svcprobe` run, where the agent read it out of the workflow and ran it itself; the **tool** was
-not advertised to that run, because the project's tracker kind is the service adapter and a
-service-backed tracker advertises no tools at all (§13.1, §18). The fork's own 4001 instance *does*
-serve the tool: it was rebuilt and restarted from the same escript at 2026-10-01 01:32:16 (the
-process's start time and the escript's own mtime are the same minute), so a project that declares a
-gate **and** uses the file tracker would be offered it.
+**Measured state, round 27: the fix is committed and tested, and no running instance serves it yet.**
+Round 26's reading was "declared and exercised, advertised to nobody"; `df2941a` answered that, and the
+answer is the design rule the measurement earned: **running a gate is a property of the project, not of
+where its tickets come from**, so the host's own tools are composed at the tracker boundary for every
+kind (the paragraph above). The registry now both declares and commits the declaration -- `symphony.md` carries
+`gate.command: cd elixir && mix lint && mix test` with `timeout_ms: 900000` (registry `dfecc0d`,
+2026-10-01 03:26:14, whose message says the tool "is advertised from the tracker boundary, so this
+declaration is all a project needs"), while `svcprobe.md` (`grep -q svc-probe-1 README.md`) is still
+untracked. **What is not true is that any of this is running**: the 4001 escript's own mtime is
+2026-10-01 01:32:16, before `d376ae8` (02:44:52), `df2941a` (02:44:53) and `6ba1b04` (03:06:23), so the
+hub that is up predates the change and no project has been offered the tool through the new boundary.
+A service-tracked run after a rebuild is what would turn "advertised to every kind" from a tested code
+path into a measured deployment; nothing has run against the service since the fix.
 
-What is measured of the code is otherwise unchanged: `mix lint` exits 0 with `found no issues` --
-**169** source files at `11af6ed` on 2026-10-01, against 164 at `979a319` -- and the three test files
-of round 25 still report **82 passed** together (18 + 55 + 9). The whole-suite figure for HEAD is not
-claimed here: `mix test` was attempted at `11af6ed` and failed **before running a test**, in
-`mix deps.compile` (`** (File.Error) could not remove files and directories recursively from
-"...\_build\test\lib\lazy_html": file already exists`), three attempts, while another Mix process was
-working in the same tree. The counted runs of that day are the two files this round's adapter work
-touched (§13.1) and the service's own suite (§13).
+What was measured of the code at `6ba1b04` on 2026-10-01: `mix lint` exits 0 with `found no issues`
+(**172** files analysed by credo, 7.2s; the earlier 169 was `11af6ed`, 164 was `979a319`), and the four
+test files this round's work touched report **82 passed** together, run both ways (together in one
+invocation, and each on its own): `tracker_contract_test.exs` **27 passed** (690 lines; 25 before
+`df2941a`), `janitor/gate_tool_test.exs` **21 passed** (545 lines; 18 before), `ticket_reader_test.exs`
+**24 passed** (474 lines) and `control_ticket_service_test.exs` **10 passed** (424 lines). The whole suite is measured at this HEAD too,
+which round 26 could not get: `mix test` in `elixir/` exits 0 with **1048 passed, 6 skipped, 23
+excluded** (289.1s; the same three exclusions, `:needs_symlinks`, `:needs_ssh`, `:posix_paths`). 1048 is
+the 949 of `979a319` plus the two rounds between. It is the first whole-suite reading since `979a319`
+(912 at `b03d3c5`, 949 there, then none claimed for `5bec515` or `11af6ed`), and unlike round 26's
+attempt it did not die in `mix deps.compile` -- the tree had no other Mix process in it.
 
 ## 15. Landing a ticket from its own page
 
@@ -1142,36 +1150,43 @@ None of these is finished, and none should be read as though it were.
    running instance too, not a new gap.
 4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
    carry the in-process MFA, and the fix path is recorded there.
-5. **The fork reads from the service, but the console does not, and nothing has been retired.** The
-   adapter is done and proved live (§13.1), so slice 3 of `docs/ticket-service-spec.md` is delivered.
-   What is not: slice 4 (the console's pages still read whichever tracker the project's workflow
-   declares, and every registry workflow still declares the file tracker), slice 5 (there is no
-   markdown export -- the string `export` appears in no module or test in `symphony-tickets`), and
-   slice 6 (the file tracker, the GitHub mirror and the janitor's second parser of the ticket file
-   format are all still in the tree and in use). Slice 6 needs slice 4 first, because the pages have to
-   read the service before the files they read can go away
+5. **Slices 3, 4 and 5 are delivered; slice 6 is not, and nothing has been retired.** The adapter
+   (`fb31a7f`, §13.1), the console reading whichever tracker a project configures (`d376ae8`, §12) and
+   the markdown export (`3e0ad76`, §13) are all in. What is not: **slice 6** -- the file tracker, the
+   GitHub mirror, the ticket queue and the janitor's second parser of the ticket file format are all
+   still in the tree and in use, because every registry workflow still declares the file tracker. The
+   specification's order put slice 4 before slice 6, and that condition now holds, so what the
+   retirement waits on is the operator's sequencing decision -- it is semi-irreversible
    (`docs/ticket-service-spec.md:158-165`).
 6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
    credential replaced them and no workflow in the registry names them any more, so revocation is the
    operator's call rather than a prerequisite for anything.
-7. **The gate is declared in two workflows, and the tool is still advertised to nobody.**
-   `symphony.md` (uncommitted) and `svcprobe.md` both declare `gate.command` (§14); in the `svcprobe`
-   run the agent ran the declared command itself rather than through the tool, because that project's
-   tracker advertises no tools (§13.1, item 10). So "capability built and tested" now has a second
-   half: the declaration is used, and the tool still has no user. Both declarations are also still
-   uncommitted or untracked in the registry.
-8. **Nothing here survives a reboot** (§13). The hub and the ticket service are both started by hand,
-   and no scheduled task or `Run` entry names either. The loop dies with the machine and comes back
-   only when a person starts two processes.
+7. **The gate tool is offered to every kind now, and no live run has been measured with it.**
+   `df2941a`/`6ba1b04` moved the composition to the tracker boundary (§14), which is the design
+   correction the `svcprobe` measurement earned; the fix is committed, lint-clean and unit-tested, and
+   **no running instance serves it**: the 4001 escript's own mtime is 2026-10-01 01:32:16, before
+   `d376ae8` (02:44:52) and `df2941a` (02:44:53) and `6ba1b04` (03:06:23), so the hub that is up
+   predates the change. Of the two registry declarations, `symphony.md`'s gate is now **committed**
+   (registry `dfecc0d`, 2026-10-01 03:26:14) and `svcprobe.md` is still untracked -- and whether a
+   service-tracked run now uses the tool is unmeasured, because nothing has run against the service
+   since the fix.
+8. **Nothing here survives a reboot** (§13). Re-measured while round 27 was written: all three listeners
+   are still up and all three are hand-started -- 4001 (`symphony.md`, PID 14220), 4020 (the ticket
+   service, PID 19384, `{"ok":true}` on `/health`) and 4021 (`svcprobe.md`, PID 2688), each bound to
+   `127.0.0.1`. The auto-start half is round 26's measurement and was **not** repeated here: no
+   scheduled task and no `Run` entry names the hub, the service or any project. The loop dies with the
+   machine and comes back only when a person starts the processes it needs.
 9. **An automatic landing sweep has no policy.** Landing exists as one button pressed by a person
    (§15). Which tickets may merge unattended -- which states, which labels, which projects, what
    happens when the verdict is not `ok` -- is a decision nobody has made, and the sweep should not
    exist before the answer does.
-10. **A service-backed project advertises the agent no tools at all** (§13.1). The new adapter is a
-   reader by design, so a run against it has no `symphony_gate`, no `ticket_comment` and no
-   `symphony_publish`: the `svcprobe` run finished by writing to the service over HTTP itself, and ran
-   its declared gate in its own sandbox. Which tools a service-backed tracker should advertise -- and
-   whether the gate tool belongs to the tracker or to the session -- is a decision nobody has made.
+10. **A service-backed project is offered the gate, and still no tracker tools.** The question the
+    `svcprobe` run left open -- whether the gate tool belongs to the tracker or to the session -- was
+    answered in round 27: it belongs to the **project**, and the host's tools are composed at the
+    tracker boundary for every kind (§14, `df2941a`). So a service-tracked project is now offered
+    `symphony_gate`. What it is still not offered is `ticket_comment` or `symphony_publish`: the
+    service adapter is a reader by design (`ticket_service.ex:10-11`), so whether a service-backed
+    tracker should advertise **writer** tools is a decision that still nobody has made (§13.1).
 
 And the one item the upstream audit found that this batch did not touch: the `paused` early return in
 `orchestrator.ex` (§6).
@@ -1600,3 +1615,78 @@ rounds, which are counted separately.
   `docs/ticket-service-spec.md` -- the console reading through the service -- which is what unblocks
   slice 6; then a policy for the landing sweep; and then the two registry gate declarations, which are
   still uncommitted.
+- **Round 27 (2026-10-01)**: the gate moved to where the project is, and the console stopped reading one
+  tracker's file format. Round 26 had measured two gaps; this round showed that one of them was a design
+  mistake and the other a missing slice.
+  - `df2941a`, finished by `6ba1b04`, moved the host's gate tool to the **tracker boundary**: `Tracker`
+    holds `@host_tool_modules [GateTool]` (`tracker.ex:54`) and `compose_agent_tool_specs/1` answers the
+    adapter's own tools followed by the host's (`:96`). Running a gate is a property of the **project**,
+    not of where its tickets come from, so a host tool is advertised beside whatever the adapter offers,
+    **for every kind**, through the one door every transport uses (`bind_agent_tools/0`), and dispatch
+    routes a host tool to its module **before** the adapter is consulted (`:117`, `:181-182`), so no
+    adapter's `execute_agent_tool/3` contract changed. The file adapter keeps its three janitor tools and
+    no longer composes the gate (`tracker/file.ex:173`, `:182`), which is what stops it appearing twice;
+    a project that declares no gate is still advertised nothing extra (`GateTool.tool_specs/0` -> `[]`).
+    The executable contract refused the change in its pinned per-kind tables -- the
+    "what each adapter advertises *itself*" table, the new `@host_tools ["symphony_gate"]` table beside
+    it (`tracker_contract_test.exs:62`), and the per-kind stub function those assertions call -- and
+    each was written by hand from the failure text rather than by widening an assertion.
+    Measured: the contract **27 passed** (25 before) and `gate_tool_test.exs` **21 passed** (18 before).
+  - `d376ae8` gave a ticket's deep read one seam: `elixir/lib/symphony_elixir_web/ticket_reader.ex` (584
+    lines), which the presenter resolves through (`ticket_presenter.ex:14`, `:71`, `:93`) and which maps
+    the workflow's kind string (`"file"` -> the file reader, `"ticket_service"` -> the service's own
+    call, `ticket_reader.ex:154-155`). The file tracker's answer is byte-for-byte what it was; the
+    service's is one call, `GET {url}/tickets/:ref`, carrying the description, the comments, the labels
+    and the blockers; and a kind that cannot answer returns
+    `{:error, {:ticket_kind_not_readable, kind}}` (`:157-158`) so the page renders that sentence rather
+    than an empty board -- the failure mode that matters being a page that looks empty and invites
+    someone to redo finished work. Read-only: no write path, no tool, no agent-facing surface. Measured:
+    `ticket_reader_test.exs` **24 passed**, `control_ticket_service_test.exs` **10 passed**.
+  - `3e0ad76` in `symphony-tickets` delivered slice 5, the **markdown export**
+    (`mix symphony_tickets.export --out DIR [--db PATH]`): one `<identifier>.md` per ticket, in the
+    vocabulary the file tracker's own parser reads (`Tracker.File.tickets/1`, `tracker/file.ex:205`),
+    which is what replaces the offline, diffable property the retired mirror provided. It is
+    deterministic (fixed key order, no export timestamp, stable ordering), **does not touch an unchanged
+    file** (a CRLF-only difference included, so a Windows checkout does not trigger a rewrite), writes
+    through a temp file and a rename, **never deletes** a file it did not write, refuses a file whose
+    front matter lacks its generated header (`@marker`, `export.ex:98-106`), and **fails one ticket
+    loudly** when a value is not valid UTF-8 rather than writing replacement characters
+    (`export.ex:71-79`, `:489`); the task exits non-zero when any ticket failed, after the writable ones
+    are written, and deliberately does not start the application. Its format claim was checked out of
+    band rather than asserted -- the round's own record says the output was read back with the fork's own
+    parser (`Tracker.File.tickets/1` plus `Janitor.Ticket.problems/1`, `janitor/ticket.ex:283`, loaded
+    read-only from the fork's `_build`) and every field round-tripped, including escaped quotes, a
+    backslash, an embedded newline, CJK, an emoji and a blocker reference; that check was **not** re-run
+    here. Measured here: `export_test.exs` **20 passed** (658 lines, 3.5s) and the service's whole suite
+    **110 passed** (6.9s), which is `87b2efe`'s 90 plus those 20.
+  - **What this round did not do, stated as open** (§18): slice 6 is not started -- the file tracker,
+    the GitHub mirror, the ticket **queue** and the janitor's second parser of the ticket format are all
+    still in the tree and in use, because every registry workflow still declares the file tracker, and
+    the retirement is semi-irreversible, so it waits on the operator's sequencing decision (item 5).
+    Nothing survives a reboot (item 8); the unattended-merge policy is still an operator decision, so a
+    pull request opened by a service-tracked run sits at `in-review` until a person presses a button
+    (item 9); and the ticket service still runs by hand on 4020 (§13). The registry's own gate
+    declaration was committed in this window (`symphony.md`, registry `dfecc0d`, 03:26:14), but **no
+    running instance serves any of this round**: the 4001 escript's mtime is 01:32:16, before
+    `d376ae8`/`df2941a`/`6ba1b04`, so the fix is committed and tested and not deployed (item 7).
+  - **And this round's own two process lessons, because this log is where the port's errors live.**
+    (a) Running two `mix test` invocations in the same checkout at once breaks both before any test runs
+    -- `** (File.Error) could not remove files and directories recursively from
+    "...\_build\test\lib\lazy_html": file already exists` -- so concurrency has to be serialised around
+    the gate, and that cost several rounds; the same family bit this round's own measurement, when a
+    long `mix test` run's output was held in a pipe and the run had to be repeated with the output
+    redirected to a file before a single line appeared. (b) A documented claim of mine was wrong and was
+    corrected by evidence: I wrote that the host-side gate tool had been used in production, and that
+    run's own rollout shows `symphony_gate` appearing **zero** times, because the tool was not
+    advertised to that project at all -- the *declaration* was exercised and the agent ran the command
+    itself. `df2941a` is the fix for the design mistake that claim was hiding.
+  - The gate, measured 2026-10-01 with HEAD at `6ba1b04`: `mix lint` exits 0 with `found no issues`
+    (**172** files analysed by credo, 7.2s; 169 at `11af6ed`), the four test files this round touched
+    report **82 passed** together and each on its own (**27 + 21 + 24 + 10**), the whole suite exits 0
+    with **1048 passed, 6 skipped, 23 excluded** (289.1s), and the service's suite is **110 passed** at
+    `3e0ad76`.
+  Next: rebuild `bin/symphony` and restart, because every commit of this round postdates the running
+  escript (mtime 01:32:16); then run one ticket against the service, so "the gate is advertised to every
+  kind" stops being a tested code path and becomes a measured deployment; then decide when slice 6
+  happens, since the specification's precondition for it now holds; and then a policy for the landing
+  sweep.
