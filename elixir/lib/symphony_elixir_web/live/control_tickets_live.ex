@@ -22,7 +22,7 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixirWeb.{Layouts, TicketPresenter}
+  alias SymphonyElixirWeb.{Endpoint, Layouts, TicketPresenter}
 
   @any "any"
   @filters ["state", "label", "assignee", "priority"]
@@ -208,8 +208,13 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
     Map.put(filters, "sort", if(sort in @sorts, do: sort, else: "identifier"))
   end
 
+  # The ticket service's transport is injected through the endpoint config exactly like the control
+  # plane's `:project_status_client`, so a test drives the board's list without opening a socket;
+  # `nil` -- everything but a test -- means the real client.
   defp load_tickets(socket) do
-    case TicketPresenter.list(project: socket.assigns.project) do
+    opts = [project: socket.assigns.project, client: Endpoint.config(:ticket_reader_client)]
+
+    case TicketPresenter.list(opts) do
       {:ok, tickets} ->
         filters = socket.assigns.filters
         visible = tickets |> Enum.filter(&matches?(&1, filters)) |> apply_sort(filters["sort"])

@@ -70,7 +70,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
 
   alias SymphonyElixir.Janitor
   alias SymphonyElixir.Land
-  alias SymphonyElixirWeb.{Layouts, TicketPresenter}
+  alias SymphonyElixirWeb.{Endpoint, Layouts, TicketPresenter}
 
   # What a comment written from this page is signed with. Not the agent's name: the agent reads this
   # discussion on its next run, and a note from the person running the console has to be distinguishable
@@ -223,7 +223,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
 
             <div class="dep-node">
               <span class="issue-id">file</span>
-              <span class="mono dep-list"><%= @ticket.path || "not found beside the queue" %></span>
+              <span class="mono dep-list"><%= @ticket.path || file_note(@ticket) %></span>
             </div>
           </div>
         </section>
@@ -289,7 +289,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
             </div>
 
             <%= if @ticket.links == [] and @ticket.url == nil do %>
-              <span class="muted">No link is recorded on this ticket.</span>
+              <span class="muted"><%= no_link_note(@ticket) %></span>
             <% end %>
           </div>
         </section>
@@ -358,17 +358,21 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
             </div>
           </div>
 
-          <pre class="code-panel"><%= @ticket.description %></pre>
+          <%= if blank_description?(@ticket) do %>
+            <p class="empty-state">
+              The ticket service holds no description for this ticket. It is still readable: its state,
+              its labels, its blockers and its comments are on this page.
+            </p>
+          <% else %>
+            <pre class="code-panel"><%= @ticket.description %></pre>
+          <% end %>
         </section>
 
         <section class="section-card">
           <div class="section-header">
             <div>
               <h2 class="section-title">Comments</h2>
-              <p class="section-copy">
-                The `## Discussion` section: the issue comments the janitor mirrored, each with its
-                author and its stable id.
-              </p>
+              <p class="section-copy"><%= comments_note(@ticket) %></p>
             </div>
           </div>
 
@@ -431,11 +435,19 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
       |> assign(:error, nil)
       |> assign(:landed, nil)
 
-    case TicketPresenter.fetch(id, project: socket.assigns.project) do
+    case TicketPresenter.fetch(id, read_options(socket)) do
       {:ok, ticket} -> socket |> assign(:ticket, ticket) |> assign_states()
       {:error, :not_found} -> assign(socket, :states, [])
       {:error, reason} -> socket |> assign(:states, []) |> assign(:error, TicketPresenter.describe(reason))
     end
+  end
+
+  # Whose queue this is, and the transport that queue is read over. The ticket service's client is
+  # injected through the endpoint config exactly like the control plane's `:project_status_client`, so
+  # a test drives every answer this page has without one socket being opened; `nil` -- which is what
+  # every environment but a test configures -- means the real client.
+  defp read_options(socket) do
+    [project: socket.assigns.project, client: Endpoint.config(:ticket_reader_client)]
   end
 
   # The states the picker offers: the workflow's, with the ticket's own state in front of them when the
@@ -680,6 +692,36 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   defp other_links(ticket) do
     Enum.reject(ticket.links, &(&1.url == ticket.pr_url))
   end
+
+  # The ticket's own file, or why it has none. "not found beside the queue" is a claim about a queue,
+  # and a ticket read from the service never came from one.
+  defp file_note(%{tracker: :service}), do: "read from the ticket service, not from a file"
+  defp file_note(_ticket), do: "not found beside the queue"
+
+  # A ticket with no link is told so in its own tracker's words. The service keeps attachments rather
+  # than the file tracker's `links:` entries, and this page does not read them: "no link is recorded"
+  # would be a claim about a store this page never asked.
+  defp no_link_note(%{tracker: :service}) do
+    "No URL is recorded on this ticket by the ticket service; its attachments are not read by this page."
+  end
+
+  defp no_link_note(_ticket), do: "No link is recorded on this ticket."
+
+  # Where a ticket's comments come from is not the same for both kinds: a service ticket's comments are
+  # rows in the service's store, not a `## Discussion` section in a file.
+  defp comments_note(%{tracker: :service}) do
+    "The comments the ticket service holds for this ticket, oldest first, each with its author and its id."
+  end
+
+  defp comments_note(_ticket) do
+    "The `## Discussion` section: the issue comments the janitor mirrored, each with its author and its stable id."
+  end
+
+  # An empty body means two different things, and only the tracker can say which. A file ticket keeps
+  # the panel it has always had -- the file is the contract -- while a service ticket that holds no
+  # description is told so in words rather than as an empty panel a reader would misread.
+  defp blank_description?(%{tracker: :service, description: description}), do: description in [nil, ""]
+  defp blank_description?(_ticket), do: false
 
   defp route(ticket) do
     [ticket.adapter, ticket.model]

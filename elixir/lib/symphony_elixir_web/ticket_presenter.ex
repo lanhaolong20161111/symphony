@@ -11,19 +11,15 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   ## Where each field comes from
 
-  Two sources, deliberately:
+  One source, so there is one answer per question: `SymphonyElixirWeb.TicketReader`, which reads a
+  ticket from whichever tracker the workflow configures -- the file queue's own parse for a `file`
+  tracker (the same one the dispatcher uses, so the board and the scheduler cannot disagree about what
+  a ticket says), or the ticket service's deep read for a `ticket_service` tracker. That module's
+  moduledoc says why the seam is there and what a tracker this console cannot read answers.
 
-    * the **list-level fields** -- state, priority, labels, assignee, blockers (with each blocker's own
-      state), branch name, adapter/model -- come from `SymphonyElixir.Tracker.File.tickets/1`, i.e. the
-      same parse the dispatcher uses, so the board and the scheduler cannot disagree about what a
-      ticket says;
-    * the **Markdown body**, the `## Discussion` entries and the `links:` list are read from the
-      ticket file itself, because the tracker's `Issue` carries none of them. `links:` is where the
-      janitor records the pull request it opened for the ticket (`Ticket.add_link/4`).
-
-  The directory is scanned **once** per call and indexed by front-matter id and by file stem: the
-  tracker reports identifiers, not paths, and a per-ticket scan would make a board of N tickets cost
-  N directory listings.
+  This module keeps what is policy rather than reading: which fields a page shows, what a tracker's
+  own vocabulary is, where a write to *this* queue has to land, and how a read error is put into a
+  sentence a page can render.
 
   ## Whose queue is read
 
@@ -39,23 +35,20 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   """
 
   alias SymphonyElixir.{Config, Projects}
-  alias SymphonyElixir.Janitor.Ticket
-  alias SymphonyElixir.Tracker.File, as: FileTracker
+  alias SymphonyElixirWeb.TicketReader
 
   @type ticket :: map()
   @type discussion_entry :: %{author: String.t(), at: String.t(), id: String.t(), text: String.t()}
-
-  # `links: [{url: "https://...", title: "PR #12", kind: pr}]` -- the shape `Ticket.add_link/4` writes.
-  @link_regex ~r/\{url:\s*"([^"]*)",\s*title:\s*"([^"]*)",\s*kind:\s*"?([A-Za-z_-]+)"?\}/
-  # `- **author** (2026-01-01T00:00:00Z, id=local-1): text` -- the shape `Ticket.comment_line/4` writes.
-  @comment_regex ~r/^-\s+\*\*(.+?)\*\*\s+\(([^)]*)\):\s*(.*)$/
-  @discussion_regex ~r/^##\s*Discussion\s*$\n(.*?)(?=^##\s|\z)/ms
 
   @doc """
   Every ticket in the configured queue, sorted by identifier.
 
   `:project` names a registry project; its own workflow file then supplies the tracker settings.
-  Without it -- the default -- the queue is this instance's own.
+  Without it -- the default -- the queue is this instance's own. `:client` replaces the ticket
+  service's HTTP transport, which is how a test reads a service-backed queue without a socket.
+
+  The list is a list read: a ticket's body and discussion are answered by `fetch/2`, which for a
+  service tracker is the service's deep read.
   """
   @spec list() :: {:ok, [ticket()]} | {:error, term()}
   @spec list(keyword()) :: {:ok, [ticket()]} | {:error, term()}
@@ -66,19 +59,19 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   end
 
   @doc """
-  One ticket by identifier (its front-matter `id` also matches).
+  One ticket, with its body, its discussion and its links.
 
-  Takes the same `:project` option as `list/1`.
+  Takes the same options as `list/1`: `:project` for whose queue this is, and `:client` for the
+  ticket service's transport.
   """
   @spec fetch(String.t()) :: {:ok, ticket()} | {:error, :not_found | term()}
   @spec fetch(String.t(), keyword()) :: {:ok, ticket()} | {:error, :not_found | term()}
   def fetch(identifier, opts \\ []) when is_binary(identifier) do
-    with {:ok, tickets} <- load(opts) do
-      case Enum.find(tickets, &(&1.identifier == identifier or &1.id == identifier)) do
-        nil -> {:error, :not_found}
-        ticket -> {:ok, ticket}
-      end
+    with {:ok, tracker} <- tracker_settings(opts) do
+      TicketReader.fetch(tracker, identifier, reader_options(opts))
     end
+  rescue
+    error -> {:error, {:ticket_read_failed, Exception.message(error)}}
   end
 
   @doc """
@@ -97,25 +90,8 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   @spec declared_states(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def declared_states(opts \\ []) do
     with {:ok, tracker} <- tracker_settings(opts) do
-      {:ok, vocabulary(tracker)}
+      {:ok, TicketReader.states(tracker)}
     end
-  end
-
-  # Active states first, in declared order: the first of them is the one that gates a blocked ticket
-  # (`tracker/file.ex`), so it is the entry a person is likeliest to want. Deduplicated because a
-  # workflow that lists one state in both lists should not offer it twice.
-  defp vocabulary(tracker) do
-    [Map.get(tracker, :active_states), Map.get(tracker, :terminal_states)]
-    |> Enum.flat_map(&declared/1)
-    |> Enum.uniq()
-  end
-
-  # One declared state list, in the workflow's own order, with the blanks a hand-written list can
-  # carry dropped.
-  defp declared(states) do
-    states
-    |> List.wrap()
-    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
   end
 
   @doc """
@@ -136,7 +112,7 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   @spec terminal_state(keyword()) :: {:ok, String.t()} | {:error, term()}
   def terminal_state(opts \\ []) do
     with {:ok, tracker} <- tracker_settings(opts) do
-      case tracker |> Map.get(:terminal_states) |> declared() do
+      case TicketReader.states(tracker, :terminal) do
         [state | _rest] -> {:ok, state}
         [] -> {:error, :no_terminal_state}
       end
@@ -169,7 +145,7 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   defp project_write_options(name, opts) do
     with {:ok, tracker} <- tracker_settings(opts) do
-      write_target(provider_path(tracker), name)
+      write_target(TicketReader.queue_path(tracker), name)
     end
   end
 
@@ -238,7 +214,63 @@ defmodule SymphonyElixirWeb.TicketPresenter do
     "the write failed: #{message} (write_raised)"
   end
 
+  # A tracker this console cannot read at all. It is spelled out rather than left to the catch-all
+  # because it is the read error a person would otherwise misread: an empty page where a ticket should
+  # be looks like "this ticket has no description" and an empty board looks like "no work to do", and
+  # neither is what this says.
+  def describe({:ticket_kind_not_readable, kind}) do
+    "this console reads tickets from a file queue or from the ticket service, and this tracker is " <>
+      "configured as #{inspect(kind)}: nothing here can read a ticket's list, its body or its " <>
+      "discussion from it (ticket_kind_not_readable)"
+  end
+
+  def describe(:invalid_tracker_settings) do
+    "the workflow declares no tracker this console could read a ticket from (invalid_tracker_settings)"
+  end
+
+  # A service read that asked for no state would be answered with an empty list before the service
+  # reads anything, and an empty list is an empty board -- which reads as "no work to do".
+  def describe(:no_ticket_service_states) do
+    "the workflow declares no active_states or terminal_states, so the ticket service was asked for " <>
+      "no state at all; an empty board would be this console's invention rather than the service's " <>
+      "answer (no_ticket_service_states)"
+  end
+
+  def describe(:missing_ticket_service_url) do
+    "the workflow configures a ticket_service tracker without a provider.url, so there is no address " <>
+      "to ask (missing_ticket_service_url)"
+  end
+
+  # The service's own failures, passed through with the reason it gave and rendered instead of an
+  # empty ticket: a page that cannot read a ticket must say why, not show nothing.
+  def describe({:ticket_service_unreachable, reason}) do
+    "the ticket service did not answer: #{service_detail(reason)} (ticket_service_unreachable)"
+  end
+
+  def describe({:ticket_service_invalid_payload, body}) do
+    "the ticket service answered something that is not a ticket: #{service_detail(body)} " <>
+      "(ticket_service_invalid_payload)"
+  end
+
+  def describe({:ticket_service_http, status, body}) do
+    "the ticket service answered HTTP #{status}: #{service_detail(body)} (ticket_service_http)"
+  end
+
   def describe(reason), do: inspect(reason)
+
+  # The store's own error message when the body is one of its error envelopes, and a short inspect of
+  # anything else: a body is data and can be long, and a page shows a sentence, not a document.
+  defp service_detail(%{"error" => %{"message" => message}}) when is_binary(message), do: message
+
+  defp service_detail(body) when is_map(body) do
+    body |> inspect(limit: 6, printable_limit: 200) |> String.replace(~r/\s+/, " ")
+  end
+
+  defp service_detail(body) when is_binary(body) do
+    body |> String.trim() |> String.slice(0, 200)
+  end
+
+  defp service_detail(other), do: inspect(other)
 
   defp workflow_reason({:missing_workflow_file, path, reason}) do
     "#{path} (#{inspect(reason)})"
@@ -266,161 +298,18 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   defp load(opts) do
     with {:ok, tracker} <- tracker_settings(opts) do
-      case FileTracker.tickets(tracker) do
-        {:ok, issues} ->
-          index = file_index(provider_path(tracker))
-          {:ok, Enum.map(issues, &to_ticket(&1, index))}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      TicketReader.list(tracker, reader_options(opts))
     end
   rescue
     error -> {:error, {:ticket_read_failed, Exception.message(error)}}
   end
 
-  defp provider_path(%{provider: provider}) when is_map(provider) do
-    case provider["path"] || provider[:path] do
-      path when is_binary(path) and path != "" -> Path.expand(path)
-      _other -> nil
-    end
-  end
-
-  defp provider_path(_settings), do: nil
-
-  # One listing and one read per file. A file whose front matter does not parse is not a ticket, so it
-  # is simply not in the index (the tracker skips the same files, which is how README.md lives beside
-  # the queue).
-  defp file_index(nil), do: %{}
-
-  defp file_index(dir) do
-    case File.ls(dir) do
-      {:ok, names} -> names |> Enum.filter(&ticket_file?/1) |> Enum.reduce(%{}, &index_file(dir, &1, &2))
-      {:error, _reason} -> %{}
-    end
-  end
-
-  defp ticket_file?(name), do: String.ends_with?(name, ".md") and not String.starts_with?(name, "BOARD-")
-
-  defp index_file(dir, name, acc) do
-    path = Path.join(dir, name)
-
-    with {:ok, text} <- File.read(path),
-         {:ok, %{front_matter: front_matter, body: body}} <- Ticket.split(text) do
-      entry = %{path: path, body: body || "", text: text}
-      id = Ticket.get(front_matter, "id")
-
-      acc
-      |> Map.put(Path.rootname(name), entry)
-      |> put_id(id, entry)
-    else
-      _other -> acc
-    end
-  end
-
-  defp put_id(acc, "", _entry), do: acc
-  defp put_id(acc, id, entry), do: Map.put(acc, id, entry)
-
-  defp to_ticket(issue, index) do
-    entry = Map.get(index, issue.identifier) || Map.get(index, issue.id) || %{}
-    text = Map.get(entry, :text)
-    links = links(text)
-
-    %{
-      identifier: issue.identifier,
-      id: issue.id,
-      title: issue.title,
-      state: issue.state,
-      priority: issue.priority,
-      labels: issue.labels || [],
-      assignee: issue.assignee_id,
-      blocked_by: Enum.map(issue.blocked_by || [], &blocker/1),
-      branch_name: issue.branch_name,
-      url: issue.url,
-      adapter: Map.get(issue, :adapter),
-      model: Map.get(issue, :model),
-      description: description(issue),
-      discussion: discussion(text),
-      links: links,
-      pr_url: pr_url(links),
-      path: Map.get(entry, :path)
-    }
-  end
-
-  defp blocker(%{identifier: identifier, state: state}), do: %{identifier: identifier, state: state}
-  defp blocker(other), do: %{identifier: to_string(other), state: nil}
-
-  # The tracker's `description` is the ticket body when the front matter does not override it, and the
-  # body carries the `## Discussion` section -- which the comments panel shows on its own. Cutting it
-  # here is what keeps a comment from appearing twice on one page.
-  defp description(issue) do
-    (issue.description || "")
-    |> strip_discussion()
-    |> String.trim()
-  end
-
-  defp strip_discussion(body) do
-    case Regex.run(~r/\A(.*?)(?=^##\s*Discussion\s*$)/ms, body) do
-      [_, head] -> head
-      _other -> body
-    end
-  end
-
-  defp links(nil), do: []
-
-  defp links(text) do
-    case Ticket.split(text) do
-      {:ok, %{front_matter: front_matter}} -> front_matter |> Ticket.get("links") |> parse_links()
-      :skip -> []
-    end
-  end
-
-  defp parse_links(""), do: []
-
-  defp parse_links(value) do
-    @link_regex
-    |> Regex.scan(value)
-    |> Enum.map(fn [_, url, title, kind] -> %{url: url, title: title, kind: kind} end)
-  end
-
-  defp pr_url(links) do
-    links
-    |> Enum.find(&pull_request?/1)
-    |> case do
-      nil -> nil
-      link -> link.url
-    end
-  end
-
-  defp pull_request?(%{kind: kind, url: url}) do
-    kind in ["pr", "pull_request", "pull-request"] or String.contains?(url || "", "/pull/")
-  end
-
-  defp discussion(nil), do: []
-
-  defp discussion(text) do
-    case Regex.run(@discussion_regex, text) do
-      [_, section] -> section |> String.split("\n") |> Enum.flat_map(&parse_comment/1)
-      _other -> []
-    end
-  end
-
-  defp parse_comment(line) do
-    case Regex.run(@comment_regex, line) do
-      [_, author, meta, text] ->
-        [%{author: author, at: comment_timestamp(meta), id: comment_id(meta), text: String.trim(text)}]
-
-      _other ->
-        []
-    end
-  end
-
-  defp comment_timestamp(meta), do: meta |> String.split(", id=") |> List.first() |> String.trim()
-
-  defp comment_id(meta) do
-    case Regex.run(~r/id=([^,\s]+)/, meta) do
-      [_, id] -> id
-      _other -> ""
-    end
+  # `:client` is the ticket service's transport, and nil is "use the real one": a page always hands in
+  # whatever its endpoint config carries, and the environments that configure nothing must reach
+  # `TicketService.get/1` rather than a client that is not there.
+  defp reader_options(opts) do
+    opts
+    |> Keyword.take([:client])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 end
