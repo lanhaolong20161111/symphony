@@ -27,6 +27,14 @@ Already true, and worth not redoing:
   in the same directory under `archive/` -- readable, and no longer a project, because the registry
   lists `*.md` in the directory root. The console that began as one project with no management is now
   a multi-project control plane: §7-§12.
+- The agent can run its project's **declared gate** and read the answer (§14, `cf4a7da`) -- the check
+  the sandbox cannot make for itself on this host. The tool is advertised only to a project that
+  declares `gate.command`, and no workflow in the registry declares one yet.
+- The last step of the loop is on the ticket's own page (§15, `97329cb`): the pull request the ticket
+  records is judged with `Land`'s own core, merged only on a verdict to land, and the outcome is
+  written onto the ticket.
+- The ticket service is **running** on 4020 (§13), and the operator reaches this machine from outside
+  through `tailscale serve`, tailnet-only, with both applications still on loopback (§16).
 
 What was not true when this file was first written -- the whole distance to upstream -- and where each
 one stands now:
@@ -142,7 +150,9 @@ then `mix test`, both from `elixir/` -- **cannot compile** inside the agent sand
 (`Mix.Sync.PubSub`'s first compile dies; round 19 measured exactly where), so the `push` skill
 demanding it would have blocked every push for a reason unrelated to the change. The skill now says
 to report that and continue with the check the ticket names (target repository `1df8639`); the
-repository gate is re-run where it can run.
+repository gate is re-run where it can run. **Round 25 gave that its own tool** (§14, `cf4a7da`): the
+gate now runs host-side, on the agent's own request, so "the agent verifies its own work" is a thing
+this deployment can do rather than a thing it has to hand to somebody else.
 
 **The credential is now a GitHub App, and it is minted per run (round 22).** `ea65cf1` added
 `SymphonyElixir.GitHubAppToken` (`elixir/lib/symphony_elixir/github_app_token.ex`). It signs a
@@ -406,7 +416,8 @@ failing the whole mirror). And twice, editing these very documents with a shell 
 that left an orphan line, and an `Add-Content` that introduced a stray carriage return -- broke a file
 (`3ad7c04`, whose own commit message records the third incident). The rule now applied, here and in the
 batch's commits: **write text files whole, or verify the read before writing; never perform line
-surgery through a bare write call.**
+surgery through a bare write call.** Round 25 extended it to commit messages, where the same rule is
+"a number is a claim, and a claim is measured or it is not written" (§19).
 
 **One dormant POSIX script, deliberately not "fixed".** This fork's own `.codex/worktree_init.sh` is
 `#!/usr/bin/env bash` and ends in `make setup`, which does not exist on this host -- and nothing in the
@@ -441,7 +452,7 @@ the App credential end to end):
 | 3 | **achieved** (SYM-57, `08a2a31`, §3): the agent pushed the ticket's branch itself (exit 0, `[new branch] symphony/SYM-57`), opened PR #63, and the host's `symphony_publish` answered `pushed=false, committed=false` -- there was nothing left for it to do. `SEC_E_NO_CREDENTIALS` went from 20-22 occurrences per run to 0. **Re-achieved on all four tickets of the 2026-09-30 run, with the App credential** (§3): each agent pushed its own branch and opened its own PR with a `ghs_` token, each PR's head SHA equalled its workspace's HEAD, and the host's publish tool answered `pushed=false, committed=false` on each |
 | 4 | **demonstrated live**: SYM-49 finished with `branch_name: symphony/SYM-49` and `links: [{url: ".../pull/47", title: "PR 47", kind: pr}]` on the ticket |
 | 5 | **done, unit-tested**, and the BOM tolerance found by SYM-48 is fixed and re-verified live (a ticket written with a BOM now dispatches) |
-| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
+| 6 | **the rule every round**: `mix lint` clean and the suite green -- re-measured 2026-09-30 at `b03d3c5`: `mix test` in `elixir/` exits 0 with **912 passed, 6 skipped, 23 excluded** (excluding `:needs_symlinks`, `:needs_ssh`, `:posix_paths`), 261.0s, which is exactly the figure `b03d3c5` itself reports (the previous batch's reading was 796 passed). Round 25 re-measured both at its own last commit (`979a319`; HEAD has since moved to `5bec515`, the deploy batch, which is not measured here): `mix lint` exits 0, `found no issues`, 164 source files (6.8s), and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**, 208.4s -- measured while the next feature was already being written into the same working tree, so the tree was not clean; what makes it a reading of this commit's tests is its total, which is exactly HEAD's own test set: 912 at `b03d3c5` plus the 37 this round added (18 + 10 + 9). The three test files that round added were also run on their own: **82 passed** (18 + 55 + 9). The audit below is item 6's other half -- what changed, and what it would take to get upstream behaviour back |
 
 ### The fork against upstream, audited
 
@@ -632,7 +643,8 @@ a ticket's bytes from the view. A ticket that is not valid UTF-8 is refused with
 reason rather than rewritten; a failure leaves the file byte-identical; a write made while reading
 another project's queue lands in that project's files; and nothing is written without a submit.
 `578e526` wrapped the host write so that a raise inside it becomes a refusal the page renders rather
-than a crashed LiveView; the page's two test files report 20 tests at that commit.
+than a crashed LiveView; the page's two test files report 20 tests at that commit. Round 25 added the
+third write -- landing the ticket's own pull request -- in §15.
 
 ## 13. The ticket service: the store, the surface, and the contract
 
@@ -640,7 +652,7 @@ The tracker work of §4 is finished, and its successor is being built rather tha
 service that owns tickets, in a **new sibling repository**
 `~/Desktop/android_cli_demos/symphony-tickets` (its own git repository, its own SQLite through
 `exqlite`; no Ecto at all, and Phoenix only for the HTTP surface -- `mix.exs:56-59` lists `exqlite`,
-`phoenix`, `bandit` and `jason`). Two slices are working, and neither is in this fork:
+`phoenix`, `bandit` and `jason`). Three slices are committed, and none of them is in this fork:
 
 - **The store** (`7c31f50`, 42 tests): tickets with both a machine state type and a display name,
   labels, blocker relations that resolve rather than disappear, threaded comments, attachments keyed
@@ -673,6 +685,30 @@ stored, because the consumer already matches them case-insensitively and folding
 would make a row disagree with the ticket it names. `dispatchable` is still the stored column: the
 gating decision belongs to the scheduler, not to the store. `mix precommit`: 90 tests.
 
+**It is running, by hand, and nothing here survives a reboot.** Measured 2026-10-01: the listener on
+`127.0.0.1:4020` is PID 19384, started 2026-09-30 23:59:37, running `mix phx.server`; `GET /health`
+answers `{"ok":true}`. The empty-request rule above was then watched live rather than only in its test:
+`GET /tickets` answered `{"tickets":[]}` and created **no database file at all**, and the first query
+that named a state (`GET /tickets?state=ready`) is what created
+`~/.symphony-tickets/tickets.db` (65,536 bytes). There is **no auto-start**: no scheduled task and no
+`HKCU\...\Run` entry names the service or the hub (checked 2026-10-01), so a reboot takes the whole
+loop down until a person starts two processes. The loop as it stands is: a ticket is created, the
+agent develops and -- once a project declares a gate (§14) -- verifies its own work, opens its own
+pull request, and the operator lands it from the phone (§15). The **deploy action is being written
+right now** -- the next round's work, not this one's. When it was first measured,
+`elixir/lib/symphony_elixir/deploy.ex`, `deploy_test.exs` and `control_deploy_test.exs` were in the
+working tree and uncommitted, and `config/schema.ex:617` already declared a `Deploy` block; while
+these documents were being written, two commits landed for it (`cd04499`, then `5bec515`), which is
+where HEAD now is. Nothing in this document describes its design. An automatic landing sweep is an
+open decision that needs a policy first: which tickets may merge unattended (§18).
+
+**And what would actually replace the file tracker is paused.** The batch calls that bundle slice 2c;
+the specification's own numbering is slice 3 (a thin adapter in this fork that speaks the service), 4
+(the console reading through it) and 6 (retiring the mirror and the janitor's second parser)
+(`docs/ticket-service-spec.md:158-165`). It is paused, plainly, because the last three batches were
+about making the pipeline that exists usable from a phone -- and saying it any other way would read as
+progress on a plan that has not moved.
+
 The design is `docs/ticket-service-spec.md` -- the contract, the minimal surface, the interface, six
 slices, and the operator's five decisions, which supersede the document's own recommendations: a
 standalone application on port 4020; **the GitHub mirror is dropped rather than ported**; the
@@ -698,14 +734,187 @@ assertion as written would have made a real request to a real API. The adapter's
 injected and the four REST adapters get stubs that fail the test if they are ever reached, which turns
 "refused before the wire" from a reading of the source into a fact.
 
-## 14. The plan to deploy on Linux
+## 14. The gate, run host-side, where `mix` works
+
+`cf4a7da` gave the agent the one capability the sandbox takes away: it can run its project's gate and
+read the answer. `SymphonyElixir.Janitor.GateTool` is
+`elixir/lib/symphony_elixir/janitor/gate_tool.ex` (393 lines), with
+`elixir/test/symphony_elixir/janitor/gate_tool_test.exs` (417 lines, 18 tests).
+
+**The problem it solves is measured, not suspected** (§3, §5 round 19): a turn runs in a restricted
+local account, and on this machine `mix` dies there before compiling -- `Mix.Sync.PubSub` calls
+`Mix.Utils.detect_user_id!/0`, which stats the user profile, and `File.stat("C:\Users\lhl20")` is
+`{:error, :eacces}` for that account. So an agent could write code and never check it, and the gate was
+the host's job or a person's -- which is why "the agent verifies its own work" was impossible here.
+Agent tools already execute in the Symphony process, with the host's own permissions, so this tool is
+that same surface pointed at the gate.
+
+**The command is declared, and the agent cannot influence it.** `gate.command` in the workflow is the
+only command (`config/schema.ex:583-600`), and an argument that tries to carry one is refused **by
+name** rather than ignored -- silently dropping `command` would leave the caller believing it had
+chosen what ran. The only argument the schema accepts is a ticket
+(`@allowed_arguments [@ticket_argument]`, `gate_tool.ex:29`); anything else comes back with
+`"...takes no command..."` and `supportedArguments` beside it (`:274-288`), and a ticket value that is
+not a plain identifier is refused rather than sanitised (`:295-306`) -- `SYM-26\n` is exactly what an
+unanchored `$` lets through, and that value then gets joined into a path. That is the whole security
+rule of the module: a tool that runs what it is handed is a remote shell for anything that can write an
+agent prompt, and the host side of this one is not sandboxed at all.
+
+**A project that declares no gate does not get the tool.** `tool_specs/0` answers `[]` (`:60-68`), so
+it is not advertised at all -- rather than advertised and failing on every call -- and a call that
+arrives anyway (a stale binding, the HTTP tool endpoint) is told `this project declares no gate: add
+gate.command to WORKFLOW.md. Nothing was run.` (`:183-185`). `gate.command` is deliberately not
+required and not validated for blankness: "this project declares no gate" has to stay a state a
+workflow can be in, rather than a workflow that refuses to load over a setting nothing needs
+(`config/schema.ex:579-582`).
+
+**Everything about the answer is bounded.** The deadline is the project's `gate.timeout_ms`, default
+900,000 ms (`gate_tool.ex:30`, `config/schema.ex:591`); the answer is the last 40 lines
+(`@tail_lines`, `:35`), then a hard 8,192-byte cap (`@max_output_bytes`, `:36`) applied through
+`Workspace.sanitize_hook_output_for_log/2` (`:330-335`), which already trims back to a **character**
+boundary -- the same class of byte-cutting had corrupted a ticket file earlier in the same batch (§5,
+round 23), so the bound must not leave a tail that is no longer text. The command runs through
+`Shell.run/3`, never `System.cmd/3` (`:115-131`), because that is the runner that owns a **total**
+deadline (a command that keeps printing cannot reset it) and kills the **process tree** on expiry, so a
+`mix test` that outlives its deadline takes its children with it instead of leaving a survivor holding
+the stdout pipe. A refusal, a non-zero exit, a timeout and a command that cannot start all come back as
+values in the envelope the other tools use (`%{"success", "output", "contentItems"}`, `:342-354`);
+none of them raises, because a raise inside an agent tool becomes a protocol-level error for the whole
+session (`:102-106`).
+
+**Where it runs, and how it got there.** The file tracker advertises the janitor's tools and then the
+gate's -- `AgentTool.tool_specs() ++ GateTool.tool_specs()` (`tracker/file.ex:171`) -- and routes a
+call by `GateTool.handles?/1` (`:177-181`), so a project that declares no gate still has exactly the
+three janitor tools it had. The directory is the session's own: the Codex path threads `workspace` from
+the session into the tool executor (`codex/app_server.ex:94`), so the gate runs in the tree that turn
+is editing; where there is no session (the MCP stdio server, the HTTP endpoint) the workspace is
+derived from the ticket the call names, through `Workspace.workspace_key/1`
+(`gate_tool.ex:210-243`) -- either way a path the host resolved, never one an argument named.
+
+**Measured state, which is not the same thing as "in use".** No workflow in the registry declares a
+`gate:` block (searched 2026-10-01 over `~/code/symphony-projects/*.md`), so on this deployment the
+tool is advertised to nobody and no agent has run a gate through it. And the instance on 4001 was
+started 2026-09-30 23:16:26 -- before `cf4a7da` -- so the running service does not serve the tool
+either; it needs the same rebuild-and-restart every batch has needed. What is measured is the code and
+its tests: `mix lint` exits 0 with `found no issues` (164 source files), the three test files this
+batch added report **82 passed** when run together -- 18 in `gate_tool_test.exs`, 55 in
+`land_test.exs`, 9 in `control_ticket_land_test.exs` -- and the suite as a whole exits 0 with **949
+passed, 6 skipped, 23 excluded** (208.4s; the caveat on that number is in §6 item 6). Those readings
+were taken with HEAD at `979a319`; HEAD moved to `5bec515` while these documents were being written,
+and the deploy batch's own commits are not measured here.
+
+## 15. Landing a ticket from its own page
+
+The loop stopped one step short of done: the agent opened its own pull request and the ticket sat at
+`in-review` until a person merged it by hand. `97329cb` gave the single-ticket page that last step,
+and `979a319` pinned the judgement behind it.
+
+**It decides with the project's own judgement, not a second opinion.** The page calls
+`SymphonyElixir.Land.land/3` (`elixir/lib/symphony_elixir/land.ex:915`), which is the watcher's
+judgement asked **once** instead of in a loop: the facts are read the way `watch/1` reads them and
+`verdict/1` decides (`land.ex:231`) -- the one function where the four outcomes live. The page's
+handler takes no field at all (`control_ticket_live.ex:123`): the pull request and the branch are the
+ticket's own, so the submit is the whole request, and there is nothing a form could say that would
+change what runs. The operation is looked up rather than called by name (`land_operation/0`, `:527`),
+so the page's tests put their own function in the endpoint config and never make a `gh` call.
+
+**Only one verdict merges.** A verdict to land squash-merges with `gh pr merge <number> --squash
+--delete-branch` and nothing else (`@merge_flags`, `land.ex:972`; the test asserts that exact argv and
+refuses any `--force`, `--admin` or `--auto`, because a merge carrying one of those is a merge nobody
+said yes to). Every other verdict merges nothing and renders the skill's own reason -- 2 feedback, 3
+checks, 4 head moved, 5 conflict, the skill's numbers and the skill's names for them
+(`control_ticket_live.ex:639-642`).
+
+**Asking once changes three things, and each one is fail-closed.** The pull request is read **twice**
+-- once, then its checks are fetched for that head, then it is read again -- because a single read has
+nothing to compare against, and a head that moved between the two reads judges 4 exactly as the loop
+judges it (`land.ex:930-941`). A check that is still running **refuses** (3) rather than going round
+again: nothing here waits, so "we have not heard yet" must not come out as "it passed" (`:966`, the
+same rule the loop asks in `clear/4`). And checks that never appeared at all are already past the 120
+seconds the watcher waits out (`@checks_absent_deadline_seconds`, `:43`, `:961`) -- this does not wait
+two minutes to learn that nothing reported.
+
+**Two refusals that are not verdicts, and both worth naming.** A pull request whose head branch is not
+the branch the ticket records is refused rather than merged (`land.ex:923-928`): it is not the pull
+request the ticket is talking about, so nothing is guessed at and nothing is searched for -- the test
+shows the refusal happens on the first answer, so nothing else is even asked. And a merge that `gh`
+itself refuses is reported as `{:error, {:merge_failed, reason}}` (`:974-979`) rather than as one of
+the skill's policy refusals: "the merge did not happen" and "the skill said do not merge" are different
+facts, and the page renders them as different sentences (`land_reason/1`, `control_ticket_live.ex:644-657`).
+
+**Afterwards the ticket is the audit trail, and it is written in two steps.** A merge is the only thing
+that moves the ticket, so the terminal state is written first -- the **first** entry of the workflow's
+own `terminal_states`, read from the project's file rather than from a word written in the page code
+(`TicketPresenter.terminal_state/1`, `ticket_presenter.ex:137-146`; `declared/1`, `:115-119`) -- and
+then the outcome is appended to `## Discussion` signed `operator`, naming who asked, the verdict and
+what the merge did (`control_ticket_live.ex:626-631`). The state goes first because it is what the
+scheduler reads (`:568-571`). A landing that merged and then failed to record it is reported in **two
+halves**, because both halves happened (`:610-621`): losing either one would be the page lying about
+the state of the world. A ticket that records no pull request, or no branch, is told so rather than
+searched for (`:538-556`), and the four refusals leave the ticket file **byte-identical** -- the page
+checks that against the file, not against its own render.
+
+**Tests.** `elixir/test/symphony_elixir/land_test.exs` is 55 tests at `979a319` (45 before it): the new
+`describe "land/3"` block is 9 of them, fed the payloads the core is written to read, so no `gh` runs
+and "the merge was never run" is checked against a recorded argv rather than assumed. `979a319` also
+pins the mapping from facts to verdict as a nine-row table (`@verdict_table`): one row per fact -- a
+conflict, a moved head, unanswered feedback, a failed check, checks absent past the deadline, and
+nothing in the way -- plus three rows that pin the precedence the code's `cond` encodes, so a
+reordering that let a failed check outrank feedback, or a moved head outrank a conflict, fails a test
+instead of reaching a merge. The page's own file is
+`elixir/test/symphony_elixir_web/control_ticket_land_test.exs` (311 lines): seven `test` call sites,
+which are **nine tests** because one of them runs once per refusal kind.
+
+## 16. Reaching this machine from outside
+
+This is real infrastructure now, and it is recorded for the same reason as everything else here: so the
+next session does not have to re-derive it. Tailscale is installed on this machine and the device is
+named `pc`; `tailscale serve` publishes two mappings, both marked **(tailnet only)** by
+`tailscale serve status` (measured 2026-10-01):
+
+| tailnet URL | proxied to | what it is |
+|---|---|---|
+| `https://pc.tail0a3bfa.ts.net` | `http://127.0.0.1:4001` | the control console |
+| `https://pc.tail0a3bfa.ts.net:8443` | `http://127.0.0.1:4020` | the ticket service (§13) |
+
+**The property that matters is that both applications still listen only on loopback.** Measured:
+`Get-NetTCPConnection -State Listen -LocalPort 4001,4020` returns `127.0.0.1` for both and nothing
+else; the ticket service states the same rule in its own configuration (`symphony-tickets`,
+`config/config.exs:21-36`), and the hub has it in §8. Nothing here is exposed publicly, and
+**`tailscale funnel` must not be used**: neither service authenticates, so publishing either one would
+put an unauthenticated write surface on the internet -- the ticket service's own config says in as many
+words that whoever can reach the port can rewrite the tracker. Tailnet-only `serve` is the
+SSH-port-forward answer of §17 for a phone, and only because the tailnet is the operator's own devices.
+
+**Two practical facts were measured here, and one earlier note did not survive the re-measurement.**
+
+- **Clash's TUN does not interfere, and the reason is the route table.** Clash Verge is running
+  (`clash-verge`, `verge-mihomo`, and its `Meta Tunnel` adapter), and the system proxy is set
+  (`ProxyEnable 1`, `ProxyServer 127.0.0.1:7897`), yet the tailnet needs no route of its own: what
+  `Get-NetRoute` shows for `100.*` are host routes -- `100.79.45.78/32` (this node),
+  `100.65.90.10/32` (the phone) and `100.100.100.100/32` (MagicDNS) -- all on `InterfaceAlias
+  Tailscale`, and there is no `100.64.0.0/10` route on the Meta Tunnel at all. An earlier suspicion
+  that the tunnel would swallow the tailnet range is retired by that measurement.
+- **A self-test from this same machine reaches the service, which corrects an earlier note.** Measured
+  2026-10-01: `curl.exe -s -o NUL -w '%{http_code}' https://pc.tail0a3bfa.ts.net/` answers `200` (the
+  console, 0.04s) and `:8443` answers `404` with the ticket service's own body,
+  `{"error":{"code":"not_found","message":"no such endpoint"}}` -- that payload is the service
+  answering, not a proxy -- and `Invoke-WebRequest` agrees on both. An earlier note in this batch
+  recorded that such a self-test *fails*, because Tailscale does not hairpin a node to its own `serve`
+  endpoint; it does hairpin here, so the measurement above is the fact and the earlier note is
+  retired. What the self-test cannot show is the thing that matters: it proves the mapping exists, not
+  that a remote device reaches it.
+
+## 17. The plan to deploy on Linux
 
 This is the operator's **stated intent**, recorded here rather than measured: the deployment
 eventually moves to Linux. It is attractive for one reason, and it is the reason this whole document
 exists -- the Windows-specific adaptations stop being needed:
 
 - the sandbox that cannot run `mix` (§5, round 19: it boots and dies at the first compile because
-  `File.mkdir_p/1` cannot stat an ancestor directory), and with it the gate-outside-the-sandbox dance;
+  `File.mkdir_p/1` cannot stat an ancestor directory), and with it the reason the gate tool of §14
+  exists at all: on a host where the sandbox account can stat its own profile, the agent runs the gate
+  itself and the tool becomes a convenience rather than the only way;
 - the sandbox account dance of §2 -- a separate local account, per-path DENY ACEs, `safe.directory`,
   and `codex.git_metadata_writable`, which is a **Windows-only** unblock (upstream's issue #14338 is
   still open, so it must not be read as a portable mechanism);
@@ -724,7 +933,8 @@ Two things must not travel with it, and both are stated as rules rather than adv
    boot when it is not a literal IP rather than quietly binding somewhere else (`symphony-tickets`,
    `322c80d`; `config/config.exs:21-36`). The hub's control plane has the same property (§8), and a
    Linux host does not change it. If it ever needs to be reachable from elsewhere, that is an SSH port
-   forward, not a bind address.
+   forward -- or the tailnet-only `tailscale serve` of §16, which keeps the same property -- not a bind
+   address.
 2. **A `.gitattributes` with `* text=auto eol=lf` belongs in the new repository before it moves.** This
    machine has `core.autocrlf=true` (measured 2026-09-30 in both `symphony` and `symphony-tickets`),
    and the ticket service's repository has no `.gitattributes` today (measured: the file does not
@@ -734,9 +944,11 @@ Two things must not travel with it, and both are stated as rules rather than adv
    endings to LF so the conformance scripts survive a fresh clone").
 
 Nothing in the tree depends on the move, and no slice in `docs/ticket-service-spec.md` needs it; this
-section exists so the next session does not re-derive why Linux is the cheap direction.
+section exists so the next session does not re-derive why Linux is the cheap direction. What has to be
+carried there has grown, and the shape is already right: the ticket service of §13 on loopback, and the
+front door of §16 as a tunnel rather than a bind address.
 
-## 15. Open, after this batch
+## 18. Open, after this batch
 
 None of these is finished, and none should be read as though it were.
 
@@ -750,18 +962,32 @@ None of these is finished, and none should be read as though it were.
    running instance too, not a new gap.
 4. **The standalone recorder has no drain budget** (§6, "Accepted, not done"). The extraction could not
    carry the in-process MFA, and the fix path is recorded there.
-5. **Nothing in this fork talks to the ticket service yet.** The store and its HTTP surface exist in
-   the sibling repository (§13); the adapter that would speak to port 4020 is slice 3 of
-   `docs/ticket-service-spec.md`, and slices 3-6 are unwritten -- including the last slice, which is
-   the only thing that retires the file tracker and the janitor's second parser.
+5. **Nothing in this fork talks to the ticket service yet, and the slices that would are paused.** The
+   service is running on 4020 and its store, HTTP surface and list rows are committed in
+   `symphony-tickets` (§13), but the adapter that would speak to it is slice 3 of
+   `docs/ticket-service-spec.md` and it is not written. The batch calls the bundle that would actually
+   replace the file tracker **slice 2c**; the specification's own numbering is 3 (this fork's thin
+   adapter), 4 (the console reading through it) and 6 (retiring the mirror and the janitor's second
+   parser) (`docs/ticket-service-spec.md:158-165`). It is paused, and that is the honest state of the
+   plan: the last three batches went into making the pipeline that exists usable from a phone.
 6. **The old personal access tokens are still on the machine and can be revoked** (§3). The App
    credential replaced them and no workflow in the registry names them any more, so revocation is the
    operator's call rather than a prerequisite for anything.
+7. **No workflow declares a gate yet** (§14). `gate.command` appears in no registry workflow, so
+   `cf4a7da`'s tool is advertised to nobody and no agent has verified its own work through it. The
+   capability is built and tested; turning it on is one setting per project.
+8. **Nothing here survives a reboot** (§13). The hub and the ticket service are both started by hand,
+   and no scheduled task or `Run` entry names either. The loop dies with the machine and comes back
+   only when a person starts two processes.
+9. **An automatic landing sweep has no policy.** Landing exists as one button pressed by a person
+   (§15). Which tickets may merge unattended -- which states, which labels, which projects, what
+   happens when the verdict is not `ok` -- is a decision nobody has made, and the sweep should not
+   exist before the answer does.
 
 And the one item the upstream audit found that this batch did not touch: the `paused` early return in
 `orchestrator.ex` (§6).
 
-## 16. Round log
+## 19. Round log
 
 These are rounds of *work* on the port, numbered as they happened; they are not the harness's goal
 rounds, which are counted separately.
@@ -1011,7 +1237,7 @@ rounds, which are counted separately.
     after each batch and serves all of it, and `docs/quickstart.md`'s "the recorder serves this at
     `/symphony`" sentence was corrected: the recorder has been its own application, in its own
     repository, on its own port, with no reverse proxy, since the extraction.
-  Next: the five items in §15 -- `shared` decided or its parked slice redone with tests, a hub-side
+  Next: the five items in §18 -- `shared` decided or its parked slice redone with tests, a hub-side
   settings view for a project that is not answering, and the agent-credential decision.
 - **Round 22 (2026-09-30)**: the agent's credential became a GitHub App installation token, minted per
   run, and the whole chain was exercised on four tickets. `ea65cf1` added `SymphonyElixir.GitHubAppToken`
@@ -1062,7 +1288,61 @@ rounds, which are counted separately.
   contract into 998 lines of tests that run against every registered adapter, each rule carrying the
   `path:line` that establishes it, and the gate this round re-measured: **912 passed, 6 skipped, 23
   excluded** (261.0s). Finally the operator's intent to move the deployment to Linux was recorded
-  (§14), with the two things that must not travel: the unauthenticated console, and the missing
+  (§17), with the two things that must not travel: the unauthenticated console, and the missing
   `.gitattributes`.
   Next: slice 3 of `docs/ticket-service-spec.md` -- the adapter in this fork that speaks to port 4020 --
   and the revocation of the old personal access tokens (§3).
+- **Round 25 (2026-09-30/10-01)**: the agent can verify its own work, a ticket can be landed from its
+  own page, and the deployment got a way in from outside.
+  - `cf4a7da` added `SymphonyElixir.Janitor.GateTool`: `symphony_gate` runs the gate the project
+    declares (`gate.command`) **on the host**, in the ticket's own workspace, because the sandbox
+    cannot start `mix` here (§14). The agent's arguments may not name a command, a shell operator, a
+    script or a path -- an extra key is refused by name, and a project that declares no gate is simply
+    not advertised the tool. The answer is the tail (40 lines, then 8,192 bytes cut on a character
+    boundary), the deadline is the project's own, and expiry kills the process tree. 393 lines, a
+    417-line test file, 18 tests.
+  - `97329cb` put the last step of the loop on the ticket's own page: it judges the pull request the
+    ticket records with `Land`'s pure core, squash-merges with the branch deleted only on a verdict to
+    land, then moves the ticket to the workflow's own terminal state and writes the outcome onto the
+    ticket as a comment -- who asked, the verdict, what happened (§15). Every other verdict merges
+    nothing, and the four refusals leave the ticket byte-identical; a merge that succeeded and a
+    recording step that failed are reported as both. `979a319` pinned the judgement as a nine-row
+    table (one row per fact, plus three precedence rows) and the one-shot path's own nine tests,
+    including the two worth naming: a head that is not the branch the ticket records is refused rather
+    than merged, and a merge `gh` itself refuses is an error rather than a policy refusal.
+  - **A correction of this batch's own, because this log is where the port's mistakes live.** The
+    commit that landed the landing page first said `Verified here: 19 tests in the new file` (it is
+    `d4ad5db` in the reflog). The file has seven `test` call sites and one of them runs once per
+    refusal kind, so the run reports **9**, and the message was amended to say so (`97329cb`). The rule
+    the batch already earned for files applies to commit messages too: a number in a message is a
+    claim, and a claim is measured or it is not written. Measured after the amendment: the three test
+    files this batch added report 82 passed (18 + 55 + 9).
+  - **The deployment got a front door, tailnet-only.** Tailscale is installed, the device is renamed
+    `pc`, and `tailscale serve` maps `https://pc.tail0a3bfa.ts.net` to `127.0.0.1:4001` (the console)
+    and `:8443` to `127.0.0.1:4020` (the ticket service) -- both "(tailnet only)", and both
+    applications still bound to loopback, which is the property that matters and the reason
+    `tailscale funnel` must not be used (§16). Two measurements retired a suspicion and a claim:
+    Clash's TUN does not touch the tailnet (the routes are host routes on the Tailscale interface, and
+    no `100.64.0.0/10` route exists at all), and a self-test from this machine **does** reach the
+    service -- the earlier note that Tailscale does not hairpin a node to its own `serve` endpoint did
+    not survive being re-measured.
+  - **The ticket service is running**, started by hand (`mix phx.server`, PID 19384, 2026-09-30
+    23:59:37, one listener on `127.0.0.1:4020`): `/health` answers `{"ok":true}`, and the store's
+    empty-request rule was watched live -- `GET /tickets` answered `{"tickets":[]}` and created no
+    database file, while the first query that named a state created `~/.symphony-tickets/tickets.db`
+    (§13). No scheduled task and no `Run` entry starts it or the hub, so nothing survives a reboot. The
+    loop's last missing piece before the phone is the deploy action, being written as this round closed:
+    `deploy.ex` and its two test files were uncommitted in the tree when it was measured, and two
+    commits for it (`cd04499`, `5bec515`) landed while these documents were being written -- so HEAD is
+    now past this round, and the deploy action is the next round's account rather than this one's. An
+    automatic landing sweep has no policy yet (§18).
+  - The gate this round, measured at its own last commit `979a319` (HEAD has since moved to `5bec515`):
+    `mix lint` exits 0 with `found no issues` (164 source files), the three test files the batch added
+    report 82 passed on their own, and the suite exits 0 with **949 passed, 6 skipped, 23 excluded**
+    (208.4s). That last number is quoted with its caveat: the run went in while the next feature was
+    already being written into the same working tree, and its total equals HEAD's own test set (912 at
+    `b03d3c5` plus 37 -- 18 + 10 + 9), which is what makes it a reading of this commit's tests rather
+    than of a clean tree (§6 item 6).
+  Next: the deploy action's own round; then a policy for the landing sweep, so "merge unattended" is a
+  decision rather than an absence of one; then `gate.command` in a registry workflow, so the gate tool
+  stops being untested-in-use; and then the paused slice 3 of the ticket service.
