@@ -7,6 +7,15 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
   mirrors the issue), so this page offers no write affordance at all -- only filters, sorting, a
   refresh and a link to each ticket's own page. `TicketPresenter` explains where the fields come from.
 
+  ## Whose board this is: `?project=<name>`
+
+  Without a parameter the board is this instance's own queue -- today's behaviour, and the reason
+  every existing link keeps working. With `?project=<name>` the named **registry project**'s workflow
+  file supplies the tracker settings, so a project whose instance is down is still readable from
+  here. The name is resolved by `TicketPresenter` (which asks `Projects`), and every link on the page
+  carries the parameter, so opening a ticket keeps reading the same project. A name that is not in
+  the registry, or a file that cannot be read, is shown as the reason -- never as an empty board.
+
   Filters are ordinary LiveView state (`phx-change` on the form), not a query string: the page reads a
   directory, not a database, and a filter that survives a reload was not asked for.
   """
@@ -22,11 +31,19 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    socket
-    |> assign(:filters, default_filters())
-    |> assign(:sorts, @sorts)
-    |> load_tickets()
-    |> then(&{:ok, &1})
+    {:ok,
+     socket
+     |> assign(:filters, default_filters())
+     |> assign(:sorts, @sorts)
+     |> assign(:project, nil)
+     |> empty_board()}
+  end
+
+  # The query string, not the mount params: `handle_params/3` is the callback that sees the URI on a
+  # page load **and** on a live navigation, so the parameter cannot depend on how the page was reached.
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply, socket |> assign(:project, present(params["project"])) |> load_tickets()}
   end
 
   @impl true
@@ -52,6 +69,13 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
               The queue as a tracker: state, priority, labels, assignee, blockers, branch and the pull
               request each ticket carries. Read-only -- the agent and the janitor own the writes.
             </p>
+            <%= if @project do %>
+              <p class="hero-copy">
+                Reading the queue of project <span class="mono"><%= @project %></span> from the
+                registry: that project's own workflow file supplies the tracker settings, so this is
+                not this instance's board, and it is read here whether or not that instance is up.
+              </p>
+            <% end %>
           </div>
           <Layouts.page_nav current={:control} />
         </div>
@@ -124,7 +148,10 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
                 <tbody>
                   <tr :for={ticket <- @visible}>
                     <td>
-                      <a class="issue-id issue-id-link" href={"/control/tickets/#{ticket.identifier}"}>
+                      <a
+                        class="issue-id issue-id-link"
+                        href={Layouts.ticket_path(ticket.identifier, @project)}
+                      >
                         <%= ticket.identifier %>
                       </a>
                     </td>
@@ -182,7 +209,7 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
   end
 
   defp load_tickets(socket) do
-    case TicketPresenter.list() do
+    case TicketPresenter.list(project: socket.assigns.project) do
       {:ok, tickets} ->
         filters = socket.assigns.filters
         visible = tickets |> Enum.filter(&matches?(&1, filters)) |> apply_sort(filters["sort"])
@@ -195,13 +222,19 @@ defmodule SymphonyElixirWeb.ControlTicketsLive do
         |> assign(:error, nil)
 
       {:error, reason} ->
-        socket
-        |> assign(:tickets, [])
-        |> assign(:visible, [])
-        |> assign(:options, options([]))
-        |> assign(:summary, "")
-        |> assign(:error, TicketPresenter.describe(reason))
+        socket |> empty_board() |> assign(:error, TicketPresenter.describe(reason))
     end
+  end
+
+  # One place for "there is nothing to show", used by both the error path and the first render: an
+  # unreadable queue and a queue that has not been read yet must not be rendered as different pages.
+  defp empty_board(socket) do
+    socket
+    |> assign(:tickets, [])
+    |> assign(:visible, [])
+    |> assign(:options, options([]))
+    |> assign(:summary, "")
+    |> assign(:error, nil)
   end
 
   defp matches?(ticket, filters) do

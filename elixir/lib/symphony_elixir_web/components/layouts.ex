@@ -122,6 +122,28 @@ defmodule SymphonyElixirWeb.Layouts do
   end
 
   @doc """
+  This console's ticket board, for one registry project or for this instance.
+
+  One definition of the route's shape, because the *project parameter is what decides whose queue is
+  read*: a link that forgets it silently shows the wrong board rather than failing, so every link
+  that could name a project is built here. `nil` is this instance's own queue, which is the route
+  without a parameter -- the behaviour every existing link already had.
+  """
+  @spec tickets_path(String.t() | nil) :: String.t()
+  def tickets_path(nil), do: "/control/tickets"
+  def tickets_path(project), do: "/control/tickets?project=" <> URI.encode_www_form(project)
+
+  @doc """
+  One ticket's page, in the same project as the board that linked to it.
+  """
+  @spec ticket_path(String.t(), String.t() | nil) :: String.t()
+  def ticket_path(identifier, nil), do: "/control/tickets/#{identifier}"
+
+  def ticket_path(identifier, project) do
+    "/control/tickets/#{identifier}?project=" <> URI.encode_www_form(project)
+  end
+
+  @doc """
   The badge class for a ticket state.
 
   Here rather than in each page: two pages showing the same state in different colours is a page
@@ -169,10 +191,15 @@ defmodule SymphonyElixirWeb.Layouts do
   ## Links per row
 
   A row that *is* this instance links to this console's own `/control/tickets` and `/settings`
-  directly. The other rows link to those same paths **on their own instance**, which is a route that
-  instance serves -- and only while it is up, because a link to a page nobody is serving is worse
-  than no link. Those routes take no project parameter: there is no page on *this* console that shows
-  another project's tickets or settings, so nothing here pretends otherwise.
+  directly. Every other row's `tickets` link goes to **this** console with the project named in the
+  query string (`Layouts.tickets_path/1`), so its queue is read here, from its own workflow file,
+  whether or not its instance is up -- a down project's tickets are the case this exists for. Only
+  `settings` still points at the other instance, and only while it answers, because settings *are*
+  that instance's own file and no page here shows another project's.
+
+  A row whose workflow file cannot be read or parsed still gets its `tickets` link -- it carries the
+  project, and the board says why there is nothing to show -- plus a note in the row, because "no
+  tickets" and "no file" are different facts and the table must not conflate them.
 
   ## Control, and the one row that has none
 
@@ -334,21 +361,17 @@ defmodule SymphonyElixirWeb.Layouts do
         <a class="issue-link" href="/control/tickets">tickets</a>
         <a class="issue-link" href="/settings">settings</a>
       <% else %>
+        <a class="issue-link" href={tickets_path(@project.name)}>tickets</a>
         <%= if live_elsewhere?(@project) do %>
-          <a
-            class="issue-link"
-            href={"#{@project[:url]}/control/tickets"}
-            target="_blank"
-            rel="noopener noreferrer"
-          >tickets ↗</a>
           <a
             class="issue-link"
             href={"#{@project[:url]}/settings"}
             target="_blank"
             rel="noopener noreferrer"
           >settings ↗</a>
-        <% else %>
-          <span class="muted event-meta" title="this console cannot show another project's tickets or settings">-</span>
+        <% end %>
+        <%= if @project[:error] do %>
+          <span class="muted event-meta" title={@project[:error]}>its file does not load</span>
         <% end %>
       <% end %>
     </div>

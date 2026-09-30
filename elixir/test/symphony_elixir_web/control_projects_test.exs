@@ -87,6 +87,27 @@ defmodule SymphonyElixirWeb.ControlProjectsTest do
     refute html =~ "<th>workflow file</th>"
   end
 
+  test "every registry row links to this console's ticket view with the project parameter",
+       %{registry: registry} do
+    write_project(registry, "alpha", 4111)
+    write_project(registry, "beta", 4112)
+
+    start_test_endpoint(project_status_client: client(), project_status_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/control")
+
+    # alpha answers and beta refuses -- and both rows carry the link, because a project that is down
+    # is exactly the one whose tickets this console now has to be able to show.
+    assert html =~ ~s(state-badge-warning">down)
+    assert html =~ ~s(href="/control/tickets?project=alpha")
+    assert html =~ ~s(href="/control/tickets?project=beta")
+
+    # The tickets link no longer points at the other instance's own copy of the route, which exists
+    # only while that instance is up.
+    refute html =~ "4111/control/tickets"
+    refute html =~ "4112/control/tickets"
+  end
+
   # No socket is opened by any test here: the client a row's state comes from is injected through the
   # endpoint config, exactly like the orchestrator the page already reads.
   defp client do

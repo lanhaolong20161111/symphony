@@ -135,6 +135,54 @@ defmodule SymphonyElixir.Projects do
   end
 
   @doc """
+  One registry project's tracker settings, read from that project's own workflow file.
+
+  This is the seam a page uses to read **another** project's queue: a registry file *is* the workflow
+  the instance is started with, so `Workflow.load/1` + `Schema.parse/1` -- the pair `list/1` uses --
+  answer it. There is no second parser and no second declaration to drift.
+
+  Only the `tracker` block is returned, because that is the whole of what reading a queue needs: the
+  queue path and the state vocabulary. Nothing else about the project is read, and nothing is
+  written.
+
+  Three answers, and none of them is an empty queue:
+
+    * a name that is not in the registry is `{:error, {:unknown_project, name}}`;
+    * a file that cannot be read or does not parse is
+      `{:error, {:project_workflow_unreadable, name, reason}}`, where `reason` is the parser's own;
+    * otherwise `{:ok, tracker_settings}`.
+
+  An empty list would read as "this project has no tickets", which is the one answer this must not
+  give for a file it could not read.
+  """
+  @spec tracker_settings(String.t()) :: {:ok, map()} | {:error, term()}
+  def tracker_settings(name) when is_binary(name) do
+    case registry_file(name) do
+      {:ok, path} -> tracker_settings_from(name, path)
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error -> {:error, {:project_workflow_unreadable, name, Exception.message(error)}}
+  end
+
+  defp tracker_settings_from(name, path) do
+    case parse_workflow(path) do
+      {:ok, settings} -> {:ok, settings.tracker}
+      {:error, reason} -> {:error, {:project_workflow_unreadable, name, reason}}
+    end
+  end
+
+  # The name is looked up **in the listing** rather than joined onto the registry directory: the
+  # registry is the set of files that are there, so a name that is not one of them is unknown -- which
+  # is also what keeps a crafted `?project=` from naming a file outside the registry.
+  defp registry_file(name) do
+    case Enum.find(list(probe: false), &(&1.name == name)) do
+      nil -> {:error, {:unknown_project, name}}
+      project -> {:ok, project.path}
+    end
+  end
+
+  @doc """
   Queues claimed by more than one project, as `%{queue => [project names]}`.
 
   Takes the list so it can be asserted without a filesystem. An empty map is the healthy answer;
@@ -152,11 +200,18 @@ defmodule SymphonyElixir.Projects do
   defp load(path, probe?) do
     name = Path.basename(path, ".md")
 
-    with {:ok, loaded} <- Workflow.load(path),
-         {:ok, settings} <- Schema.parse(loaded.config) do
-      from_settings(blank(name, path), settings, probe?)
-    else
+    case parse_workflow(path) do
+      {:ok, settings} -> from_settings(blank(name, path), settings, probe?)
       {:error, reason} -> blank(name, path) |> Map.put(:error, describe_load_error(reason))
+    end
+  end
+
+  # `Workflow.load/1` + `Schema.parse/1`, the pair an instance uses. Both callers above go through
+  # here, so this module has exactly one parser -- which is what makes "the registry says what runs"
+  # true rather than merely intended.
+  defp parse_workflow(path) do
+    with {:ok, loaded} <- Workflow.load(path) do
+      Schema.parse(loaded.config)
     end
   end
 

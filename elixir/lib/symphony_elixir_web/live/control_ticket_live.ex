@@ -6,6 +6,14 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
 
   Read-only, like the board. The only affordances are links out -- to the ticket file on disk, to the
   issue it mirrors, and to the pull request -- plus a refresh of the file being shown.
+
+  ## Whose ticket this is: `?project=<name>`
+
+  Without a parameter this is a ticket in this instance's own queue. With `?project=<name>` the named
+  registry project's workflow file supplies the tracker settings, so a project whose instance is down
+  is still readable here. Every link the page makes -- the board, a blocker -- carries the parameter,
+  so a reader never silently crosses from one project's queue into this instance's. An unknown name
+  or an unreadable file is shown as the reason, never as "no such ticket".
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
@@ -14,7 +22,15 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    {:ok, load_ticket(socket, id)}
+    {:ok, assign(socket, ticket_id: id, ticket: nil, error: nil, project: nil)}
+  end
+
+  # The query string, not the mount params: `handle_params/3` sees the URI on a page load **and** on a
+  # live navigation, so the parameter cannot depend on how the page was reached.
+  @impl true
+  def handle_params(params, _uri, socket) do
+    socket = assign(socket, :project, present(params["project"]))
+    {:noreply, load_ticket(socket, socket.assigns.ticket_id)}
   end
 
   @impl true
@@ -32,6 +48,12 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
             <p class="eyebrow">Symphony Tracker</p>
             <h1 class="hero-title"><%= @ticket_id %></h1>
             <p class="hero-copy"><%= @ticket && @ticket.title %></p>
+            <%= if @project do %>
+              <p class="hero-copy">
+                Read from the queue of project <span class="mono"><%= @project %></span>, named in the
+                registry -- not from this instance's own tracker.
+              </p>
+            <% end %>
           </div>
           <Layouts.page_nav current={:control} />
         </div>
@@ -48,7 +70,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
         <section class="section-card">
           <p class="empty-state">
             No ticket with this identifier is in the queue.
-            <a class="issue-link" href="/control/tickets">back to the board</a>
+            <a class="issue-link" href={Layouts.tickets_path(@project)}>back to the board</a>
           </p>
         </section>
       <% end %>
@@ -59,7 +81,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
             <div>
               <h2 class="section-title">The ticket</h2>
               <p class="section-copy">
-                <a class="issue-link" href="/control/tickets">back to the board</a>
+                <a class="issue-link" href={Layouts.tickets_path(@project)}>back to the board</a>
                 <span class="dep-arrow">·</span>
                 <button type="button" class="subtle-button" phx-click="refresh">Refresh</button>
               </p>
@@ -155,7 +177,7 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
           <% else %>
             <div class="dep-graph">
               <div :for={blocker <- @ticket.blocked_by} class="dep-node">
-                <a class="issue-id issue-id-link" href={"/control/tickets/#{blocker.identifier}"}>
+                <a class="issue-id issue-id-link" href={Layouts.ticket_path(blocker.identifier, @project)}>
                   <%= blocker.identifier %>
                 </a>
                 <span class="dep-arrow">·</span>
@@ -222,12 +244,23 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   defp load_ticket(socket, id) do
     socket = assign(socket, :ticket_id, id) |> assign(:ticket, nil) |> assign(:error, nil)
 
-    case TicketPresenter.fetch(id) do
+    case TicketPresenter.fetch(id, project: socket.assigns.project) do
       {:ok, ticket} -> assign(socket, :ticket, ticket)
       {:error, :not_found} -> socket
       {:error, reason} -> assign(socket, :error, TicketPresenter.describe(reason))
     end
   end
+
+  # "" is not a project name: a link that wants this instance's own queue says nothing, rather than
+  # naming a project that cannot exist.
+  defp present(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp present(_value), do: nil
 
   defp other_links(ticket) do
     Enum.reject(ticket.links, &(&1.url == ticket.pr_url))

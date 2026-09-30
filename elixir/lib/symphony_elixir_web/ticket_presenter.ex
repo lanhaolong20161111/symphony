@@ -20,9 +20,21 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   The directory is scanned **once** per call and indexed by front-matter id and by file stem: the
   tracker reports identifiers, not paths, and a per-ticket scan would make a board of N tickets cost
   N directory listings.
+
+  ## Whose queue is read
+
+  By default, the running instance's own tracker -- the queue configured in the workflow file this
+  process was started with. A caller may instead name a **registry project** (`:project`), and that
+  project's own workflow file then supplies the tracker settings through
+  `SymphonyElixir.Projects.tracker_settings/1`. That is what lets the hub show a project whose
+  instance is down, without that instance serving anything.
+
+  A name that is not in the registry, and a file that cannot be read or parsed, are errors the same
+  way a missing queue path is: a page renders the reason rather than an empty board, because an empty
+  board reads as "no work to do".
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Projects}
   alias SymphonyElixir.Janitor.Ticket
   alias SymphonyElixir.Tracker.File, as: FileTracker
 
@@ -37,20 +49,27 @@ defmodule SymphonyElixirWeb.TicketPresenter do
 
   @doc """
   Every ticket in the configured queue, sorted by identifier.
+
+  `:project` names a registry project; its own workflow file then supplies the tracker settings.
+  Without it -- the default -- the queue is this instance's own.
   """
   @spec list() :: {:ok, [ticket()]} | {:error, term()}
-  def list do
-    with {:ok, tickets} <- load() do
+  @spec list(keyword()) :: {:ok, [ticket()]} | {:error, term()}
+  def list(opts \\ []) do
+    with {:ok, tickets} <- load(opts) do
       {:ok, Enum.sort_by(tickets, & &1.identifier)}
     end
   end
 
   @doc """
   One ticket by identifier (its front-matter `id` also matches).
+
+  Takes the same `:project` option as `list/1`.
   """
   @spec fetch(String.t()) :: {:ok, ticket()} | {:error, :not_found | term()}
-  def fetch(identifier) when is_binary(identifier) do
-    with {:ok, tickets} <- load() do
+  @spec fetch(String.t(), keyword()) :: {:ok, ticket()} | {:error, :not_found | term()}
+  def fetch(identifier, opts \\ []) when is_binary(identifier) do
+    with {:ok, tickets} <- load(opts) do
       case Enum.find(tickets, &(&1.identifier == identifier or &1.id == identifier)) do
         nil -> {:error, :not_found}
         ticket -> {:ok, ticket}
@@ -65,19 +84,51 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   def describe({:ticket_read_failed, message}) when is_binary(message), do: message
   def describe({:file_tracker_path_not_found, path}), do: "the ticket directory does not exist: #{path}"
   def describe(:missing_file_tracker_path), do: "the workflow does not configure a ticket directory"
+
+  def describe({:unknown_project, name}) do
+    "there is no project named #{name} in the registry (#{Projects.registry_dir()})"
+  end
+
+  def describe({:project_workflow_unreadable, name, reason}) do
+    "the workflow file of project #{name} cannot be read: #{workflow_reason(reason)}"
+  end
+
   def describe(reason), do: inspect(reason)
 
-  defp load do
-    settings = Config.settings!().tracker
-    dir = provider_path(settings)
+  defp workflow_reason({:missing_workflow_file, path, reason}) do
+    "#{path} (#{inspect(reason)})"
+  end
 
-    case FileTracker.tickets(settings) do
-      {:ok, issues} ->
-        index = file_index(dir)
-        {:ok, Enum.map(issues, &to_ticket(&1, index))}
+  defp workflow_reason({:workflow_parse_error, reason}) do
+    "its front matter does not parse (#{inspect(reason)})"
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  defp workflow_reason({:invalid_workflow_config, message}) when is_binary(message), do: message
+
+  defp workflow_reason(:workflow_front_matter_not_a_map), do: "its front matter is not a map"
+  defp workflow_reason(reason), do: inspect(reason)
+
+  # Which queue to read: a registry project's own workflow when the caller named one, this instance's
+  # otherwise. Resolved here rather than in the page so both ticket pages answer "and which queue is
+  # that?" identically -- and so an unknown or unreadable project arrives as the same `{:error, _}`
+  # the pages already render.
+  defp tracker_settings(opts) do
+    case Keyword.get(opts, :project) do
+      name when is_binary(name) and name != "" -> Projects.tracker_settings(name)
+      _own -> {:ok, Config.settings!().tracker}
+    end
+  end
+
+  defp load(opts) do
+    with {:ok, tracker} <- tracker_settings(opts) do
+      case FileTracker.tickets(tracker) do
+        {:ok, issues} ->
+          index = file_index(provider_path(tracker))
+          {:ok, Enum.map(issues, &to_ticket(&1, index))}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   rescue
     error -> {:error, {:ticket_read_failed, Exception.message(error)}}

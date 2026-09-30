@@ -146,6 +146,54 @@ defmodule SymphonyElixir.ProjectsTest do
     end
   end
 
+  describe "tracker_settings/1 -- another project's queue, read from its own file" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "projects-tracker-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      previous = Application.get_env(:symphony_elixir, :projects_dir)
+      Application.put_env(:symphony_elixir, :projects_dir, dir)
+
+      on_exit(fn ->
+        File.rm_rf(dir)
+
+        if previous,
+          do: Application.put_env(:symphony_elixir, :projects_dir, previous),
+          else: Application.delete_env(:symphony_elixir, :projects_dir)
+      end)
+
+      {:ok, dir: dir}
+    end
+
+    test "answers one project's tracker block, parsed by the same parser an instance uses", %{dir: dir} do
+      write_project(dir, "alpha", port: 4101, queue: "C:/q/alpha", backend: "codex")
+
+      assert {:ok, tracker} = Projects.tracker_settings("alpha")
+      assert tracker.provider["path"] == "C:/q/alpha"
+      assert tracker.active_states == ["ready"]
+      assert tracker.kind == "file"
+    end
+
+    test "a name that is not in the registry is unknown, never an empty queue" do
+      assert {:error, {:unknown_project, "nope"}} = Projects.tracker_settings("nope")
+    end
+
+    test "a file that does not parse is reported with the parser's own reason", %{dir: dir} do
+      File.write!(Path.join(dir, "broken.md"), "---\ntracker: [this is not a mapping\n---\n\nBody.\n")
+
+      assert {:error, {:project_workflow_unreadable, "broken", {:workflow_parse_error, _reason}}} =
+               Projects.tracker_settings("broken")
+    end
+
+    test "a file that cannot be read is reported, not treated as an empty queue", %{dir: dir} do
+      File.mkdir_p!(Path.join(dir, "unreadable.md"))
+
+      assert {:error, {:project_workflow_unreadable, "unreadable", reason}} =
+               Projects.tracker_settings("unreadable")
+
+      assert {:missing_workflow_file, _path, :eisdir} = reason
+    end
+  end
+
   defp project(name, queue) do
     %{
       name: name,
