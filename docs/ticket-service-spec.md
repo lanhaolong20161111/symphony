@@ -224,3 +224,17 @@ recommendations recorded there.
 - Section 0's first unresolved item stands: the research citations are still marked carried rather
   than verified, and whoever builds slice 1 should re-derive them from the code as they go rather
   than trusting a citation that was never in this file.
+
+### Carried defect, found while adding write actions to the ticket page
+
+`Janitor.Ticket.split/1` uses a regular expression whose closing delimiter is followed by
+`\s*` before the body is captured, so every write rebuilds the file as
+front-matter, delimiter, body -- and a ticket whose front matter is followed by a blank line
+loses that blank line the first time its state or a comment is written. It is cosmetic (no
+content is lost, no encoding is touched, and a refused write is still byte-identical), but it
+means `set_ticket_state/3` is not literally byte-preserving for a ticket the janitor itself
+created from an issue.
+
+Two regular expressions have to change together to fix it: the one in `janitor/ticket.ex` and
+the one in `tracker/file.ex`. Recorded here rather than fixed in passing, and it disappears
+with slice 6 if the file tracker and the janitor's parser are retired as decided.
