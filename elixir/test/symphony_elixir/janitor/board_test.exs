@@ -53,6 +53,22 @@ defmodule SymphonyElixir.Janitor.BoardTest do
       assert index =~ "https://github.com/me/tickets/issues"
       assert index =~ "fill-in-the-blank form"
     end
+
+    test "an undeclared issues repository is not guessed into the orientation note" do
+      # `write_boards/2` passes `Janitor.config/1`'s `:repo`, which is `nil` when a deployment
+      # declares no `janitor.issues_repo` -- and these boards are committed and pushed to the ticket
+      # repository, so an interpolated name would publish `https://github.com//issues` (or, worse,
+      # a repository nobody named) on the page a person opens first.
+      index = Board.render_index([row("SYM-1", "ready")])
+
+      refute index =~ "github.com"
+      assert index =~ "fill-in-the-blank form"
+      assert index =~ "`janitor.issues_repo`"
+
+      # An empty string is "not declared" too: `write_boards/2` may hand over either spelling.
+      refute Board.render_index([], repo: "") =~ "github.com"
+      assert Board.render_index([], repo: nil) == Board.render_index([], repo: "")
+    end
   end
 
   describe "render_view/2" do

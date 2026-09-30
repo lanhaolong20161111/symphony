@@ -27,9 +27,9 @@ defmodule SymphonyElixir.GitWorktree do
 
   1. `herdr worktree create` reads "Create **and open** a Git worktree" -- it opens a pane. An
      orchestrator wants a *path*.
-  2. herdr goes through a **socket API**, so its server must be running
-     (`AiBeekeeper.Orchestration.WorkspacePrep` records this). That would make an external daemon a
-     dependency of the orchestrator.
+  2. herdr goes through a **socket API**, so its server must be running (measured by the retired
+     deployment's `WorkspacePrep`, the module that prepared a workspace before a run). That would
+     make an external daemon a dependency of the orchestrator.
   3. The base of an isolation strategy should not be a *terminal* manager.
 
   ## Where the thinness is (this is the whole design)

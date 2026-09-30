@@ -52,7 +52,7 @@ defmodule SymphonyElixir.Janitor.Board do
   """
   @spec render_index([row()], keyword()) :: String.t()
   def render_index(rows, opts \\ []) do
-    repo = Keyword.get(opts, :repo, "")
+    repo = presence(Keyword.get(opts, :repo))
     interval = Keyword.get(opts, :interval_seconds, 30)
     by_state = group_by_state(rows)
 
@@ -72,9 +72,9 @@ defmodule SymphonyElixir.Janitor.Board do
     **Views:** #{bar}
 
     > Auto-generated every #{interval} seconds by the host janitor; do not edit these boards.
-    > **You never need to touch these files.** To ask for work, open an issue at
-    > https://github.com/#{repo}/issues -- there is a fill-in-the-blank form. Everything here is the
-    > mechanical half: the issue is what a person owns, and the `state` above mirrors its label.
+    > **You never need to touch these files.** To ask for work, open an issue #{ask_where(repo)}
+    > -- there is a fill-in-the-blank form. Everything here is the mechanical half: the issue is
+    > what a person owns, and the `state` above mirrors its label.
 
     #{@header}
     #{render_rows(rows, "_none_")}
@@ -127,6 +127,21 @@ defmodule SymphonyElixir.Janitor.Board do
   end
 
   defp link(name, count, path), do: "[#{name} (#{count})](#{path})"
+
+  # Where the orientation note sends a person, or the reason it names no link.
+  #
+  # `write_boards/2` passes whatever `Janitor.config/1` holds for the issues repository, and that is
+  # `nil` when a deployment declares none -- deliberately, so that nothing guesses a repository.
+  # Interpolating the absent name would commit `https://github.com//issues` into the ticket
+  # repository: a link built out of a name nobody gave, on a page a person reads. The same refusal
+  # `Janitor.ticket_url/2` makes for issue and pull-request bodies. The note still says where work
+  # comes from; it only stops pointing at nothing.
+  defp ask_where(repo) when is_binary(repo), do: "at https://github.com/#{repo}/issues"
+  defp ask_where(_repo), do: "in the repository named by `janitor.issues_repo`"
+
+  defp presence(nil), do: nil
+  defp presence(""), do: nil
+  defp presence(value), do: value
 
   defp view_order(state) do
     case Enum.find_index(@views, &(&1.state == state)) do

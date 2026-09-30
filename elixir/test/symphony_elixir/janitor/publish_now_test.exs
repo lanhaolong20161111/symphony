@@ -67,4 +67,38 @@ defmodule SymphonyElixir.Janitor.PublishNowTest do
     # machine's defaults, so an empty string here would be a wrong path rather than an absent one.
     assert Janitor.options_from_settings(%{}) == []
   end
+
+  test "an undeclared repository is not guessed" do
+    # The two paths have defaults because they are this machine's own directories. A repository does
+    # not: it is a name somebody else owns, so "not declared" has to mean "do not guess" rather than
+    # reaching for a built-in one -- which is what an undeclared deployment used to mirror into and
+    # open pull requests against.
+    config = Janitor.config([])
+
+    assert config.repo == nil
+    assert config.tickets_repo == nil
+    assert is_binary(config.tickets)
+    assert is_binary(config.workspace_root)
+  end
+
+  test "a ticket link is dropped, not invented, when no tickets repository is declared" do
+    config = Janitor.config(tickets_repo: nil)
+
+    assert Janitor.ticket_url("SYM-1", config) == nil
+    assert Janitor.ticket_url("SYM-1", %{config | tickets_repo: "me/tickets"}) =~ "me/tickets/blob/master/SYM-1.md"
+  end
+
+  test "publishing one ticket fails closed when no issues repository is declared" do
+    # Without the guard this reaches `gh pr list --repo nil`, which is how a guess becomes a call
+    # against a repository nobody named.
+    dir = tmp_dir()
+    File.write!(Path.join(dir, "SYM-1.md"), "---\nid: SYM-1\nstate: in-review\n---\nbody\n")
+
+    workspace = Path.join(dir, "SYM-1")
+    File.mkdir_p!(workspace)
+    {_, 0} = System.cmd("git", ["init", "-q", workspace])
+
+    assert {:error, :no_issues_repo} =
+             Janitor.publish_now("SYM-1", tickets: dir, workspace_root: dir, tickets_repo: "me/tickets")
+  end
 end

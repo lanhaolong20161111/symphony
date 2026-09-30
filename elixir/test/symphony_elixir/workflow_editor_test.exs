@@ -23,7 +23,7 @@ defmodule SymphonyElixir.WorkflowEditorTest do
     enabled: true
     interval_ms: 30000
     tickets_path: C:/Users/lhl20/code/symphony-tickets
-    issues_repo: lanhaolong20161111/beekeeper
+    issues_repo: owner/example
   agent:
     # One ticket on the first run: keep it small.
     max_concurrent_agents: 1
@@ -62,7 +62,7 @@ defmodule SymphonyElixir.WorkflowEditorTest do
       updated = put!(@workflow, ["janitor", "issues_repo"], "someone/else")
 
       assert updated =~ "issues_repo: someone/else"
-      refute updated =~ "issues_repo: lanhaolong20161111/beekeeper"
+      refute updated =~ "issues_repo: owner/example"
     end
 
     test "keeps every comment" do

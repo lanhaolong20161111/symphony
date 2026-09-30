@@ -199,6 +199,13 @@ defmodule SymphonyElixir.TaskComposerTest do
       assert TaskComposer.create_task(%{title: nil}) == {:error, :missing_title}
       assert TaskComposer.create_task(%{title: ""}) == {:error, :missing_title}
     end
+
+    test "refuses when no repository is declared, instead of handing gh a nil" do
+      # This instance's workflow declares no `janitor.issues_repo`, and `Janitor.config/1` no longer
+      # supplies one. The refusal has to come before `gh`, which would otherwise be spawned with a
+      # `nil --repo`.
+      assert TaskComposer.create_task(%{title: "T"}) == {:error, :no_issues_repo}
+    end
   end
 
   # The per-task agent route. The keys are written only when a person chose one, which is what makes

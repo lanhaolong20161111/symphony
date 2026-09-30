@@ -44,8 +44,10 @@
 param(
   [string]$Tickets = (Join-Path $env:USERPROFILE 'code\symphony-tickets'),
   [string]$WorkspaceRoot = (Join-Path $env:USERPROFILE 'code\symphony-file-workspaces'),
-  [string]$Repo = 'lanhaolong20161111/beekeeper',
-  [string]$TicketsRepo = 'lanhaolong20161111/beekeeper-tickets',
+  # No repository default on purpose: a deployment must name its own (-Repo / -TicketsRepo). A
+  # baked-in name would point an undeclared deployment at a repository nobody declared.
+  [string]$Repo = '',
+  [string]$TicketsRepo = '',
   [string]$StateFile = (Join-Path $env:USERPROFILE 'code\symphony-janitor-state.json'),
   [string]$Log = (Join-Path $env:TEMP 'tickets-sync.log'),
   [int]$IntervalSeconds = 30,

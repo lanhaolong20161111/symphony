@@ -87,9 +87,9 @@ defmodule SymphonyElixir.Settings do
 
   `hooks.after_create` is what actually clones the code (`git clone … <workspace>`), so that string
   is the only place the code repository is declared. It is **not** derived from
-  `janitor.issues_repo`, and on this machine both point at `beekeeper` today purely because someone
-  wrote the same name twice. Change one and the other silently keeps cloning the old repository --
-  which is why `matches_issues_repo?` is reported instead of assumed.
+  `janitor.issues_repo`, and on this machine both point at the same repository today purely because
+  someone wrote the same name twice. Change one and the other silently keeps cloning the old
+  repository -- which is why `matches_issues_repo?` is reported instead of assumed.
   """
   @spec site() :: map()
   def site do

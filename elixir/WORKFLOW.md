@@ -7,7 +7,9 @@ tracker:
   # ["open"] / ["closed"], so do not invent workflow states here (Linear's Todo/Doing/Done do not
   # exist in this adapter).
   provider:
-    repo: lanhaolong20161111/beekeeper
+    # PLACEHOLDER -- edit this. `<owner>/<repo>` is not a real repository; it must name the
+    # repository whose issues drive runs.
+    repo: <owner>/<repo>
   required_labels: []
   active_states:
     - open

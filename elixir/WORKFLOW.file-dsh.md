@@ -49,15 +49,19 @@ janitor:
   tickets_path: C:/Users/lhl20/code/symphony-tickets
   workspace_root: C:/Users/lhl20/code/symphony-file-workspaces
   # Tickets are data in their own repository; issues are the human surface in the code repository.
-  tickets_repo: lanhaolong20161111/beekeeper-tickets
-  issues_repo: lanhaolong20161111/beekeeper
+  # PLACEHOLDER -- edit both. `<owner>/<repo>` is not a real repository, and an undeclared one is
+  # **not** guessed: the paths that need a repository skip instead.
+  tickets_repo: <owner>/<repo>-tickets
+  issues_repo: <owner>/<repo>
   state_file: C:/Users/lhl20/code/symphony-janitor-state.json
 hooks:
   timeout_ms: 600000
   after_create: |
     # 问 git，不问文件系统：git worktree 里 `.git` 是【文件】，`[ ! -d .git ]` 会判真 ⇒ 往已有
     # worktree 上再 clone 一次。`rev-parse` 才是 git 自己的判据。
-    if ! git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then git clone --depth 1 https://github.com/lanhaolong20161111/beekeeper .; fi
+    # PLACEHOLDER -- edit this: `<owner>/<repo>` is not a real repository. Quoted so the shell hands
+    # the placeholder to git (which says "repository not found") instead of reading `<` as a redirect.
+    if ! git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then git clone --depth 1 "https://github.com/<owner>/<repo>" .; fi
     mix deps.get
   # Publishing lives HERE, not in the agent -- measured, not a preference.
   #

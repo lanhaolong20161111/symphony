@@ -210,6 +210,10 @@ defmodule SymphonyElixir.TaskComposer do
 
   Returns
   `{:ok, %{id, issue_number, issue_url, linked_dependencies, dependency_warnings}}`.
+
+  Returns `{:error, :no_issues_repo}` when neither the chosen project nor this instance declares a
+  repository: a task cannot be filed without one, and no name is guessed (see
+  `Janitor.config/1`, whose repository default is deliberately absent).
   """
   @spec create_task(task_input()) ::
           {:ok,
@@ -251,7 +255,8 @@ defmodule SymphonyElixir.TaskComposer do
   end
 
   defp do_create_task(attrs, target) do
-    with {:ok, issue_number, issue_url} <- create_github_issue(attrs, target.issues_repo),
+    with :ok <- repository_declared(target.issues_repo),
+         {:ok, issue_number, issue_url} <- create_github_issue(attrs, target.issues_repo),
          {:ok, ticket_id} <- write_ticket(attrs, issue_number, target) do
       Logger.info("task_composer: created #{ticket_id} from issue ##{issue_number}")
 
@@ -267,6 +272,12 @@ defmodule SymphonyElixir.TaskComposer do
        }}
     end
   end
+
+  # Checked before `gh` runs: with no repository declared anywhere the argument would be `nil`, and
+  # the port would die with a `badarg` instead of saying what is missing. Guessing a name is what
+  # `Janitor.config/1` used to do and deliberately does not any more.
+  defp repository_declared(repo) when is_binary(repo) and repo != "", do: :ok
+  defp repository_declared(_repo), do: {:error, :no_issues_repo}
 
   defp create_github_issue(attrs, repo) do
     body = build_issue_body(attrs)

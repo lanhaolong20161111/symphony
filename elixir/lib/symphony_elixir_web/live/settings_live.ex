@@ -180,8 +180,10 @@ defmodule SymphonyElixirWeb.SettingsLive do
               次要原因：票据是"数据"、issue 是"给人看的表面"，合并之后权限与可见性也混在一起。
               <br />
               <span class="muted">
-                现在本机就是**三个**不同的仓库：issues = <code>beekeeper</code>、
-                tickets = <code>beekeeper-tickets</code>、本地代码也来自 <code>beekeeper</code>。
+                现在本机这三处分别指向 issues = <code>{@site[:issues_repo] || "未声明"}</code>、
+                tickets = <code>{@site[:tickets_repo] || "未声明"}</code>、本地代码 =
+                <code>{@site[:code][:repo] || "hooks.after_create 里没写"}</code>
+                —— 都是**生效配置里的值**，不是写死的名字。
                 想把 tickets 并进去：改 <code>janitor.tickets_repo</code> 与
                 <code>janitor.tickets_path</code> 即可，但先接受上面那条噪声。
               </span>

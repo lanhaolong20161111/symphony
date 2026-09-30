@@ -161,7 +161,7 @@ defmodule SymphonyElixirWeb.ProjectLive do
           <div style="display: flex; gap: 0.8rem; flex-wrap: wrap;">
             <label class="form-field" style="flex: 1 1 12rem;">
               <span class="form-label">项目名 *（= 文件名）</span>
-              <input type="text" name="project[name]" class="form-input" value={@form["name"]} placeholder="beekeeper" required />
+              <input type="text" name="project[name]" class="form-input" value={@form["name"]} placeholder="my-app" required />
             </label>
             <label class="form-field" style="flex: 0 1 8rem;">
               <span class="form-label">端口 *</span>

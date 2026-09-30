@@ -17,7 +17,7 @@ defmodule SymphonyElixir.SettingsTest do
   janitor:
     enabled: true
     interval_ms: 30000
-    issues_repo: lanhaolong20161111/beekeeper
+    issues_repo: owner/example
   agent:
     max_concurrent_agents: 1
     max_turns: 5
@@ -71,6 +71,23 @@ defmodule SymphonyElixir.SettingsTest do
     end
   end
 
+  describe "site/0 (the repositories this instance reads)" do
+    test "an undeclared repository is reported as undeclared, never guessed" do
+      # A repository name is somebody else's, so nothing in this system may invent one. A workflow
+      # that declares none must report none -- the page then says "未声明" rather than naming a
+      # repository the deployment never mentioned.
+      write_workflow_without_repositories!()
+
+      site = Settings.site()
+
+      assert site.issues_repo == nil
+      assert site.issues_url == nil
+      assert site.tickets_repo == nil
+      assert site.tickets_url == nil
+      refute site.code.matches_issues_repo?
+    end
+  end
+
   describe "credentials/0" do
     test "reports presence and never a value" do
       credentials = Settings.credentials()
@@ -103,7 +120,7 @@ defmodule SymphonyElixir.SettingsTest do
       assert {:ok, path, _written} = Settings.update(["janitor", "issues_repo"], "owner/other")
 
       assert File.read!(path) =~ "issues_repo: owner/other"
-      assert File.read!(path <> ".bak") =~ "issues_repo: lanhaolong20161111/beekeeper"
+      assert File.read!(path <> ".bak") =~ "issues_repo: owner/example"
     end
 
     test "refuses a value the schema rejects, and does NOT touch the file" do
@@ -196,6 +213,19 @@ defmodule SymphonyElixir.SettingsTest do
       assert {:error, {:file_tracker_path_not_found, _path}} =
                Settings.update(["janitor", "tickets_path"], missing)
     end
+  end
+
+  # A workflow with no `janitor` block at all, which is what a deployment that has not named its
+  # repositories looks like.
+  defp write_workflow_without_repositories! do
+    File.write!(effective_path(), """
+    ---
+    tracker:
+      kind: memory
+    ---
+
+    Prompt body.
+    """)
   end
 
   defp existing_dir!(name) do

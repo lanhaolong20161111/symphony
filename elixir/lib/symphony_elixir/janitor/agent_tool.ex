@@ -176,6 +176,9 @@ defmodule SymphonyElixir.Janitor.AgentTool do
   defp describe({:no_such_ticket, id}), do: "no ticket file for #{id}"
   defp describe({:not_a_workspace, path}), do: "no workspace to publish at #{path}"
 
+  defp describe(:no_issues_repo),
+    do: "no issues repository is declared (janitor.issues_repo), and this refuses to guess one"
+
   defp unsupported_error(tool) do
     %{
       "message" => "Unsupported dynamic tool: #{inspect(tool)}.",

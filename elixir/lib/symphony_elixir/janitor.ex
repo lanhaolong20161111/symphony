@@ -61,8 +61,8 @@ defmodule SymphonyElixir.Janitor do
   @type config :: %{
           tickets: String.t(),
           workspace_root: String.t(),
-          repo: String.t(),
-          tickets_repo: String.t(),
+          repo: String.t() | nil,
+          tickets_repo: String.t() | nil,
           state_file: String.t(),
           interval_seconds: pos_integer()
         }
@@ -72,6 +72,12 @@ defmodule SymphonyElixir.Janitor do
 
   Options: `:tickets`, `:workspace_root`, `:repo`, `:tickets_repo`, `:state_file`,
   `:interval_seconds`.
+
+  The paths have defaults because they are this machine's own directories; **the two repositories do
+  not**, because one is a name somebody else owns. A deployment that does not declare `:repo` gets
+  `nil`, and every path that needs `owner/name` skips (or, for a caller that asked for one thing,
+  fails closed) rather than reaching for a repository nobody named -- see `run_once/1`,
+  `publish_sweep/1` and `publish_now/2`.
   """
   @spec config(keyword()) :: config()
   def config(opts \\ []) do
@@ -81,8 +87,11 @@ defmodule SymphonyElixir.Janitor do
       tickets: Keyword.get(opts, :tickets, Path.join([home, "code", "symphony-tickets"])),
       workspace_root:
         Keyword.get(opts, :workspace_root, Path.join([home, "code", "symphony-file-workspaces"])),
-      repo: Keyword.get(opts, :repo, "lanhaolong20161111/beekeeper"),
-      tickets_repo: Keyword.get(opts, :tickets_repo, "lanhaolong20161111/beekeeper-tickets"),
+      # No repository default, deliberately: "not declared" means "do not guess". A built-in name
+      # would make an undeclared deployment mirror into, link to and open pull requests against a
+      # repository it never named -- which is what a default here did until it was removed.
+      repo: Keyword.get(opts, :repo),
+      tickets_repo: Keyword.get(opts, :tickets_repo),
       state_file: Keyword.get(opts, :state_file, Path.join([home, "code", "symphony-janitor-state.json"])),
       interval_seconds: Keyword.get(opts, :interval_seconds, 30)
     }
@@ -125,13 +134,24 @@ defmodule SymphonyElixir.Janitor do
     rows = read_tickets(cfg)
 
     rows =
-      if skip_mirror do
-        rows
-      else
-        receive_issues(rows, cfg)
-        rows = read_tickets(cfg)
-        sync_issues(rows, cfg)
-        read_tickets(cfg)
+      cond do
+        skip_mirror ->
+          rows
+
+        # The mirror is `gh` from end to end, so with no repository declared there is nowhere to
+        # mirror to. Skipped, with the reason stated, rather than aimed at a name: this is the same
+        # shape as `--skip-mirror`, which is the path that already existed for "do not talk to
+        # GitHub this round".
+        not repository?(cfg.repo) ->
+          Logger.warning("janitor: no issues repository declared (janitor.issues_repo); skipping receive and mirror")
+
+          rows
+
+        true ->
+          receive_issues(rows, cfg)
+          rows = read_tickets(cfg)
+          sync_issues(rows, cfg)
+          read_tickets(cfg)
       end
 
     write_boards(rows, cfg)
@@ -148,7 +168,7 @@ defmodule SymphonyElixir.Janitor do
   @spec run(keyword()) :: no_return()
   def run(opts \\ []) do
     cfg = config(opts)
-    Logger.info("janitor started tickets=#{cfg.tickets} repo=#{cfg.repo}")
+    Logger.info("janitor started tickets=#{cfg.tickets} repo=#{inspect(cfg.repo)}")
     loop(cfg, opts)
   end
 
@@ -393,8 +413,14 @@ defmodule SymphonyElixir.Janitor do
     end
   end
 
+  # The ticket link is dropped rather than invented when the deployment declares no ticket
+  # repository: the issue body is complete without it, and a link built on a guessed repository
+  # would send a reader to somebody else's file.
   defp body_for_issue(row, cfg) do
-    "Ticket file: https://github.com/#{cfg.tickets_repo}/blob/master/#{row.id}.md\n\n#{row.body}"
+    case ticket_url(row.id, cfg) do
+      nil -> row.body
+      url -> "Ticket file: #{url}\n\n#{row.body}"
+    end
   end
 
   defp pull_assignee(row, issue) do
@@ -542,10 +568,19 @@ defmodule SymphonyElixir.Janitor do
   #
   # The second half is not redundant: when the push succeeds and `gh pr create` fails, the workspace
   # is already clean, so a dirty-only trigger would never retry.
+  #
+  # The sweep decides *whether* to publish from `gh` (`has_pull_request?`), so with no repository
+  # declared it is skipped whole rather than half-run: pushing a branch whose pull request can never
+  # be opened is a new failure mode, and skipping is already what this function does when there is
+  # no workspace root to look in.
   defp publish_sweep(cfg) do
-    case File.ls(cfg.workspace_root) do
-      {:ok, entries} -> Enum.each(entries, &publish_ticket(&1, cfg))
-      {:error, reason} -> Logger.warning("janitor: no workspace root: #{inspect(reason)}")
+    if repository?(cfg.repo) do
+      case File.ls(cfg.workspace_root) do
+        {:ok, entries} -> Enum.each(entries, &publish_ticket(&1, cfg))
+        {:error, reason} -> Logger.warning("janitor: no workspace root: #{inspect(reason)}")
+      end
+    else
+      Logger.warning("janitor: no issues repository declared (janitor.issues_repo); skipping the publish sweep")
     end
   end
 
@@ -623,7 +658,9 @@ defmodule SymphonyElixir.Janitor do
   `SymphonyElixir.Janitor.AgentTool`. Both paths are idempotent, so they tolerate each other.
 
   Fails closed on anything it cannot identify: an `id` that is not a plain ticket name, a ticket file
-  that does not exist, or a workspace that is not a git work tree. Nothing is created or pushed in
+  that does not exist, a workspace that is not a git work tree, or a deployment that declares no
+  `janitor.issues_repo` (`publish_sweep/1` skips its unattended round in that case, but a caller that
+  asked for this one ticket gets the reason instead of silence). Nothing is created or pushed in
   those cases.
   """
   @spec publish_now(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -632,10 +669,17 @@ defmodule SymphonyElixir.Janitor do
          cfg = config(Keyword.merge(options_from_settings(Config.settings!().janitor), opts)),
          workspace = Path.join(cfg.workspace_root, id),
          ticket_path = Path.join(cfg.tickets, "#{id}.md"),
-         :ok <- publishable(id, workspace, ticket_path) do
+         :ok <- publishable(id, workspace, ticket_path),
+         :ok <- repository_declared(cfg) do
       branch = ticket_branch(File.read!(ticket_path), id)
       {:ok, publish(id, workspace, ticket_path, branch, cfg)}
     end
+  end
+
+  # Last, so a caller hears about what it actually passed first. Publishing is `gh` from end to end
+  # (`pr list`, `pr create`, `issue comment`), and "no repository" is not something to guess at.
+  defp repository_declared(cfg) do
+    if repository?(cfg.repo), do: :ok, else: {:error, :no_issues_repo}
   end
 
   defp validate_id(id) do
@@ -832,7 +876,7 @@ defmodule SymphonyElixir.Janitor do
   # janitor's own cwd is the tickets repository, which has neither. An explicit title and body
   # removes the dependency on git context entirely.
   defp create_pull_request(id, workspace, ticket_path, branch, cfg) do
-    body = "Automated by symphony for ticket #{id}.\n\nSee the ticket: #{ticket_url(id, cfg)}"
+    body = "Automated by symphony for ticket #{id}." <> ticket_reference(id, cfg)
 
     args = ["pr", "create", "--repo", cfg.repo, "--head", branch, "--base", "main",
             "--label", @managed_label, "--title", "symphony/#{id}: automated change", "--body", body]
@@ -1057,7 +1101,32 @@ defmodule SymphonyElixir.Janitor do
   defp git(%{tickets: tickets}, args), do: Shell.run("git", args, cd: tickets, timeout: @command_timeout)
   defp git(dir, args) when is_binary(dir), do: Shell.run("git", args, cd: dir, timeout: @command_timeout)
 
-  @doc "The web URL of a ticket file, for linking into issues and pull requests."
-  @spec ticket_url(String.t(), map()) :: String.t()
-  def ticket_url(id, cfg), do: "https://github.com/#{cfg.tickets_repo}/blob/master/#{id}.md"
+  @doc """
+  The web URL of a ticket file, for linking into issues and pull requests, or `nil` when the
+  deployment declares no `janitor.tickets_repo`.
+
+  `nil` rather than a name: a link built on a repository nobody declared sends a reader somewhere
+  arbitrary, so `body_for_issue/2` and `ticket_reference/2` leave the link out instead.
+  """
+  @spec ticket_url(String.t(), map()) :: String.t() | nil
+  def ticket_url(id, cfg) do
+    case presence(cfg.tickets_repo) do
+      nil -> nil
+      repo -> "https://github.com/#{repo}/blob/master/#{id}.md"
+    end
+  end
+
+  # The half of a message that points at the ticket file, or nothing at all when there is no
+  # repository to point at -- see `ticket_url/2`. An empty string concatenates cleanly, so a caller
+  # never has to branch on it.
+  defp ticket_reference(id, cfg) do
+    case ticket_url(id, cfg) do
+      nil -> ""
+      url -> "\n\nSee the ticket: #{url}"
+    end
+  end
+
+  # The one test every path that needs `owner/name` goes through. `config/1` guesses no repository,
+  # so anything `gh`-shaped is gated here rather than being handed a `nil`.
+  defp repository?(value), do: presence(value) != nil
 end
