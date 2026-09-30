@@ -123,11 +123,11 @@ defmodule SymphonyElixir.Config.Schema do
 
   # How a project's tickets are *worked* and how their work is *published*. Two settings rather than
   # one menu, because the four combinations are not a sequence: "one clone per ticket" and "the host
-  # opens a pull request" are independent choices, and the three shapes this machine runs are
-  # per_ticket+pull_request (one clone and one `symphony/<ticket>` branch per ticket),
+  # opens a pull request" are independent choices, and the shapes this machine runs are
+  # per_ticket+pull_request (one clone and one `symphony/<ticket>` branch per ticket) and
   # per_ticket+direct (still one clone per ticket, but the work is pushed to the project's own
-  # branch) and shared+direct (one tree for the whole project, so a ticket branch would be
-  # meaningless).
+  # branch). shared+direct -- one tree for the whole project, where a ticket branch would be
+  # meaningless -- is not one of them: `shared` is declared and refused, see `Project.changeset/2`.
   defmodule Project do
     @moduledoc false
     use Ecto.Schema
@@ -136,12 +136,20 @@ defmodule SymphonyElixir.Config.Schema do
     @isolations ["per_ticket", "shared"]
     @publishes ["pull_request", "direct"]
 
+    # The values `@isolations` names but this build does not honour. `isolations/0` still lists them --
+    # the setting is real, the implementation behind it is not -- and `changeset/2` refuses them out
+    # loud instead of accepting one and quietly doing something else.
+    @unimplemented_isolations ["shared"]
+
     @primary_key false
     embedded_schema do
       # `per_ticket` is the default because it is what every project on this machine already does and
       # what makes two tickets in one repository safe: each gets its own clone under
-      # `workspace.root`, so neither can overwrite the other's files, and `shared` is the exception
-      # that has to be asked for.
+      # `workspace.root`, so neither can overwrite the other's files.
+      #
+      # `shared` -- one tree for the whole project -- is declared for a future implementation and is
+      # refused today by `validate_isolation_is_implemented/1` below: nothing in the tree honours it,
+      # so a workflow that asks for `shared` would silently be given one clone per ticket instead.
       field(:isolation, :string, default: "per_ticket")
 
       # `pull_request` is the default because it is the safer half: the work waits on a branch until
@@ -163,7 +171,30 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:isolation, :publish], empty_values: [])
       |> validate_inclusion(:isolation, @isolations)
+      |> validate_isolation_is_implemented()
       |> validate_inclusion(:publish, @publishes)
+    end
+
+    # `shared` casts and includes cleanly and then does nothing, and that is the failure this refuses:
+    # a file that says "one tree for the whole project", silently given one clone per ticket.
+    #
+    # A rule about the field itself rather than the cross-field `validate_shared_isolation/1` at the
+    # bottom of this file: that one is about a *combination* (`shared` beside parallel agents) and can
+    # only speak once an `agent` section is present, while "not implemented" has to be said whatever
+    # else the file contains.
+    #
+    # `validate_change/3` fires only for a value a file actually wrote, so an omitted key and an
+    # explicit `per_ticket` both pass through exactly as before.
+    defp validate_isolation_is_implemented(changeset) do
+      validate_change(changeset, :isolation, fn :isolation, isolation ->
+        if isolation in @unimplemented_isolations do
+          [
+            isolation: "#{isolation} is not implemented yet -- per_ticket is the only isolation mode available"
+          ]
+        else
+          []
+        end
+      end)
     end
   end
 
@@ -616,6 +647,10 @@ defmodule SymphonyElixir.Config.Schema do
   # Refused here rather than "documented in the workflow", because `max_concurrent_agents` defaults to
   # 10: a file that says `shared` and nothing else is exactly the dangerous case, and a workflow that
   # does not load is one a person finds out about immediately.
+  #
+  # Kept for whoever implements `shared`: until then nothing reaches it, because `shared` is already
+  # refused as unimplemented in `Project.changeset/2`, and this rule is the one that has to hold the
+  # moment it is honoured.
   defp validate_shared_isolation(changeset) do
     project = get_field(changeset, :project)
     agent = get_field(changeset, :agent)

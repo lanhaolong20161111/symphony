@@ -213,6 +213,38 @@ defmodule SymphonyElixir.Janitor.PublishNowTest do
       assert Janitor.config(publish: "direct").publish == "direct"
     end
 
+    test "per_ticket loads and shared is refused, not silently turned into per_ticket" do
+      # The default and the explicit value are the same setting said twice, and both have to be what
+      # every workflow on this machine gets today.
+      assert Config.settings!().project.isolation == "per_ticket"
+
+      assert {:ok, parsed} = Config.Schema.parse(%{})
+      assert parsed.project.isolation == "per_ticket"
+
+      assert {:ok, explicit} = Config.Schema.parse(%{"project" => %{"isolation" => "per_ticket"}})
+      assert explicit.project.isolation == "per_ticket"
+
+      assert Janitor.config([]).isolation == "per_ticket"
+
+      # `isolations/0` still names `shared`, because the vocabulary is real -- it is this build's
+      # implementation of the value that is missing, and a refused value has to stay sayable.
+      assert Project.isolations() == ["per_ticket", "shared"]
+
+      # Nothing honours `shared`, so it must not load at all: the quiet failure is a workflow whose
+      # file promises one tree for the whole project and is handed one clone per ticket instead.
+      assert {:error, {:invalid_workflow_config, message}} =
+               Config.Schema.parse(%{"project" => %{"isolation" => "shared"}})
+
+      assert message =~ "project.isolation"
+      assert message =~ "shared is not implemented yet"
+      assert message =~ "per_ticket is the only isolation mode available"
+
+      # An untouched neighbour: `publish` is implemented, and its own validation is not loosened by
+      # the refusal above.
+      assert {:ok, still} = Config.Schema.parse(%{"project" => %{"publish" => "direct"}})
+      assert still.project.publish == "direct"
+    end
+
     test "a trunk that has moved on is reported, never force-pushed" do
       repo = scratch_repo()
       ticket = write_ticket!(repo, nil)
