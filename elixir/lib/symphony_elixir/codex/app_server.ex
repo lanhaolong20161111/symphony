@@ -30,7 +30,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       try do
         run_turn(session, prompt, issue, opts)
       after
-        stop_session(session)
+        stop_session(session, opts)
       end
     end
   end
@@ -62,7 +62,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          }}
       else
         {:error, reason} ->
-          stop_port(port)
+          stop_port(port, opts)
           {:error, reason}
       end
     end
@@ -145,9 +145,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @spec stop_session(session()) :: :ok
-  def stop_session(%{port: port}) when is_port(port) do
-    stop_port(port)
+  @doc """
+  Stops the session: the port is closed **and the process tree behind it is killed**.
+
+  The killer is injectable, the same way every other host-facing call here is (`:mint_token`,
+  `:tool_executor`, and the gate tool's `:runner`): `:kill_tree` replaces `Shell.kill_tree/1`, so a
+  test can watch the call without killing a tree. There is deliberately no second implementation of
+  "kill the tree" -- a second one is how one of them ends up killing only the direct child.
+  """
+  @spec stop_session(session(), keyword()) :: :ok
+  def stop_session(%{port: port}, opts \\ []) when is_port(port) do
+    stop_port(port, opts)
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
@@ -1260,20 +1268,65 @@ defmodule SymphonyElixir.Codex.AppServer do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
-  defp stop_port(port) when is_port(port) do
-    case :erlang.port_info(port) do
-      :undefined ->
-        :ok
+  # ─── teardown ────────────────────────────────────────────────────────────────
 
-      _ ->
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
+  # Teardown closes the port **and** kills the tree behind it.
+  #
+  # `Port.close/1` is the end of the direct child only: the app server is launched as
+  # `bash -lc "exec <codex command>"`, and whatever that child started -- another CLI, an MCP
+  # server, a build -- does not belong to the port and survives the close. That is the rule `Shell`
+  # states as "a killed process is not a killed tree".
+  #
+  # The order is the point: the pid is read first, and the tree is killed **before** the close,
+  # because both readers need that root alive -- once the port is closed `:erlang.port_info/2`
+  # answers `:undefined`, and `taskkill /PID <gone> /T` cannot find the children of a process that
+  # no longer exists. `port_metadata/2` records the same `:os_pid` key.
+  #
+  # Nothing here may raise. This runs from `after` on the way out of a turn, so raising would turn a
+  # clean exit into a crash: a port that is already gone, an `:os_pid` of `:undefined`, an
+  # `ArgumentError` from the close, and a killer that raises all end here as `:ok`, with the port
+  # closed in every case.
+  defp stop_port(port, opts) when is_port(port) do
+    kill_tree_quietly(kill_tree_fun(opts), port_os_pid(port))
+    close_port(port)
+  end
+
+  # `Shell.kill_tree/1` is the one implementation, and it is public for exactly this reuse. The
+  # `:kill_tree` option exists so a test can observe the call without killing a tree; it is not a
+  # second way to kill one.
+  defp kill_tree_fun(opts), do: Keyword.get(opts, :kill_tree, &Shell.kill_tree/1)
+
+  defp port_os_pid(port) do
+    case :erlang.port_info(port, :os_pid) do
+      {:os_pid, os_pid} when is_integer(os_pid) and os_pid > 0 -> os_pid
+      _ -> nil
     end
+  end
+
+  # A tree that could not be killed is reported, never raised: teardown has no caller left that
+  # could act on the failure, and the port is closed either way.
+  defp kill_tree_quietly(_kill_tree, nil) do
+    Logger.info("Codex app server teardown: no os pid to kill, closing the port")
+  end
+
+  defp kill_tree_quietly(kill_tree, os_pid) do
+    case kill_tree.(os_pid) do
+      :ok -> Logger.info("Codex app server process tree killed pid=#{os_pid}")
+      other -> Logger.warning("Codex app server process tree not killed pid=#{os_pid}: #{inspect(other)}")
+    end
+  rescue
+    error -> Logger.warning("Codex app server process tree kill raised pid=#{os_pid}: #{Exception.message(error)}")
+  catch
+    kind, reason -> Logger.warning("Codex app server process tree kill exited: #{kind} #{inspect(reason)}")
+  end
+
+  # `ArgumentError` is a normal answer here, not a failure: the port may have been closed already,
+  # or the child may have exited on its own and the port closed with it.
+  defp close_port(port) do
+    Port.close(port)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do

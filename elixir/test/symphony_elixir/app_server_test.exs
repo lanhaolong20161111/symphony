@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Shell
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(
@@ -1632,5 +1634,130 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  # ─── teardown ────────────────────────────────────────────────────────────────
+  #
+  # Teardown is tested without an agent: the port is opened against a `bash` that only waits, the
+  # killer is injected, and no test here lets a tree be killed for real. `:kill_tree` is the seam --
+  # `Shell.kill_tree/1` stays the one implementation, and injecting it is what makes "the tree was
+  # killed, with this pid" observable.
+
+  test "teardown kills the codex process tree, not only the port" do
+    port = open_idle_port()
+    assert {:os_pid, os_pid} = :erlang.port_info(port, :os_pid)
+    test_pid = self()
+
+    killer = fn pid ->
+      # Recorded while teardown is still running, so the port's own state at kill time is part of
+      # what this test pins.
+      send(test_pid, {:tree_killed, pid, :erlang.port_info(port)})
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = AppServer.stop_session(%{port: port}, kill_tree: killer)
+      end)
+
+    assert_received {:tree_killed, ^os_pid, port_info_at_kill}
+    # The port was still open when the tree was killed, so the pid was read and used **before** the
+    # close -- the only order that works: a closed port answers `:undefined`, and `taskkill /PID
+    # <gone> /T` cannot find the children of a root that is no longer there.
+    assert is_list(port_info_at_kill)
+    assert :erlang.port_info(port) == :undefined
+    assert log =~ "process tree killed pid=#{os_pid}"
+  end
+
+  test "teardown of an already-closed port kills nothing and cannot raise" do
+    port = open_idle_port()
+    Port.close(port)
+    test_pid = self()
+
+    killer = fn pid ->
+      send(test_pid, {:tree_killed, pid})
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = AppServer.stop_session(%{port: port}, kill_tree: killer)
+      end)
+
+    # No `:os_pid` to read, so nothing is killed -- and the close that raises `ArgumentError` for a
+    # port that is already gone is tolerated rather than surfaced.
+    refute_received {:tree_killed, _pid}
+    assert :erlang.port_info(port) == :undefined
+    assert log =~ "no os pid to kill"
+  end
+
+  test "teardown with no pid says so, and still closes the port" do
+    # A port whose child exited on its own, which is the other way `:erlang.port_info/2` comes back
+    # `:undefined`: nobody closed this port, the OS process left it behind.
+    port = open_port(~c"exit 0")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+    assert :erlang.port_info(port, :os_pid) == :undefined
+
+    test_pid = self()
+
+    killer = fn pid ->
+      send(test_pid, {:tree_killed, pid})
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = AppServer.stop_session(%{port: port}, kill_tree: killer)
+      end)
+
+    refute_received {:tree_killed, _pid}
+    assert :erlang.port_info(port) == :undefined
+    assert log =~ "no os pid to kill"
+  end
+
+  test "a killer that raises does not turn a clean exit into a crash" do
+    port = open_idle_port()
+
+    killer = fn _pid -> raise "the injected killer exploded" end
+
+    log =
+      capture_log(fn ->
+        assert :ok = AppServer.stop_session(%{port: port}, kill_tree: killer)
+      end)
+
+    assert :erlang.port_info(port) == :undefined
+    assert log =~ "process tree kill raised"
+    assert log =~ "the injected killer exploded"
+  end
+
+  # A port with no agent behind it: `bash -c "read -r _ || true"` blocks on the port's stdin and
+  # ends when the port is closed, so `:os_pid` and the close behave as they do for the real Codex
+  # launch (`Shell.find_bash/0`, `-c`), and no child outlives the test.
+  defp open_idle_port, do: open_port(~c"read -r _ || true")
+
+  defp open_port(command) do
+    bash = Shell.find_bash()
+    assert is_binary(bash), "these tests need the same bash `start_port/4` launches"
+
+    port =
+      Port.open({:spawn_executable, String.to_charlist(bash)}, [
+        :binary,
+        :exit_status,
+        :hide,
+        args: [~c"-c", command]
+      ])
+
+    on_exit(fn -> close_port_quietly(port) end)
+    port
+  end
+
+  defp close_port_quietly(port) do
+    if is_port(port) and :erlang.port_info(port) != :undefined do
+      Port.close(port)
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 end
