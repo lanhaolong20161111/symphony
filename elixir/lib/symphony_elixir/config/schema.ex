@@ -692,6 +692,55 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  # The sweep that lands tickets unattended: the land button's own judgement, asked on a timer, and
+  # only for the tickets an operator marked safe. A block rather than a few loose fields, for the
+  # reason `gate` and `deploy` are: the switch, the word it looks for and the two bounds belong
+  # together, and "this deployment does not sweep" has to stay a state a workflow can be in.
+  #
+  # Off by default, like every other addition in this fork: `SymphonyElixir.AutoLand` answers `:ignore`
+  # from `init/1` unless `enabled` is true, so a workflow that says nothing about this block starts no
+  # process, reads no ticket and runs no `gh`.
+  #
+  # `label` is the operator's per-ticket opt-in -- a ticket is landed unattended only when it carries
+  # this label -- and it is a setting rather than a constant because it is a word the operator writes
+  # on their own tickets. A blank one matches no ticket, which is a sweep that lands nothing.
+  #
+  # `timeout_ms` bounds **one attempt**: one whole `SymphonyElixir.Land.land/2` call, which is up to
+  # six `gh` invocations, each of which already carries its own killable timeout and its own
+  # rate-limit retries. The default is above that worst case, so this is a backstop for a `gh` that
+  # never answers rather than a second timeout competing with the first.
+  #
+  # `max_per_pass` is how many tickets one pass may land. One by default: a merge cannot be undone,
+  # and the steady state worth designing for is a queue that gains merges one at a time.
+  defmodule AutoLand do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @default_label "auto-land"
+    @default_interval_ms 60_000
+    @default_timeout_ms 600_000
+    @default_max_per_pass 1
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:label, :string, default: @default_label)
+      field(:interval_ms, :integer, default: @default_interval_ms)
+      field(:timeout_ms, :integer, default: @default_timeout_ms)
+      field(:max_per_pass, :integer, default: @default_max_per_pass)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :label, :interval_ms, :timeout_ms, :max_per_pass], empty_values: [])
+      |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:max_per_pass, greater_than: 0)
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -788,6 +837,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:gate, Gate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:deploy, Deploy, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:auto_land, AutoLand, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:janitor, Janitor, on_replace: :update, defaults_to_struct: true)
@@ -888,6 +938,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:gate, with: &Gate.changeset/2)
     |> cast_embed(:deploy, with: &Deploy.changeset/2)
+    |> cast_embed(:auto_land, with: &AutoLand.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:janitor, with: &Janitor.changeset/2)

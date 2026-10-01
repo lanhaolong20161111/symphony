@@ -47,7 +47,11 @@ defmodule SymphonyElixir.Application do
       # Last on purpose: it reads `Config.settings!/0` in `init/1`, so the workflow has to be
       # loaded by then. It returns `:ignore` unless `janitor.enabled` is true, so adding it here
       # changes nothing for a workflow that does not ask for it.
-      SymphonyElixir.Janitor.Server
+      SymphonyElixir.Janitor.Server,
+      # The same rule as the janitor above, and the same reason for being last: `SymphonyElixir.AutoLand`
+      # reads `Config.settings!/0` in `init/1` and answers `:ignore` unless `auto_land.enabled` is true,
+      # so a deployment that has not switched the sweep on gains no process, no timer and no read.
+      SymphonyElixir.AutoLand
     ]
 
     Supervisor.start_link(
