@@ -34,7 +34,8 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
   # YAML double-quoted scalar, so it is written with forward slashes: a Windows backslash is an escape
   # there, which is the trap `TestSupport` documents. The tracker is `memory` by default because most
   # cases here are about the gate itself; the composition cases name the kind they are about -- `file`,
-  # whose adapter has tools of its own, and `ticket_service`, whose adapter has none.
+  # whose adapter has the janitor's three tools of its own, and `ticket_service`, whose adapter brings
+  # the service's two writers (`ticket_comment`, `ticket_state`) of its own.
   defp write_gate_workflow!(command, opts \\ []) do
     root = Keyword.get_lazy(opts, :workspace_root, fn -> tmp_dir("symphony-gate-workspaces") end)
     timeout = Keyword.get(opts, :timeout_ms, @declared_timeout)
@@ -72,9 +73,10 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
   end
 
   defp tracker_block("ticket_service") do
-    # The service-backed kind: it deliberately advertises no tracker tools of its own, which is the
-    # case the gate tool has to reach anyway. `provider.url` is declared because `validate_config/1`
-    # requires it -- and it probes nothing, so no socket is opened by this or any test here.
+    # The service-backed kind: its adapter brings `ticket_comment` and `ticket_state` of its own, which
+    # the gate is composed **beside** -- the composition rule this file is about. `provider.url` is
+    # declared because `validate_config/1` requires it -- and it probes nothing, so no socket is opened
+    # by this or any test here.
     "tracker:\n  kind: ticket_service\n  provider:\n    url: \"http://127.0.0.1:4020\"\n" <>
       "  active_states: [ready]\n  terminal_states: [done]\n"
   end
@@ -454,17 +456,18 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
     end
 
     test "a service-backed project that declares a gate is advertised the gate tool" do
-      # The measured bug: `ticket_service` advertises no tools of its own, and the gate used to be
-      # composed by the **file** adapter -- so a project whose tickets come from the service was
-      # offered no tools at all, its agent read the workflow's `gate.command` and ran it itself in its
-      # sandbox, where the project's gate cannot start at all.
+      # The measured bug: `ticket_service` used to advertise no tools of its own, and the gate was
+      # composed by the **file** adapter -- so a project whose tickets come from the service was offered
+      # no tools at all, its agent read the workflow's `gate.command` and ran it itself in its sandbox,
+      # where the project's gate cannot start at all. The adapter now brings its own two writers, and the
+      # gate is composed beside them.
       write_gate_workflow!(@gate_command, tracker: "ticket_service")
 
       binding = DynamicTool.bind()
 
       assert binding.adapter == TicketService
       assert Config.settings!().tracker.kind == "ticket_service"
-      assert spec_names(binding.tool_specs) == ["symphony_gate"]
+      assert spec_names(binding.tool_specs) == ["ticket_comment", "ticket_state", "symphony_gate"]
 
       # Reached through the boundary with no ticket and no session: the gate tool's own refusal, which
       # is a value -- not the adapter's "unsupported tool". Nothing runs, so the runner is never used.
@@ -475,21 +478,30 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
       assert failure_of(response)["message"] =~ "needs a ticket identifier"
       refute_received {:gate_ran, _, _, _}
 
-      # The adapter gained nothing: a tool it does not advertise is still refused by the adapter.
+      # The adapter's own tool is advertised beside the gate, and a call that names no ticket is refused
+      # by the adapter's own argument check: no `ticket` argument and no `:issue` in the options, so no
+      # request is made and no socket is opened.
       other = Tracker.execute_bound_agent_tool(binding, "ticket_state", %{}, [])
 
       refute other["success"]
-      assert decode_payload(other)["error"]["message"] =~ "Unsupported dynamic tool"
+      assert decode_payload(other)["error"]["message"] =~ "needs a ticket identifier"
+
+      # A tool neither the adapter nor the host advertises is still the adapter's "unsupported tool".
+      unknown = Tracker.execute_bound_agent_tool(binding, "not_a_tool", %{}, [])
+
+      refute unknown["success"]
+      assert decode_payload(unknown)["error"]["message"] =~ "Unsupported dynamic tool"
     end
 
     test "no declared gate means nothing extra is advertised, whatever the kind" do
       # Pinned by hand: what each of these kinds advertises for itself, which is the whole composed
-      # list while the project declares no gate. `memory` and `ticket_service` advertise none, which is
-      # a value -- the HTTP tool endpoint reads an empty composed list as `no_agent_tools`.
+      # list while the project declares no gate. `memory` advertises none and `ticket_service`
+      # advertises its two writers -- an empty composed list is `no_agent_tools` at the HTTP endpoint,
+      # which is why `memory` is the kind that pins that answer.
       advertised = [
         {"memory", Memory, []},
         {"file", FileTracker, ["symphony_publish", "ticket_comment", "ticket_state"]},
-        {"ticket_service", TicketService, []}
+        {"ticket_service", TicketService, ["ticket_comment", "ticket_state"]}
       ]
 
       Enum.each(advertised, fn {kind, adapter, tools} ->
@@ -503,10 +515,11 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
                "#{kind} advertises something extra for a project that declares no gate"
       end)
 
-      # A blank declaration is not a gate either (schema.ex:579-582), and a call that arrives anyway is
-      # answered with the sentence saying nothing was declared, not with "unsupported tool".
+      # A blank declaration is not a gate either (schema.ex:579-582), so nothing is composed **beside**
+      # the adapter's own list, and a call that arrives anyway is answered with the sentence saying
+      # nothing was declared, not with "unsupported tool".
       write_gate_workflow!("   ", tracker: "ticket_service")
-      assert DynamicTool.bind().tool_specs == []
+      assert spec_names(DynamicTool.bind().tool_specs) == ["ticket_comment", "ticket_state"]
 
       response =
         Tracker.execute_bound_agent_tool(DynamicTool.bind(), "symphony_gate", %{}, runner: recording_runner(:never_used))

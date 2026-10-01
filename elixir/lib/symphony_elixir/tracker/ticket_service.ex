@@ -7,8 +7,15 @@ defmodule SymphonyElixir.Tracker.TicketService do
   place that translates that surface into `SymphonyElixir.Tracker.Issue` structs, so the orchestrator
   polls it exactly as it polls Linear or GitHub.
 
-  It is a **reader**. Nothing here writes a ticket, and no agent tool is advertised: writing from an
-  agent is a separate decision, and a reader that silently gained a writer would be taking it.
+  It reads, and it runs the two agent tools that write. That is a decision this adapter takes
+  deliberately rather than by accident: a service-backed project used to be advertised **no tools at
+  all**, so its agent could not move its ticket (its "I am done" signal) or leave a comment -- the two
+  writes every human-facing promise here rests on. Both are executed host-side over the service's own
+  HTTP API, and nothing else on that surface is reachable from an agent.
+
+  The gate tool is **not** composed here. It is a property of the project, not of where its tickets
+  come from, so the tracker boundary appends it for every kind
+  (`SymphonyElixir.Tracker.compose_agent_tool_specs/1`).
 
   ## Where the service is
 
@@ -30,7 +37,7 @@ defmodule SymphonyElixir.Tracker.TicketService do
   misconfigured tracker that polls the wrong address is harder to notice than one that refuses to
   load.
 
-  ## The two calls this adapter makes
+  ## The two calls this adapter reads with
 
     * `GET {url}/tickets?state=<name>&state=<name>` -- one repeated `state` parameter for every state
       the workflow declares, in the order declared. The service reads repeated parameters out of the
@@ -46,6 +53,32 @@ defmodule SymphonyElixir.Tracker.TicketService do
   and they are sent as declared: this adapter has no vocabulary of its own to reconcile, and a name
   the service does not know comes back as an empty list -- which is the contract's rule, not a
   refusal invented here.
+
+  ## The two writes the agent's tools make
+
+  Both tools are the janitor's, by name and by argument schema, because one prompt serves every tracker
+  kind: an agent saying "I am done" and "here is the report" must not have to know whether its ticket is
+  a file or a row in this service's database. What differs is only who does the writing, and here it is
+  this adapter, over the same service API the reads use:
+
+    * `ticket_state` -- `PATCH {url}/tickets/:ref` with `{"state": <name>}`. The answer reports the state
+      the service holds afterwards, not the one that was asked for;
+    * `ticket_comment` -- `POST {url}/tickets/:ref/comments` with `{"author": "agent", "body": <text>}`.
+      The answer reports the comment id the service assigned.
+
+  `:ref` is the ticket's **identifier**, for example `SYM-26`, and not the service's numeric row id. The
+  identifier is the name every layer already carries -- the `ticket` argument the agent passes, the
+  `identifier` on the issue the run was dispatched for, and the spelling the service's own `ids=` batch
+  resolves -- so a run reads and writes its ticket by one name. The service reads a purely numeric
+  segment as an id (`symphony_tickets_web/router.ex:22-24`) and the identifiers it generates are
+  `SYM-n`; a hand-written all-digit identifier would be unreachable through that surface, which is the
+  service's documented limit rather than something this adapter can paper over.
+
+  A comment is **not idempotent**, so nothing here retries one: every call carries `retry: false`
+  (`@req_opts`), and no tool submits a request twice. A 2xx is the write's truth and is reported as
+  success even when the answer's own shape is thin, because a failure there would be an invitation to
+  submit the same comment again. A 404, any other non-2xx, a connection failure and a body that is not
+  an object are all failures the agent can read, in the error vocabulary the reads already use.
 
   ## Which rule decides `dispatchable`
 
@@ -72,9 +105,77 @@ defmodule SymphonyElixir.Tracker.TicketService do
   # `retry: false` is load-bearing, not tidiness -- the same reasoning as `RecorderClient`: Req
   # retries transport errors with backoff by default, so a service that is down would cost three
   # connection attempts on every poll before the orchestrator is told so.
+  #
+  # It travels with the writes too, and there it is a correctness rule rather than a cost one: a comment
+  # is **not idempotent**, so a retry behind the agent's back would post the same comment twice and
+  # report whichever attempt finished last. Nothing in this module submits a request twice.
   @req_opts [receive_timeout: @timeout_ms, retry: false]
 
   @tickets_path "/tickets"
+  @comments_path "/comments"
+
+  # The two agent-facing tools, by the names the file tracker already offers (`Janitor.AgentTool`).
+  # One prompt serves every tracker kind, so the name is the contract: an agent must not have to know
+  # where its ticket lives to say "I am done" or to leave a comment.
+  @comment_tool "ticket_comment"
+  @state_tool "ticket_state"
+
+  # The author every comment from a run is signed with. This surface requires an `author` (the store
+  # refuses a comment without one), and the caller that has always existed is the agent -- the janitor
+  # signs a file ticket's comments the same way (`janitor.ex:834`).
+  @comment_author "agent"
+
+  # The descriptions say what this service-backed kind actually does. The names, the argument schemas
+  # and the envelope below are the janitor's, copied rather than shared so a change to one kind's tool
+  # cannot silently change what the other kind's agent is told it can do.
+  @comment_description """
+  Add a comment to a ticket, by asking the ticket service to append it. Use it to leave something the
+  next reader needs -- why you stopped, what you could not verify, an assumption you made -- instead of
+  rewriting the ticket's description, which is the service's own field. The service assigns the comment
+  id and answers with it.
+  """
+
+  @state_description """
+  Move a ticket to a new state, by asking the ticket service to write it: the state names this workflow
+  declares, such as `ready` or `in-review`.
+
+  Use this instead of anything else to move the ticket: the service is the only writer of its own
+  database, and a name it does not know is refused there rather than guessed at here. The call carries
+  the state and nothing else, and the answer reports the state the service holds afterwards rather than
+  the one that was asked for.
+  """
+
+  @comment_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["body"],
+    "properties" => %{
+      "ticket" => %{
+        "type" => "string",
+        "description" => "Ticket identifier to comment on, for example SYM-26. Defaults to the running ticket."
+      },
+      "body" => %{
+        "type" => "string",
+        "description" => "The comment. Plain text; the service stores it as written."
+      }
+    }
+  }
+
+  @state_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["state"],
+    "properties" => %{
+      "ticket" => %{
+        "type" => "string",
+        "description" => "Ticket to move, for example SYM-26. Defaults to the running ticket."
+      },
+      "state" => %{
+        "type" => "string",
+        "description" => "The state to set, for example in-review."
+      }
+    }
+  }
 
   # The service's 404 names the value that could not be read ("no ticket with id 7", "no ticket with
   # identifier \"SYM-9\"": `symphony_tickets_web/store_error.ex:45-48`). Only the prefix is matched:
@@ -107,6 +208,11 @@ defmodule SymphonyElixir.Tracker.TicketService do
     * `:client` -- replaces the HTTP call. It takes the URL and answers
       `{:ok, %{status: integer(), body: term()}}` or `{:error, term()}`; the default is `get/1`,
       which is the only function here that opens a connection, so no test needs a socket.
+
+  A read hands the client one argument (the URL) because that is the arity this seam's other caller
+  passes: `SymphonyElixirWeb.TicketReader` injects `&TicketService.get/1` through it
+  (`ticket_reader.ex:378`). The two tools take the **same** seam and hand it `(method, url, body)`,
+  because a write has a body to carry; no call ever uses both directions.
 
   The empty-list short-circuit is at this entry point as well, ahead of resolving `provider.url`: a
   tracker whose URL is missing still answers `{:ok, []}` for an empty request.
@@ -182,32 +288,292 @@ defmodule SymphonyElixir.Tracker.TicketService do
   def validate_config(_tracker_settings), do: {:error, :invalid_ticket_service_settings}
 
   @doc """
-  The one call that opens a connection.
+  The read call: `GET url`.
 
   A failed connection, and anything Req raises around it, is an error value rather than a raise: the
   caller is a poll loop, and "the service did not answer" has to look like a read that failed, not
   like a crashed orchestrator.
   """
   @spec get(String.t()) :: {:ok, %{status: integer(), body: term()}} | {:error, term()}
-  def get(url) when is_binary(url) do
-    case Req.get(url, @req_opts) do
-      {:ok, %{status: status, body: body}} -> {:ok, %{status: status, body: body}}
+  def get(url) when is_binary(url), do: request(:get, url, nil)
+
+  @doc """
+  The one family of calls that opens a connection: `method` at `url`, with `body` sent as JSON unless
+  it is `nil`.
+
+  `get/1` is this with `:get` and no body, so the read path and the two tools share one transport, one
+  set of options (`@req_opts`: one timeout, no retry) and one set of error values. A failed connection,
+  and anything Req raises around it, is an error value rather than a raise, for the writes as much as
+  for the reads: a tool call answers the envelope, never a crashed session.
+
+  Not retried, ever. For the comment that is a correctness rule and not a saving -- see `@req_opts`.
+  """
+  @spec request(atom(), String.t(), term()) :: {:ok, %{status: integer(), body: term()}} | {:error, term()}
+  def request(method, url, body) when is_atom(method) and is_binary(url) do
+    case Req.request(Keyword.merge([method: method, url: url] ++ body_options(body), @req_opts)) do
+      {:ok, %{status: status, body: answer}} -> {:ok, %{status: status, body: answer}}
       {:error, reason} -> {:error, {:ticket_service_unreachable, reason}}
     end
   rescue
     error -> {:error, {:ticket_service_unreachable, Exception.message(error)}}
   end
 
+  defp body_options(nil), do: []
+  defp body_options(body), do: [json: body]
+
+  # ── the agent tools ─────────────────────────────────────────────────────────
+
+  @doc """
+  The two tools a service-backed run is offered: `ticket_comment` and `ticket_state`.
+
+  The names, the argument schemas and the return envelope are the file tracker's
+  (`SymphonyElixir.Janitor.AgentTool.tool_specs/0`), because one prompt serves every tracker kind: the
+  agent says "I am done" without having to know where its ticket lives. What differs is the executor --
+  there the host owns the ticket file, here the service owns the row -- and that difference is this
+  module's to keep, not the agent's to know.
+
+  The gate tool is not here: it belongs to the project, so the boundary composes it for every kind.
+  """
+  @spec agent_tool_specs() :: [map()]
+  def agent_tool_specs do
+    [
+      %{
+        "name" => @comment_tool,
+        "description" => @comment_description,
+        "inputSchema" => @comment_input_schema
+      },
+      %{
+        "name" => @state_tool,
+        "description" => @state_description,
+        "inputSchema" => @state_input_schema
+      }
+    ]
+  end
+
+  @doc """
+  Runs one agent tool call over the service's HTTP API.
+
+  `opts` carries `:tracker_settings` (the boundary injects it for a bound call) and `:client`, the
+  transport seam the reads take as well -- a write is `client.(method, url, body)` where a read is
+  `client.(url)`. It may also carry `:issue`, the ticket this turn is running, which is used when the
+  call does not name one. Every test injects a client, so no test opens a socket.
+
+  A call answers the envelope and never raises, as the janitor's tools do: the MCP transport turns an
+  exception into a protocol error for the whole session, and a Codex turn only ever sees `success`.
+  """
+  @spec execute_agent_tool(String.t() | nil, term(), keyword()) :: map()
+  def execute_agent_tool(tool, arguments, opts) do
+    case tool do
+      @comment_tool -> comment(arguments, opts)
+      @state_tool -> set_state(arguments, opts)
+      other -> unsupported(other)
+    end
+  rescue
+    error -> failure(%{"error" => %{"message" => Exception.message(error)}})
+  end
+
+  defp comment(arguments, opts) do
+    with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
+         body when is_binary(body) <- arguments |> arguments_map() |> Map.get("body") |> presence() do
+      payload = %{"author" => @comment_author, "body" => body}
+
+      case write_to_service(:post, ticket, @comments_path, payload, opts) do
+        {:ok, answered} -> success(Map.merge(%{"ticket" => ticket}, comment_answer(answered)))
+        {:error, reason} -> ticket_failure(ticket, reason)
+      end
+    else
+      _ -> refusal(@comment_tool)
+    end
+  end
+
+  defp set_state(arguments, opts) do
+    with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
+         state when is_binary(state) <- arguments |> arguments_map() |> Map.get("state") |> presence() do
+      case write_to_service(:patch, ticket, "", %{"state" => state}, opts) do
+        {:ok, answered} -> state_answer(ticket, answered)
+        {:error, reason} -> ticket_failure(ticket, reason)
+      end
+    else
+      _ -> refusal(@state_tool)
+    end
+  end
+
+  # One direction of the one transport seam: `client.(method, url, body)` at the service's base URL.
+  # The default is `request/3`, the same function `get/1` wraps.
+  defp write_to_service(method, ticket, path, payload, opts) do
+    with {:ok, url} <- write_url(settings_from(opts), ticket, path) do
+      client = Keyword.get(opts, :client, &request/3)
+
+      client.(method, url, payload)
+      |> write_response()
+    end
+  end
+
+  defp write_url(tracker_settings, ticket, path) do
+    case base_url(tracker_settings) do
+      nil ->
+        {:error, :missing_ticket_service_url}
+
+      base ->
+        {:ok, String.trim_trailing(base, "/") <> @tickets_path <> "/" <> encode_ref(ticket) <> path}
+    end
+  end
+
+  # A ref is one path segment, percent-encoded so an identifier carrying a space or a slash cannot turn
+  # into two segments. `URI.encode_www_form/1` is deliberately not used: it writes a space as `+`, which
+  # is a literal plus in a path and a space only in a query, and this is a path.
+  defp encode_ref(ref), do: URI.encode(ref, &URI.char_unreserved?/1)
+
+  # A write's answer, in the error vocabulary the reads already use. `not_found/1` is the read path's
+  # own 404 mapping, because "no ticket with identifier X" is one fact whether the ticket was read or
+  # written; everything else that is not a 2xx is `{:ticket_service_http, status, body}`, unchanged.
+  #
+  # A 2xx counts only when its body is an object. These endpoints answer the ticket (PATCH) or the
+  # comment (POST), so a body that is not an object is an answer this adapter cannot read -- and a write
+  # it cannot see is never reported as one that happened.
+  defp write_response({:ok, %{status: status, body: body}}) when status in 200..299 and is_map(body),
+    do: {:ok, body}
+
+  defp write_response({:ok, %{status: status, body: body}}) when status in 200..299,
+    do: {:error, {:ticket_service_invalid_payload, body}}
+
+  defp write_response({:ok, %{status: 404, body: body}}), do: not_found(body)
+
+  defp write_response({:ok, %{status: status, body: body}}),
+    do: {:error, {:ticket_service_http, status, body}}
+
+  # The client's own error, passed through unchanged: the default client already names a connection
+  # failure, and a stub that answers an error must be able to prove the adapter does not swallow it.
+  defp write_response({:error, reason}), do: {:error, reason}
+
+  # What the service answered, never what was asked for: the PATCH answers the ticket it wrote, and the
+  # state that ticket holds is the one reported. A service that could not move the ticket, or a name
+  # that maps to a different state, is visible here instead of being papered over with the request.
+  #
+  # An answer that names no state is a failure rather than a success: this tool exists to report a
+  # state, and a PATCH **is** idempotent, so asking again costs nothing -- unlike the comment beside it.
+  defp state_answer(ticket, answered) do
+    case state_name(answered["state"]) do
+      nil -> ticket_failure(ticket, {:ticket_service_invalid_payload, answered})
+      state -> success(%{"ticket" => ticket, "state" => state})
+    end
+  end
+
+  # The comment the service answered: the id it assigned and the author it stored, in the adapter's own
+  # field shape, where a null says the service named none.
+  #
+  # A 2xx is not downgraded to a failure over that, and the reason is not tidiness: a comment is **not
+  # idempotent**, so a failure an agent might answer by submitting the same comment again is worse than
+  # a thin success -- and the 2xx is the write's truth either way. The non-object body is the one shape
+  # that cannot be read at all, and `write_response/1` refuses it above.
+  defp comment_answer(answered) do
+    %{"comment" => %{"id" => text(answered["id"]), "author" => text(answered["author"])}}
+  end
+
+  defp ticket_failure(ticket, reason) do
+    failure(%{"error" => %{"message" => describe(reason), "ticket" => ticket}})
+  end
+
+  # The refusal an unknown tool gets, in the shape every other adapter refuses one
+  # (`Janitor.AgentTool.unsupported_error/1`): the message names the tool, and the answer lists what
+  # this adapter would have run.
+  defp unsupported(tool) do
+    failure(%{
+      "error" => %{
+        "message" => "Unsupported dynamic tool: #{inspect(tool)}.",
+        "supportedTools" => [@comment_tool, @state_tool]
+      }
+    })
+  end
+
+  defp refusal(tool) do
+    failure(%{"error" => %{"message" => missing_arguments(tool), "supportedTools" => [tool]}})
+  end
+
+  defp missing_arguments(@comment_tool) do
+    "#{@comment_tool} needs a ticket identifier and a non-empty body: pass the ticket's identifier, " <>
+      "such as SYM-26, together with the text to add."
+  end
+
+  defp missing_arguments(@state_tool) do
+    "#{@state_tool} needs a ticket identifier and a non-empty state: pass the ticket's identifier, " <>
+      "such as SYM-26, together with the state to set."
+  end
+
+  # One sentence per error value this adapter can produce, so a run can report what actually happened
+  # instead of "an error". The last clause is a catch-all on purpose: a tool call must never raise, and
+  # an error value that has not grown a sentence yet still reaches the agent rather than the session.
+  defp describe({:ticket_service_ticket_not_found, value}),
+    do: "the ticket service has no ticket for #{inspect(value)}"
+
+  defp describe({:ticket_service_http, status, body}),
+    do: "the ticket service answered HTTP #{status} with #{inspect(body)}"
+
+  defp describe({:ticket_service_invalid_payload, body}),
+    do: "the ticket service answered with a body this adapter cannot read: #{inspect(body)}"
+
+  defp describe({:ticket_service_unreachable, reason}),
+    do: "the ticket service could not be reached: #{inspect(reason)}"
+
+  defp describe(:missing_ticket_service_url),
+    do: "this tracker declares no provider.url, so there is no ticket service to call"
+
+  defp describe(other), do: inspect(other)
+
+  defp ticket_from(arguments, opts) do
+    named = arguments |> arguments_map() |> Map.get("ticket") |> presence()
+
+    named || issue_identifier(Keyword.get(opts, :issue))
+  end
+
+  defp arguments_map(arguments) when is_map(arguments), do: arguments
+  defp arguments_map(_arguments), do: %{}
+
+  # The identifier, never the service's numeric id: the identifier is the name the agent was given and
+  # the name every layer carries, and this adapter reads and writes a ticket by one name.
+  defp issue_identifier(%{identifier: identifier}), do: presence(identifier)
+  defp issue_identifier(_issue), do: nil
+
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_value), do: nil
+
+  defp success(payload), do: dynamic_tool_response(true, payload)
+  defp failure(payload), do: dynamic_tool_response(false, payload)
+
+  defp dynamic_tool_response(success, payload) do
+    output =
+      case Jason.encode(payload, pretty: true) do
+        {:ok, encoded} -> encoded
+        {:error, _reason} -> inspect(payload)
+      end
+
+    %{
+      "success" => success,
+      "output" => output,
+      "contentItems" => [%{"type" => "inputText", "text" => output}]
+    }
+  end
+
   # ── the request ─────────────────────────────────────────────────────────────
 
   defp fetch(query, settings_or_opts) do
     opts = options(settings_or_opts)
-    tracker_settings = Keyword.get(opts, :tracker_settings) || Config.settings!().tracker
+    tracker_settings = settings_from(opts)
 
     with {:ok, url} <- request_url(tracker_settings, query) do
-      request(url, tracker_settings, opts)
+      read(url, tracker_settings, opts)
     end
   end
+
+  # The tracker block to act on: the one passed in, or the workflow's. Read here rather than inline in
+  # two places, so a read and a write can never end up at two different services.
+  defp settings_from(opts), do: Keyword.get(opts, :tracker_settings) || Config.settings!().tracker
 
   # Two documented forms, one code path: the settings map (the shape the file adapter takes) and a
   # keyword list of options (the shape `ProjectStatus.list/1` takes).
@@ -221,7 +587,10 @@ defmodule SymphonyElixir.Tracker.TicketService do
     end
   end
 
-  defp request(url, tracker_settings, opts) do
+  # The read direction of the transport seam: the client is handed the URL alone. It is called
+  # `read/3`, not `request/3`, so the public transport function keeps the name that says "the one place
+  # a connection is opened".
+  defp read(url, tracker_settings, opts) do
     client = Keyword.get(opts, :client, &get/1)
 
     client.(url)

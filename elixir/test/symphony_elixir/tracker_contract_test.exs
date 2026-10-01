@@ -41,9 +41,13 @@ defmodule SymphonyElixir.TrackerContractTest do
   # it in one adapter is what left a service-backed project with no tools at all, so where the
   # composition happens is itself pinned, in the tests below.
   #
-  # `memory` and `ticket_service` advertise none, which is a value: `tracker.ex:161-167` turns the
-  # missing callback into an empty list, and `tracker.ex:190-196` answers every tool call such an
-  # adapter does not own with a structured failure.
+  # `memory` advertises none, which is a value: `tracker.ex:161-167` turns the missing callback into an
+  # empty list, and `tracker.ex:190-196` answers every tool call such an adapter does not own with a
+  # structured failure. `ticket_service` advertises the janitor's two writers -- `ticket_comment` and
+  # `ticket_state` -- executed by the adapter over the service's own HTTP API
+  # (`tracker/ticket_service.ex`), under the names and argument shapes the file tracker's agent tools
+  # already use, so one prompt serves either kind. The publisher and the gate are **not** here: the
+  # janitor is the file tracker's host-side caretaker, and the gate belongs to the project.
   @advertised_tools %{
     "asana" => ["asana_api"],
     "file" => ["symphony_publish", "ticket_comment", "ticket_state"],
@@ -52,7 +56,7 @@ defmodule SymphonyElixir.TrackerContractTest do
     "jira" => ["jira_rest"],
     "linear" => ["linear_graphql"],
     "memory" => [],
-    "ticket_service" => []
+    "ticket_service" => ["ticket_comment", "ticket_state"]
   }
 
   # The host's own tools, pinned by name. They belong to no adapter, so they are not in
@@ -400,12 +404,15 @@ defmodule SymphonyElixir.TrackerContractTest do
       assert Config.settings!().tracker.kind == "ticket_service"
       assert Config.settings!().gate.command == @gate_command
 
-      # This is the fix. `ticket_service` deliberately advertises no tools of its own, and the gate
-      # used to be composed by the **file** tracker's adapter -- so a project whose tickets come from
-      # the service was offered no tools at all, its agent read the workflow's `gate.command` and ran
-      # that command itself in its sandbox, where this project's gate cannot even start.
-      assert Contract.assert_composed_tool_list(TicketService, [], @host_tools) == :ok
-      assert Contract.assert_bound_tool_list(TicketService, @host_tools) == :ok
+      # The fix, and what it composes now. The gate is composed by the **boundary** for every kind; it
+      # used to be composed by the **file** tracker's adapter, so a project whose tickets come from the
+      # service was offered no tools at all -- its agent read the workflow's `gate.command` and ran that
+      # command itself in its sandbox, where this project's gate cannot even start. This adapter now
+      # brings its own two writers, and the gate is appended beside them.
+      service_tools = Map.fetch!(@advertised_tools, "ticket_service")
+
+      assert Contract.assert_composed_tool_list(TicketService, service_tools, @host_tools) == :ok
+      assert Contract.assert_bound_tool_list(TicketService, service_tools ++ @host_tools) == :ok
     end
 
     test "a project that declares no gate is advertised nothing extra, for every kind" do
@@ -594,9 +601,9 @@ defmodule SymphonyElixir.TrackerContractTest do
 
   # The transport each adapter's tools take from their options (`linear/agent_tool.ex:57`,
   # `github/agent_tool.ex:58`, `gitlab/agent_tool.ex:58`, `jira/agent_tool.ex:58`,
-  # `asana/agent_tool.ex:58`, and `janitor/agent_tool.ex:159`, `:183`, `:209` for the host-side
-  # writers). A stub that fails the test is passed wherever none of the refused arguments may reach
-  # the provider or the host.
+  # `asana/agent_tool.ex:58`, `janitor/agent_tool.ex:159`, `:183`, `:209` for the host-side writers,
+  # and `tracker/ticket_service.ex`'s `:client` for the service's own two). A stub that fails the test
+  # is passed wherever none of the refused arguments may reach the provider, the host or the service.
   #
   # `linear` is the one adapter without such a stub, and the difference test above says why: its tool
   # accepts a bare string as the query, so one of the refused arguments is not refused and does reach
@@ -619,8 +626,20 @@ defmodule SymphonyElixir.TrackerContractTest do
   defp tool_opts("jira"), do: [jira_client: refusing_rest_request("jira")]
   defp tool_opts("asana"), do: [asana_client: refusing_rest_request("asana")]
   defp tool_opts("memory"), do: []
-  # No tools are advertised, so there is nothing to stub: the dispatch's unsupported-tool path is what runs.
-  defp tool_opts("ticket_service"), do: []
+
+  # The service adapter executes its two tools over the service's HTTP API, through the same `:client`
+  # seam the reads take (here handed a method, a URL and a body rather than a URL alone). None of the
+  # refused arguments names a ticket, so none of them may reach it -- and the stub proves that rather
+  # than the test reading it out of the source.
+  defp tool_opts("ticket_service") do
+    [client: refusing_service_request()]
+  end
+
+  defp refusing_service_request do
+    fn _method, _url, _body ->
+      flunk("ticket_service reached the service with an argument it must refuse")
+    end
+  end
 
   defp refusing_rest_request(kind) do
     fn _method, _path, _params, _body, _opts ->

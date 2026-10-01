@@ -1,9 +1,11 @@
 defmodule SymphonyElixir.TicketServiceTrackerTest do
   # The adapter takes its tracker settings and its transport as arguments, so these tests touch no
   # global application environment and no test opens a socket: every call below is answered by an
-  # injected client, and the default client (`TicketService.get/1`) is never reached.
+  # injected client, and the default client (`TicketService.get/1`, `TicketService.request/3`) is never
+  # reached. A read hands that client a URL; the two writes hand it a method, a URL and a body.
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.Tracker.File, as: FileTracker
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Tracker.TicketService
 
@@ -77,6 +79,65 @@ defmodule SymphonyElixir.TicketServiceTrackerTest do
 
   defp fetch_ids(ids, client, overrides \\ %{}) do
     TicketService.fetch_issues_by_ids(ids, client: client, tracker_settings: settings(overrides))
+  end
+
+  # ── the two writes ──────────────────────────────────────────────────────────
+
+  # A write client: the same seam as `answering/2` below, handed the method and the body a write carries
+  # instead of a URL alone. It records the request, so a test can assert what would have gone on the
+  # wire without there being a wire.
+  defp service_writes(status, body) do
+    fn method, url, payload ->
+      send(self(), {:requested, method, url, payload})
+      {:ok, %{status: status, body: body}}
+    end
+  end
+
+  defp refusing_client do
+    fn _method, _url, _body -> flunk("a call that must be refused reached the ticket service") end
+  end
+
+  defp run(tool, arguments, client, extra \\ []) do
+    opts = extra ++ [client: client, tracker_settings: settings()]
+
+    TicketService.execute_agent_tool(tool, arguments, opts)
+  end
+
+  defp specs_by_name(adapter) do
+    adapter.agent_tool_specs() |> Map.new(&{&1["name"], &1})
+  end
+
+  # The part of a tool spec a prompt depends on: the argument names, their types, which are required,
+  # and that nothing undeclared is accepted. The prose is deliberately not compared -- this kind's
+  # description has to say what this service does, and the file tracker's says what a ticket file does
+  # ("newlines are flattened into the single discussion line"), so one shared sentence would be false
+  # for one of the two kinds.
+  defp argument_shape(spec) do
+    schema = spec["inputSchema"]
+
+    %{
+      "type" => schema["type"],
+      "additionalProperties" => schema["additionalProperties"],
+      "required" => schema["required"],
+      "properties" => Map.new(schema["properties"], fn {name, property} -> {name, property["type"]} end)
+    }
+  end
+
+  defp state_object(name), do: %{"type" => "started", "name" => name, "display_name" => name}
+
+  # One comment, shaped exactly as `SymphonyTicketsWeb.Presenter.comment/1` renders it.
+  defp comment(overrides) do
+    Map.merge(
+      %{
+        "id" => 3,
+        "ticket_id" => 7,
+        "parent_id" => nil,
+        "author" => "agent",
+        "body" => "the body",
+        "created_at" => 1_760_000_000_000
+      },
+      overrides
+    )
   end
 
   describe "rule 2: an empty request is answered by nothing" do
@@ -399,6 +460,221 @@ defmodule SymphonyElixir.TicketServiceTrackerTest do
     test "is an empty list, which is a value rather than an exemption" do
       assert TicketService.secret_environment_names(settings()) == []
       assert TicketService.secret_environment_names(%{}) == []
+    end
+  end
+
+  describe "the tools this adapter advertises" do
+    test "are the file tracker's comment and state tools, by name" do
+      assert Enum.map(TicketService.agent_tool_specs(), & &1["name"]) ==
+               ["ticket_comment", "ticket_state"]
+
+      # The composition that offered this project no tools at all is at the boundary, not here; this is
+      # this adapter's own list. The file tracker's list is unchanged by this slice: the janitor's three
+      # tools, publisher first.
+      assert Enum.map(FileTracker.agent_tool_specs(), & &1["name"]) ==
+               ["symphony_publish", "ticket_comment", "ticket_state"]
+    end
+
+    test "carry the file tracker's argument shapes, so one prompt serves both kinds" do
+      service = specs_by_name(TicketService)
+      file = specs_by_name(FileTracker)
+
+      Enum.each(["ticket_comment", "ticket_state"], fn name ->
+        assert argument_shape(service[name]) == argument_shape(file[name])
+      end)
+    end
+
+    test "an unknown tool is refused in the shape the other adapters refuse one" do
+      result = TicketService.execute_agent_tool("no_such_tool", %{}, client: refusing_client())
+
+      assert result["success"] == false
+      assert [%{"type" => "inputText", "text" => text}] = result["contentItems"]
+      assert text == result["output"]
+
+      payload = Jason.decode!(result["output"])
+      assert payload["error"]["message"] =~ "Unsupported dynamic tool"
+      assert payload["error"]["supportedTools"] == ["ticket_comment", "ticket_state"]
+
+      # The same envelope, and the same message shape the janitor's tools answer with.
+      janitor = FileTracker.execute_agent_tool("no_such_tool", %{}, [])
+      assert Map.keys(janitor) == Map.keys(result)
+      assert Jason.decode!(janitor["output"])["error"]["message"] =~ "Unsupported dynamic tool"
+    end
+  end
+
+  describe "ticket_state" do
+    test "PATCHes the ticket with the state as its only attribute" do
+      client = service_writes(200, ticket(%{"state" => state_object("in-review")}))
+
+      result = run("ticket_state", %{"ticket" => "SYM-7", "state" => "in-review"}, client)
+
+      assert_received {:requested, :patch, url, body}
+      assert url == @base_url <> "/tickets/SYM-7"
+      assert body == %{"state" => "in-review"}
+      assert result["success"] == true
+      assert Jason.decode!(result["output"])["state"] == "in-review"
+    end
+
+    test "reports the state the service answered, not the one that was asked for" do
+      # The service accepted the PATCH and its own answer says the ticket is still `ready`. That is the
+      # state this tool reports, so a run never tells a human about a move that did not happen.
+      client = service_writes(200, ticket(%{"state" => state_object("ready")}))
+
+      result = run("ticket_state", %{"ticket" => "SYM-7", "state" => "done"}, client)
+
+      assert result["success"] == true
+      assert Jason.decode!(result["output"])["state"] == "ready"
+    end
+
+    test "an answer that names no state is a failure rather than a guess" do
+      # A PATCH is idempotent, so refusing here costs nothing and asking again is safe -- unlike the
+      # comment beside it, where a failure could invite a duplicate.
+      client = service_writes(200, %{"identifier" => "SYM-7"})
+
+      result = run("ticket_state", %{"ticket" => "SYM-7", "state" => "done"}, client)
+
+      assert result["success"] == false
+      assert Jason.decode!(result["output"])["error"]["message"] =~ "cannot read"
+    end
+
+    test "the ref it sends is the ticket's identifier, not the service's numeric id" do
+      # The running issue carries both (`id` is the service's row id). The identifier is what every
+      # layer names the ticket by -- the agent's argument, the prompt, the issue struct -- and the
+      # service resolves it through the same `tickets_by_identifiers` path its `ids=` batch uses.
+      client = service_writes(200, ticket(%{"state" => state_object("done")}))
+
+      result = run("ticket_state", %{"state" => "done"}, client, issue: %{id: "7", identifier: "SYM-7"})
+
+      assert_received {:requested, :patch, url, _body}
+      assert url == @base_url <> "/tickets/SYM-7"
+      assert result["success"] == true
+    end
+
+    test "a ref that needs encoding is one path segment, not two" do
+      client = service_writes(200, ticket(%{"state" => state_object("done")}))
+
+      result = run("ticket_state", %{"ticket" => "SYM 7/x", "state" => "done"}, client)
+
+      assert_received {:requested, :patch, url, _body}
+      assert url == @base_url <> "/tickets/SYM%207%2Fx"
+      assert result["success"] == true
+    end
+  end
+
+  describe "ticket_comment" do
+    test "POSTs the author and the body, and a non-ASCII body survives the round trip" do
+      body = "已复核：缓存命中率从 12% 升到 96%，非 ASCII 原样写回。"
+      client = service_writes(201, comment(%{"body" => body}))
+
+      result = run("ticket_comment", %{"ticket" => "SYM-7", "body" => body}, client)
+
+      assert_received {:requested, :post, url, sent}
+      assert url == @base_url <> "/tickets/SYM-7/comments"
+      assert sent == %{"author" => "agent", "body" => body}
+      assert result["success"] == true
+
+      payload = Jason.decode!(result["output"])
+      assert payload["ticket"] == "SYM-7"
+      assert payload["comment"] == %{"id" => "3", "author" => "agent"}
+    end
+
+    test "a 2xx whose answer is thin is still a success: a comment is not idempotent" do
+      # The service accepted the comment; the id is simply not in the answer. Failing here would invite
+      # the agent to submit the same comment again, which is the one thing this tool must not cause.
+      client = service_writes(201, %{})
+
+      result = run("ticket_comment", %{"ticket" => "SYM-7", "body" => "x"}, client)
+
+      assert result["success"] == true
+      assert Jason.decode!(result["output"])["comment"] == %{"id" => nil, "author" => nil}
+    end
+
+    test "one request per call: the adapter never retries a comment behind the agent" do
+      # `@req_opts` carries `retry: false`, and the tool itself submits once. A retry would post the
+      # same comment twice and report whichever attempt finished last, with the duplicate invisible.
+      client = service_writes(500, %{"error" => %{"code" => "db"}})
+
+      result = run("ticket_comment", %{"ticket" => "SYM-7", "body" => "x"}, client)
+
+      assert result["success"] == false
+      assert_received {:requested, :post, _, _}
+      refute_received {:requested, :post, _, _}
+    end
+  end
+
+  describe "the failures the two tools report" do
+    test "a 404 is a readable failure that names the ticket, for both tools" do
+      # Verbatim what this service answers for a value it cannot read (`store_error.ex:45-48`): the same
+      # mapping the reads use, because "no ticket with identifier X" is one fact either way.
+      body = %{"error" => %{"code" => "not_found", "message" => "no ticket with identifier \"SYM-9\""}}
+
+      state = run("ticket_state", %{"ticket" => "SYM-9", "state" => "done"}, service_writes(404, body))
+      comment = run("ticket_comment", %{"ticket" => "SYM-9", "body" => "x"}, service_writes(404, body))
+
+      Enum.each([state, comment], fn result ->
+        assert result["success"] == false
+        payload = Jason.decode!(result["output"])
+        assert payload["error"]["ticket"] == "SYM-9"
+        assert payload["error"]["message"] =~ "no ticket for"
+      end)
+    end
+
+    test "a non-2xx that is not a 404 keeps its status and its body" do
+      body = %{"error" => %{"code" => "unknown_state", "message" => "no such state"}}
+
+      result = run("ticket_state", %{"ticket" => "SYM-7", "state" => "nope"}, service_writes(500, body))
+
+      assert result["success"] == false
+      message = Jason.decode!(result["output"])["error"]["message"]
+      assert message =~ "HTTP 500"
+      assert message =~ "unknown_state"
+    end
+
+    test "a connection error is a failure the agent can read, never a raise" do
+      client = fn _method, _url, _body -> {:error, {:ticket_service_unreachable, :econnrefused}} end
+
+      result = run("ticket_comment", %{"ticket" => "SYM-7", "body" => "x"}, client)
+
+      assert result["success"] == false
+      message = Jason.decode!(result["output"])["error"]["message"]
+      assert message =~ "could not be reached"
+      assert message =~ "econnrefused"
+    end
+
+    test "a body that is not an object is a failure for both tools, never a silent success" do
+      state = run("ticket_state", %{"ticket" => "SYM-7", "state" => "done"}, service_writes(200, "nope"))
+      comment = run("ticket_comment", %{"ticket" => "SYM-7", "body" => "x"}, service_writes(200, "nope"))
+
+      Enum.each([state, comment], fn result ->
+        assert result["success"] == false
+        assert Jason.decode!(result["output"])["error"]["message"] =~ "cannot read"
+      end)
+    end
+
+    test "a tracker that declares no url refuses the write without calling anywhere" do
+      result =
+        TicketService.execute_agent_tool(
+          "ticket_state",
+          %{"ticket" => "SYM-7", "state" => "done"},
+          client: refusing_client(),
+          tracker_settings: %{provider: %{}}
+        )
+
+      assert result["success"] == false
+      assert Jason.decode!(result["output"])["error"]["message"] =~ "provider.url"
+    end
+
+    test "a call that names no ticket, or no value to write, is refused before the service is asked" do
+      client = refusing_client()
+
+      blank_body = run("ticket_comment", %{"ticket" => "SYM-7", "body" => "   "}, client)
+      no_ticket = run("ticket_comment", %{"body" => "x"}, client)
+      no_state = run("ticket_state", %{"ticket" => "SYM-7"}, client)
+
+      Enum.each([blank_body, no_ticket, no_state], fn result ->
+        assert result["success"] == false
+        assert result["output"] =~ "needs a ticket identifier"
+      end)
     end
   end
 end
