@@ -571,7 +571,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   # The gate a project declares for its own agent runs: one shell command and a deadline for it. It is
-  # run **host-side** by `SymphonyElixir.Janitor.GateTool`, because an agent's turn is sandboxed and on
+  # run **host-side** by `SymphonyElixir.GateTool`, because an agent's turn is sandboxed and on
   # this host `mix` cannot even start there -- `Mix.Sync.PubSub` stats the user profile directory and
   # that stat is refused for the sandbox account. A block rather than two loose fields, for the reason
   # `hooks` is one: the command and the deadline belong together.
@@ -1016,6 +1016,11 @@ defmodule SymphonyElixir.Config.Schema do
           {settings.tracker.active_states, settings.tracker.terminal_states}
       end
 
+    # Bound here rather than inline in the struct update: the merged list is the one expression in this
+    # map too long for the line it belongs to, and a helper call keeps that line readable.
+    secret_environment_names =
+      merge_secret_environment_names(derived_environment_names, settings.tracker.secret_environment_names)
+
     tracker = %{
       settings.tracker
       | endpoint: Map.get(provider, "endpoint", settings.tracker.endpoint),
@@ -1023,8 +1028,7 @@ defmodule SymphonyElixir.Config.Schema do
         project_slug: Map.get(provider, "project_slug", settings.tracker.project_slug),
         assignee: assignee,
         provider: provider,
-        secret_environment_names:
-          merge_secret_environment_names(derived_environment_names, settings.tracker.secret_environment_names),
+        secret_environment_names: secret_environment_names,
         active_states: active_states,
         terminal_states: terminal_states
     }

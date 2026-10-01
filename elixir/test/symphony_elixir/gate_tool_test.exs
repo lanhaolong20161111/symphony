@@ -1,8 +1,8 @@
-defmodule SymphonyElixir.Janitor.GateToolTest do
+defmodule SymphonyElixir.GateToolTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.DynamicTool
-  alias SymphonyElixir.Janitor.GateTool
+  alias SymphonyElixir.GateTool
   alias SymphonyElixir.MCP.TrackerServer
   alias SymphonyElixir.Shell
   alias SymphonyElixir.Tracker.File, as: FileTracker
@@ -546,9 +546,7 @@ defmodule SymphonyElixir.Janitor.GateToolTest do
       # A call with no ticket is refused by the gate tool -- not by "unsupported tool" -- which is what
       # says the MCP path reaches this module. It names no workspace, so nothing is run.
       call =
-        TrackerServer.handle_line(
-          ~s({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "symphony_gate", "arguments": {}}})
-        )
+        TrackerServer.handle_line(~s({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "symphony_gate", "arguments": {}}}))
 
       assert [%{"type" => "text", "text" => text}] = call["result"]["content"]
       assert text =~ "needs a ticket identifier"

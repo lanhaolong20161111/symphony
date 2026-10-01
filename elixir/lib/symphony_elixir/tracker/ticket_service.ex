@@ -7,11 +7,23 @@ defmodule SymphonyElixir.Tracker.TicketService do
   place that translates that surface into `SymphonyElixir.Tracker.Issue` structs, so the orchestrator
   polls it exactly as it polls Linear or GitHub.
 
-  It reads, and it runs the two agent tools that write. That is a decision this adapter takes
-  deliberately rather than by accident: a service-backed project used to be advertised **no tools at
-  all**, so its agent could not move its ticket (its "I am done" signal) or leave a comment -- the two
-  writes every human-facing promise here rests on. Both are executed host-side over the service's own
-  HTTP API, and nothing else on that surface is reachable from an agent.
+  It reads, and it writes: the two agent tools that move a ticket and leave a comment, and -- since this
+  adapter is the only kind whose tickets live anywhere but a file -- the console's own state picker and
+  comment box, which reach the service through the same pair of functions. That is a decision this
+  adapter takes deliberately rather than by accident: a service-backed project used to be advertised
+  **no tools at all**, so its agent could not move its ticket (its "I am done" signal) or leave a
+  comment -- the two writes every human-facing promise here rests on.
+
+  ## The same two calls serve the tools and the console
+
+  `write_state/3` and `write_comment/4` are the adapter's implementation of the tracker boundary's
+  optional write pair (`SymphonyElixir.Tracker.write_state/3`), and they are the **only** code in this
+  module that assembles a write: the agent's `ticket_state` and `ticket_comment` tools are thin
+  envelopes over them, so the button a person presses and the tool an agent calls cannot drift into two
+  HTTP paths, two bodies or two error vocabularies. The console reaches them through the boundary
+  (`SymphonyElixirWeb.TicketPresenter`), which is what lets a ticket page write to a service-backed
+  deployment at all: before this, the page wrote through the janitor to a file queue a service
+  deployment does not have.
 
   The gate tool is **not** composed here. It is a property of the project, not of where its tickets
   come from, so the tracker boundary appends it for every kind
@@ -54,17 +66,22 @@ defmodule SymphonyElixir.Tracker.TicketService do
   the service does not know comes back as an empty list -- which is the contract's rule, not a
   refusal invented here.
 
-  ## The two writes the agent's tools make
+  ## The two writes this adapter makes
 
   Both tools are the janitor's, by name and by argument schema, because one prompt serves every tracker
   kind: an agent saying "I am done" and "here is the report" must not have to know whether its ticket is
   a file or a row in this service's database. What differs is only who does the writing, and here it is
   this adapter, over the same service API the reads use:
 
-    * `ticket_state` -- `PATCH {url}/tickets/:ref` with `{"state": <name>}`. The answer reports the state
-      the service holds afterwards, not the one that was asked for;
-    * `ticket_comment` -- `POST {url}/tickets/:ref/comments` with `{"author": "agent", "body": <text>}`.
-      The answer reports the comment id the service assigned.
+    * `write_state/3` (the `ticket_state` tool) -- `PATCH {url}/tickets/:ref` with `{"state": <name>}`.
+      The answer reports the state the service holds afterwards, not the one that was asked for;
+    * `write_comment/4` (the `ticket_comment` tool) -- `POST {url}/tickets/:ref/comments` with
+      `{"author": "agent", "body": <text>}`. The answer reports the comment id the service assigned.
+
+  Those two functions are the whole of the write path: the tools are envelopes over them, and the
+  console's own state control and comment box arrive at the same pair through the tracker boundary. Both
+  are optional callbacks on `SymphonyElixir.Tracker`, which dispatches a page's write to whichever
+  adapter the deployment configured and tells the page plainly when that adapter cannot write at all.
 
   `:ref` is the ticket's **identifier**, for example `SYM-26`, and not the service's numeric row id. The
   identifier is the name every layer already carries -- the `ticket` argument the agent passes, the
@@ -75,10 +92,10 @@ defmodule SymphonyElixir.Tracker.TicketService do
   service's documented limit rather than something this adapter can paper over.
 
   A comment is **not idempotent**, so nothing here retries one: every call carries `retry: false`
-  (`@req_opts`), and no tool submits a request twice. A 2xx is the write's truth and is reported as
+  (`@req_opts`), and no caller submits a request twice. A 2xx is the write's truth and is reported as
   success even when the answer's own shape is thin, because a failure there would be an invitation to
   submit the same comment again. A 404, any other non-2xx, a connection failure and a body that is not
-  an object are all failures the agent can read, in the error vocabulary the reads already use.
+  an object are all failures the caller can read, in the error vocabulary the reads already use.
 
   ## Which rule decides `dispatchable`
 
@@ -99,7 +116,6 @@ defmodule SymphonyElixir.Tracker.TicketService do
 
   alias SymphonyElixir.Config
   alias SymphonyElixir.Tracker.Issue
-
   @timeout_ms 8_000
 
   # `retry: false` is load-bearing, not tidiness -- the same reasoning as `RecorderClient`: Req
@@ -351,6 +367,56 @@ defmodule SymphonyElixir.Tracker.TicketService do
   end
 
   @doc """
+  Moves a ticket to `state`, over the service's own API: `PATCH {url}/tickets/:ref`.
+
+  This is the adapter's implementation of `SymphonyElixir.Tracker.write_state/3`, and the whole of the
+  state write for this kind -- the agent's `ticket_state` tool is an envelope over it, and the console's
+  state picker reaches it through the tracker boundary, so a button and a tool cannot end up on two
+  paths.
+
+  Answers the state the service **holds afterwards**, read out of the ticket the PATCH answered, not the
+  one that was asked for: a service that could not move the ticket, or a name that maps elsewhere, is
+  visible here instead of being papered over with the request. An answer that names no state is
+  `{:error, {:ticket_service_invalid_payload, answered}}` rather than a success, and a PATCH is
+  idempotent, so refusing costs nothing.
+
+  A 404 is `{:error, {:ticket_service_ticket_not_found, value}}` -- the read path's own mapping, because
+  "no ticket with identifier X" is one fact whether the ticket was read or written -- and every other
+  answer is `{:error, {:ticket_service_http, status, body}}`, `:missing_ticket_service_url`, or the
+  transport's own `{:ticket_service_unreachable, reason}`. Nothing here raises and nothing retries.
+  """
+  @spec write_state(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def write_state(ticket, state, opts) do
+    case write_to_service(:patch, ticket, "", %{"state" => state}, opts) do
+      {:ok, answered} -> state_written(ticket, answered)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Appends `body` to the ticket, signed `author`, over the service's own API:
+  `POST {url}/tickets/:ref/comments`.
+
+  This is the adapter's implementation of `SymphonyElixir.Tracker.write_comment/4`: the agent's tool
+  signs with `"agent"` (`@comment_author`), and the console's comment box signs with `"operator"`.
+
+  Answers the comment the service assigned -- its id and the author it stored, each `nil` where the
+  answer named none. A 2xx is **not** downgraded over a thin answer, and the reason is not tidiness: a
+  comment is not idempotent, so a failure a caller might answer by submitting the same comment again is
+  worse than a thin success, and the 2xx is the write's truth either way. The one shape that cannot be
+  read at all -- a body that is not an object -- is refused by `write_response/1` before this.
+  """
+  @spec write_comment(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def write_comment(ticket, body, author, opts) do
+    payload = %{"author" => author, "body" => body}
+
+    with {:ok, answered} <- write_to_service(:post, ticket, @comments_path, payload, opts) do
+      {:ok, Map.merge(%{"ticket" => ticket}, comment_answer(answered))}
+    end
+  end
+
+  @doc """
   Runs one agent tool call over the service's HTTP API.
 
   `opts` carries `:tracker_settings` (the boundary injects it for a bound call) and `:client`, the
@@ -358,8 +424,11 @@ defmodule SymphonyElixir.Tracker.TicketService do
   `client.(url)`. It may also carry `:issue`, the ticket this turn is running, which is used when the
   call does not name one. Every test injects a client, so no test opens a socket.
 
-  A call answers the envelope and never raises, as the janitor's tools do: the MCP transport turns an
-  exception into a protocol error for the whole session, and a Codex turn only ever sees `success`.
+  The tool is an envelope over `write_state/3` or `write_comment/4` and nothing else: the request, the
+  answer and the error vocabulary are theirs, which is what keeps the agent's call and the console's page
+  on one write path. It answers the envelope and never raises, as the janitor's tools do: the MCP
+  transport turns an exception into a protocol error for the whole session, and a Codex turn only ever
+  sees `success`.
   """
   @spec execute_agent_tool(String.t() | nil, term(), keyword()) :: map()
   def execute_agent_tool(tool, arguments, opts) do
@@ -372,13 +441,13 @@ defmodule SymphonyElixir.Tracker.TicketService do
     error -> failure(%{"error" => %{"message" => Exception.message(error)}})
   end
 
+  # The envelope only: the request, the answer and the error vocabulary are the `write_*` functions'
+  # above, which is what keeps the agent's tool and the console's page on one write path.
   defp comment(arguments, opts) do
     with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
          body when is_binary(body) <- arguments |> arguments_map() |> Map.get("body") |> presence() do
-      payload = %{"author" => @comment_author, "body" => body}
-
-      case write_to_service(:post, ticket, @comments_path, payload, opts) do
-        {:ok, answered} -> success(Map.merge(%{"ticket" => ticket}, comment_answer(answered)))
+      case write_comment(ticket, body, @comment_author, opts) do
+        {:ok, answered} -> success(answered)
         {:error, reason} -> ticket_failure(ticket, reason)
       end
     else
@@ -389,8 +458,8 @@ defmodule SymphonyElixir.Tracker.TicketService do
   defp set_state(arguments, opts) do
     with ticket when is_binary(ticket) <- ticket_from(arguments, opts),
          state when is_binary(state) <- arguments |> arguments_map() |> Map.get("state") |> presence() do
-      case write_to_service(:patch, ticket, "", %{"state" => state}, opts) do
-        {:ok, answered} -> state_answer(ticket, answered)
+      case write_state(ticket, state, opts) do
+        {:ok, answered} -> success(answered)
         {:error, reason} -> ticket_failure(ticket, reason)
       end
     else
@@ -450,12 +519,12 @@ defmodule SymphonyElixir.Tracker.TicketService do
   # state that ticket holds is the one reported. A service that could not move the ticket, or a name
   # that maps to a different state, is visible here instead of being papered over with the request.
   #
-  # An answer that names no state is a failure rather than a success: this tool exists to report a
+  # An answer that names no state is a failure rather than a success: a state write exists to report a
   # state, and a PATCH **is** idempotent, so asking again costs nothing -- unlike the comment beside it.
-  defp state_answer(ticket, answered) do
+  defp state_written(ticket, answered) do
     case state_name(answered["state"]) do
-      nil -> ticket_failure(ticket, {:ticket_service_invalid_payload, answered})
-      state -> success(%{"ticket" => ticket, "state" => state})
+      nil -> {:error, {:ticket_service_invalid_payload, answered}}
+      state -> {:ok, %{"ticket" => ticket, "state" => state}}
     end
   end
 

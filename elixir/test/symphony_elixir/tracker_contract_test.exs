@@ -66,7 +66,7 @@ defmodule SymphonyElixir.TrackerContractTest do
   @host_tools ["symphony_gate"]
 
   # A gate a project could declare. Nothing in this suite runs it: the gate tool is only advertised
-  # here, and its execution is pinned in `janitor/gate_tool_test.exs` with an injected runner.
+  # here, and its execution is pinned in `gate_tool_test.exs` with an injected runner.
   @gate_command "mix lint && mix test"
 
   # `tracker.ex:27-36`, pinned as text: a kind added to the registry and not to this list fails
@@ -553,6 +553,84 @@ defmodule SymphonyElixir.TrackerContractTest do
     end
   end
 
+  # The write seam: an adapter may implement it, and one that does not has to be answered rather than
+  # crashed. Every call here names its tracker settings, so nothing reads the global workflow.
+  describe "the write seam: dispatch, and the refusal for a kind that cannot write" do
+    test "a registered adapter without the callbacks is refused, by kind, for both calls" do
+      # `memory` is a real, registered kind that implements only the read callbacks -- so this is not a
+      # hypothetical adapter, it is the shape every read-only kind has.
+      settings = %{kind: "memory"}
+
+      assert {:error, {:tracker_write_unsupported, "memory", :write_state}} =
+               Tracker.write_state("SYM-7", "done", tracker_settings: settings)
+
+      assert {:error, {:tracker_write_unsupported, "memory", :write_comment}} =
+               Tracker.write_comment("SYM-7", "a comment", "operator", tracker_settings: settings)
+    end
+
+    test "the file tracker is refused the same way, named as the workflow names it" do
+      # The workflow's own settings map for this kind, with the `kind` key the boundary resolves by.
+      settings = Map.put(file_settings(tmp_dir()), :kind, "file")
+
+      assert {:error, {:tracker_write_unsupported, "file", :write_state}} =
+               Tracker.write_state("T-1", "done", tracker_settings: settings)
+
+      assert {:error, {:tracker_write_unsupported, "file", :write_comment}} =
+               Tracker.write_comment("T-1", "a comment", "operator", tracker_settings: settings)
+    end
+
+    test "the dispatch reaches the adapter the settings name, and only that one" do
+      # The service adapter without a URL: it is reached, and it refuses the write itself rather than the
+      # boundary refusing to reach it -- which is what "dispatched" means here, and it opens no socket.
+      settings = %{kind: "ticket_service", provider: %{}}
+
+      assert {:error, :missing_ticket_service_url} =
+               Tracker.write_state("SYM-7", "done", tracker_settings: settings)
+    end
+
+    test "the service kind is dispatched to its own implementation, over the injected client" do
+      # The one registered kind that implements the pair. What it does with the call is the adapter's own
+      # test; what this pins is that the boundary hands it the settings and the client, and passes the
+      # adapter's answer back unchanged -- no envelope, no paraphrasing.
+      settings = %{kind: "ticket_service", provider: %{"url" => "http://127.0.0.1:4020"}}
+
+      client = fn _method, url, payload ->
+        send(self(), {:wrote, url, payload})
+        {:ok, %{status: 200, body: %{"identifier" => "SYM-7", "state" => %{"name" => "done"}}}}
+      end
+
+      assert {:ok, %{"ticket" => "SYM-7", "state" => "done"}} =
+               Tracker.write_state("SYM-7", "done", tracker_settings: settings, client: client)
+
+      assert_received {:wrote, "http://127.0.0.1:4020/tickets/SYM-7", %{"state" => "done"}}
+
+      comment = fn _method, url, payload ->
+        send(self(), {:wrote, url, payload})
+        {:ok, %{status: 201, body: %{"id" => 3, "author" => "operator"}}}
+      end
+
+      assert {:ok, %{"ticket" => "SYM-7", "comment" => %{"id" => "3", "author" => "operator"}}} =
+               Tracker.write_comment("SYM-7", "hello", "operator",
+                 tracker_settings: settings,
+                 client: comment
+               )
+
+      assert_received {:wrote, "http://127.0.0.1:4020/tickets/SYM-7/comments", %{"author" => "operator", "body" => "hello"}}
+    end
+
+    test "the adapter resolver answers the same way for a named tracker and refuses a shapeless one" do
+      assert {:ok, Memory} = Tracker.adapter(%{kind: "memory"})
+      assert {:ok, FileTracker} = Tracker.adapter(Map.put(file_settings(tmp_dir()), :kind, "file"))
+      assert {:error, {:unsupported_tracker_kind, "future"}} = Tracker.adapter(%{kind: "future"})
+      assert {:error, :invalid_tracker_settings} = Tracker.adapter(%{})
+    end
+
+    test "an unknown kind is refused before any adapter is reached" do
+      assert {:error, {:unsupported_tracker_kind, "future"}} =
+               Tracker.write_state("SYM-7", "done", tracker_settings: %{kind: "future"})
+    end
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp restore_client_modules(saved) do
@@ -682,7 +760,7 @@ defmodule SymphonyElixir.TrackerContractTest do
 
   # A service-backed project that declares a gate. `TicketService.validate_config/1` checks only that
   # `provider.url` is declared and probes nothing, so this test opens no socket; the gate tool is
-  # advertised here, never run (its execution is pinned in `janitor/gate_tool_test.exs`).
+  # advertised here, never run (its execution is pinned in `gate_tool_test.exs`).
   defp write_service_gate_workflow!(command) do
     contents = """
     ---

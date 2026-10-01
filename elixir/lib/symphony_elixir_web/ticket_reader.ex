@@ -377,10 +377,23 @@ defmodule SymphonyElixirWeb.TicketReader do
   defp service_get(url, opts) do
     client = Keyword.get(opts, :client) || (&TicketService.get/1)
 
-    client.(url)
+    call_service(client, url)
     |> service_body()
   rescue
     error -> {:error, {:ticket_read_failed, Exception.message(error)}}
+  end
+
+  # A client is either the read direction (one argument: the URL, which is what every caller has passed
+  # since this seam existed) or the write direction (method, URL, body). One page needs both --
+  # `TicketPresenter.writer/1` hands the adapter the endpoint's own client for its writes -- so a client
+  # that takes three arguments is handed this read as `(nil, url, nil)`, the URL in the slot it belongs
+  # in, and a read client keeps the call it has always had. The arity is asked once per read, on a seam
+  # whose whole point is that the transport is injected.
+  defp call_service(client, url) do
+    case Function.info(client, :arity) do
+      {:arity, 3} -> client.(nil, url, nil)
+      _read_client -> client.(url)
+    end
   end
 
   # The body is handed on unparsed: what it means is `service_ticket_from_row/1`'s answer, and one

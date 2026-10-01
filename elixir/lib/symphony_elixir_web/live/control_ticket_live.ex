@@ -9,12 +9,15 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   else is an affordance to read -- links out to the ticket file on disk, to the issue it mirrors and to
   the pull request -- plus a refresh of the file being shown.
 
-  ## The writes go through the host, not through this page
+  ## The writes go through the deployment's own tracker, not through this page
 
-  `SymphonyElixir.Janitor.set_ticket_state/3` replaces the ticket's `state` key and
-  `SymphonyElixir.Janitor.comment_on_ticket/3` appends one `## Discussion` entry; neither is done here.
-  A ticket file is UTF-8 and its only safe writer is one that hands its own bytes back unchanged, which
-  the janitor is and a view is not, so this page submits and then reads the result back.
+  A state change and a comment are submitted, never assembled here: the page hands them to the writer
+  `SymphonyElixirWeb.TicketPresenter.writer/1` answers for this deployment's tracker. For a file
+  tracker that writer is the host's own (`SymphonyElixir.Janitor.set_ticket_state/3` replaces the
+  ticket's `state` key and `comment_on_ticket/3` appends one `## Discussion` entry) -- a ticket file is
+  UTF-8 and its only safe writer is one that hands its own bytes back unchanged, which the janitor is
+  and a view is not. For a ticket-service tracker it is the tracker boundary, which asks the service to
+  write the row. Either way this page submits and then reads the result back.
 
   Both controls are shaped by the project rather than by this page:
 
@@ -62,13 +65,12 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   is still readable here. Every link the page makes -- the board, a blocker -- carries the parameter,
   so a reader never silently crosses from one project's queue into this instance's. An unknown name
   or an unreadable file is shown as the reason, never as "no such ticket". A write follows the same
-  parameter: `TicketPresenter.write_options/1` names the queue that project reads its tickets from, so
-  a write while reading another project cannot land in this instance's files.
+  parameter: `TicketPresenter.writer/1` answers a writer for the queue that project reads its tickets
+  from, so a write while reading another project cannot land in this instance's files.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.Janitor
   alias SymphonyElixir.Land
   alias SymphonyElixirWeb.{Endpoint, Layouts, TicketPresenter}
 
@@ -486,11 +488,8 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   defp refused_state(_state), do: "No state was submitted, so nothing was written."
 
   defp write_state(socket, state) do
-    with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
-         {:ok, _result} <-
-           host_write(fn -> Janitor.set_ticket_state(socket.assigns.ticket_id, state, options) end) do
-      reload(socket)
-    else
+    case write(socket, :state, state, []) do
+      {:ok, _result} -> reload(socket)
       {:error, reason} -> assign(socket, :action_error, TicketPresenter.describe(reason))
     end
   end
@@ -506,14 +505,24 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   defp empty_comment, do: "The comment is empty, so nothing was written."
 
   defp write_comment(socket, body) do
-    with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
-         {:ok, _result} <-
-           host_write(fn ->
-             Janitor.comment_on_ticket(socket.assigns.ticket_id, body, [author: @operator] ++ options)
-           end) do
-      reload(socket)
-    else
+    case write(socket, :comment, body, author: @operator) do
+      {:ok, _result} -> reload(socket)
       {:error, reason} -> assign(socket, :action_error, TicketPresenter.describe(reason))
+    end
+  end
+
+  # One write, through whichever writer this deployment's tracker has, and one place its raises are
+  # turned into a reason: the writer is the janitor's for a file queue and the tracker boundary's for a
+  # service, and neither is called by name here.
+  defp write(socket, operation, value, write_opts) do
+    options = [
+      ref: socket.assigns.ticket_id,
+      project: socket.assigns.project,
+      client: Endpoint.config(:ticket_reader_client)
+    ]
+
+    with {:ok, writer} <- TicketPresenter.writer(options) do
+      host_write(fn -> writer.(operation, value, write_opts) end)
     end
   end
 
@@ -582,28 +591,26 @@ defmodule SymphonyElixirWeb.ControlTicketLive do
   # the two can be written, the one that decides whether the ticket is picked up again is the one that
   # has to land.
   defp record_landing(socket, merged) do
-    with {:ok, options} <- TicketPresenter.write_options(project: socket.assigns.project),
-         {:ok, terminal} <- TicketPresenter.terminal_state(project: socket.assigns.project) do
-      apply_landing(socket, merged, terminal, options)
-    else
+    case TicketPresenter.terminal_state(project: socket.assigns.project) do
+      {:ok, terminal} ->
+        apply_landing(socket, merged, terminal)
+
       {:error, reason} ->
         landed_page(socket, merged, "The ticket was not updated: " <> TicketPresenter.describe(reason))
     end
   end
 
-  defp apply_landing(socket, merged, terminal, options) do
-    case host_write(fn -> Janitor.set_ticket_state(socket.assigns.ticket_id, terminal, options) end) do
-      {:ok, _result} -> comment_landing(socket, merged, terminal, options)
+  defp apply_landing(socket, merged, terminal) do
+    case write(socket, :state, terminal, []) do
+      {:ok, _result} -> comment_landing(socket, merged, terminal)
       {:error, reason} -> landed_page(socket, merged, not_moved(terminal, reason))
     end
   end
 
-  defp comment_landing(socket, merged, terminal, options) do
+  defp comment_landing(socket, merged, terminal) do
     note = landing_note(merged, terminal)
 
-    case host_write(fn ->
-           Janitor.comment_on_ticket(socket.assigns.ticket_id, note, [author: @operator] ++ options)
-         end) do
+    case write(socket, :comment, note, author: @operator) do
       {:ok, _result} -> landed_page(socket, merged, nil)
       {:error, reason} -> landed_page(socket, merged, not_recorded(terminal, reason))
     end

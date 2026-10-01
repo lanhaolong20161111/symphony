@@ -67,10 +67,12 @@ defmodule SymphonyElixir.AutoLand do
 
   ## Recording
 
-  A merge is recorded the way the page records it, through the host's own writer -- never by writing
-  ticket bytes here: `SymphonyElixir.Janitor.set_ticket_state/3` first (the state is what the
-  scheduler reads, so it is the half that has to land), then one
-  `SymphonyElixir.Janitor.comment_on_ticket/3` naming the verdict and the result. A refusal and a
+  A merge is recorded the way the page records it, through the presenter's writer for this deployment's
+  tracker and never by writing ticket bytes here: the state first (the state is what the scheduler reads,
+  so it is the half that has to land), then one comment naming the verdict and the result. For a file
+  tracker that writer is the host's own (`SymphonyElixir.Janitor`); for a ticket-service tracker it is
+  the tracker boundary, which asks the service to write the row -- so a sweep over a service-backed
+  deployment records a merge through the same seam the ticket page's button does. A refusal and a
   failure write nothing at all.
   """
 
@@ -79,7 +81,6 @@ defmodule SymphonyElixir.AutoLand do
   require Logger
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Janitor
   alias SymphonyElixir.Land
   alias SymphonyElixirWeb.TicketPresenter
 
@@ -254,7 +255,7 @@ defmodule SymphonyElixir.AutoLand do
   end
 
   defp record(ticket, merged, opts, reported) do
-    case record_landing(ticket, merged) do
+    case record_landing(ticket, merged, opts) do
       :ok ->
         {1, note(opts, reported, ticket.identifier, :merged, merged_message(ticket, merged))}
 
@@ -265,17 +266,22 @@ defmodule SymphonyElixir.AutoLand do
     end
   end
 
-  # The page's own write path in the page's own order: the state first, because it is what the
-  # scheduler reads, then the one comment that says what happened. Both go through the host's writer
-  # (`Janitor`), which hands a ticket's own bytes back unchanged; nothing here assembles ticket bytes.
-  defp record_landing(ticket, merged) do
+  # The page's own write path in the page's own order, through the presenter's writer for this
+  # deployment's tracker: the state first, because it is what the scheduler reads, then the one comment
+  # that says what happened. Nothing here assembles ticket bytes, and nothing here names a tracker kind:
+  # a file queue reaches the host's own writer, a service row reaches the tracker boundary.
+  #
+  # `:ref` is the ticket's own identifier, which is what both writers key on -- the file queue looks up
+  # `<ref>.md`, and the service resolves it as the ticket's identifier rather than its numeric row id.
+  defp record_landing(ticket, merged, opts) do
+    writer_opts = [ref: ticket.identifier] ++ Keyword.take(opts, [:client])
+
     with {:ok, terminal} <- TicketPresenter.terminal_state(),
-         {:ok, options} <- TicketPresenter.write_options(),
-         {:ok, _state} <-
-           write(fn -> Janitor.set_ticket_state(ticket.identifier, terminal, options) end),
+         {:ok, writer} <- TicketPresenter.writer(writer_opts),
+         {:ok, _state} <- write(fn -> writer.(:state, terminal, []) end),
          {:ok, _comment} <-
            write(fn ->
-             Janitor.comment_on_ticket(ticket.identifier, landing_note(merged, terminal), [author: @author] ++ options)
+             writer.(:comment, landing_note(merged, terminal), author: @author)
            end) do
       :ok
     end

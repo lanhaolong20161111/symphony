@@ -244,6 +244,131 @@ defmodule SymphonyElixirWeb.ControlTicketServiceTest do
     refute html =~ "read from the ticket service, not from a file"
   end
 
+  # ---- the page's write path, over the service ---------------------------------
+
+  test "the state control PATCHes the service, and the page shows the state it answered",
+       %{root: root} do
+    write_workflow!(root, service_tracker())
+
+    # One client answers both directions of the page's transport, which is what the endpoint config
+    # carries: the reads, and the write the seam hands the adapter when the form is submitted. This one
+    # remembers the state it was asked to write, so the re-read after the write answers what the service
+    # would answer.
+    {client, writes} = stateful_service_client()
+    start_endpoint(ticket_reader_client: client)
+    {:ok, view, _html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    html = view |> form("form[phx-submit=set_state]", state: "done") |> render_submit()
+
+    # What would have gone on the wire: the service's own PATCH, at the identifier's URL -- and nothing
+    # else, so no second request was made behind the page's back.
+    assert service_writes(writes) == [
+             %{method: :patch, url: "http://127.0.0.1:4997/tickets/SYM-7", payload: %{"state" => "done"}}
+           ]
+
+    # The page re-read the ticket, so the state the service answered is on it without a manual refresh,
+    # and nothing claims the write was refused.
+    assert html =~ ~s(<span class="state-badge">done</span>)
+    assert html =~ ~s(<option value="done" selected)
+    refute html =~ "That change was not written"
+  end
+
+  test "the comment box POSTs the comment to the service, signed operator", %{root: root} do
+    write_workflow!(root, service_tracker())
+    {client, writes} = service_write_client(200)
+    start_endpoint(ticket_reader_client: client)
+    {:ok, view, _html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    view |> form("form[phx-submit=comment]", comment: "Please also cover the Windows path.") |> render_submit()
+
+    # The signature is the page's own, not the agent's: the ticket's history has to say who wrote it.
+    assert service_writes(writes) == [
+             %{
+               method: :post,
+               url: "http://127.0.0.1:4997/tickets/SYM-7/comments",
+               payload: %{"author" => "operator", "body" => "Please also cover the Windows path."}
+             }
+           ]
+  end
+
+  test "a state the service refuses renders its reason and claims nothing was written", %{root: root} do
+    write_workflow!(root, service_tracker())
+    {client, writes} = service_write_client(500)
+    start_endpoint(ticket_reader_client: client)
+    {:ok, view, _html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    html = view |> form("form[phx-submit=set_state]", state: "done") |> render_submit()
+
+    assert [%{method: :patch}] = service_writes(writes)
+
+    # The page is still a page, still showing the ticket it had read, and the reason is the service's
+    # own answer rather than a claim that something was written.
+    assert html =~ "That change was not written"
+    assert html =~ "HTTP 500"
+    assert html =~ "Cache the git roots lookup"
+    refute html =~ "The ticket could not be read"
+    assert html =~ ~s(<span class="state-badge state-badge-warning">ready)
+  end
+
+  test "a comment the service does not hold renders its reason, and no comment is claimed",
+       %{root: root} do
+    write_workflow!(root, service_tracker())
+    {client, writes} = service_write_client(404)
+    start_endpoint(ticket_reader_client: client)
+    {:ok, view, _html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    html = view |> form("form[phx-submit=comment]", comment: "hello") |> render_submit()
+
+    assert [%{method: :post}] = service_writes(writes)
+    assert html =~ "That change was not written"
+    assert html =~ "the ticket service has no ticket for"
+    assert html =~ "ticket_service_ticket_not_found"
+    assert html =~ "Cache the git roots lookup"
+  end
+
+  test "a service that cannot be reached renders the refusal, for both controls", %{root: root} do
+    write_workflow!(root, service_tracker())
+    start_endpoint(ticket_reader_client: refusing_writes())
+    {:ok, view, _html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    comment_html = view |> form("form[phx-submit=comment]", comment: "hello") |> render_submit()
+
+    assert comment_html =~ "That change was not written"
+    assert comment_html =~ "the ticket service did not answer"
+    assert comment_html =~ "econnrefused"
+
+    state_html = view |> form("form[phx-submit=set_state]", state: "done") |> render_submit()
+
+    assert state_html =~ "That change was not written"
+    assert state_html =~ "econnrefused"
+
+    # Still the ticket the page had read: a failed write re-reads nothing, so it cannot turn "refused"
+    # into "no ticket with this identifier".
+    assert state_html =~ "Cache the git roots lookup"
+    refute state_html =~ "This ticket could not be read"
+  end
+
+  test "nothing is written without a submit", %{root: root} do
+    write_workflow!(root, service_tracker())
+    {client, writes} = service_write_client(200)
+    start_endpoint(ticket_reader_client: client)
+
+    {:ok, view, html} = live(build_conn(), "/control/tickets/SYM-7")
+
+    assert html =~ "Add a comment"
+    assert service_writes(writes) == []
+
+    view |> element("button[phx-click=refresh]") |> render_click()
+
+    assert service_writes(writes) == []
+
+    # A state the workflow does not declare is refused before the writer is ever asked.
+    refused = render_submit(view, "set_state", %{"state" => "shipped"})
+
+    assert refused =~ "The state shipped is not one of the states this workflow declares"
+    assert service_writes(writes) == []
+  end
+
   # A client that answers only the URLs this page is supposed to ask for, and turns anything else into
   # a visible error: a wrong URL is a failing assertion, not a silent empty page.
   defp service_client(tickets, deep \\ nil) do
@@ -268,6 +393,82 @@ defmodule SymphonyElixirWeb.ControlTicketServiceTest do
   # What a service on a port nothing is listening on answers, in the words `TicketService.get/1` uses.
   defp refusing do
     fn _url -> {:error, {:ticket_service_unreachable, %{reason: :econnrefused}}} end
+  end
+
+  # The page's write seam, stubbed. One client serves both directions, because the endpoint config
+  # carries one function: a read as `(nil, url, nil)` -- the read direction of the transport seam, which
+  # `TicketReader` hands a three-argument client -- and a write as `(method, url, payload)`.
+  #
+  # A write is recorded in an agent rather than sent to this process, because it happens inside the
+  # LiveView: the page is handed the client, not the test, so what would have gone on the wire is read
+  # back from the agent afterwards.
+  #
+  # A non-2xx answer is returned as it is, so the page renders the service's own failure. A 404's body is
+  # the store's not-found envelope, which is what the adapter maps to its ticket-shaped failure.
+  defp service_write_client(status) do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    client = fn
+      nil, _url, nil ->
+        {:ok, %{status: 200, body: deep_row()}}
+
+      method, url, payload when is_atom(method) ->
+        Agent.update(agent, &(&1 ++ [%{method: method, url: url, payload: payload}]))
+        answer_write(status)
+    end
+
+    {client, agent}
+  end
+
+  # The one that remembers: a PATCH answers the state it was asked to write, and the read after it
+  # answers the same state -- so "the page shows the state the service answered" is asserted against a
+  # service that actually moved, not against a stub that was told what to say.
+  defp stateful_service_client do
+    {:ok, state} = Agent.start_link(fn -> "ready" end)
+    {:ok, writes} = Agent.start_link(fn -> [] end)
+
+    client = fn
+      nil, _url, nil ->
+        {:ok, %{status: 200, body: deep_row(%{"state" => state_object(Agent.get(state, & &1))})}}
+
+      :patch, url, payload when is_map(payload) ->
+        Agent.update(writes, &(&1 ++ [%{method: :patch, url: url, payload: payload}]))
+        Agent.update(state, fn _old -> payload["state"] end)
+        {:ok, %{status: 200, body: deep_row(%{"state" => state_object(payload["state"])})}}
+
+      method, url, payload when is_atom(method) ->
+        Agent.update(writes, &(&1 ++ [%{method: method, url: url, payload: payload}]))
+        {:ok, %{status: 200, body: deep_row()}}
+    end
+
+    {client, writes}
+  end
+
+  defp service_writes(agent), do: Agent.get(agent, & &1)
+
+  defp answer_write(status) when status in 200..299 do
+    {:ok, %{status: status, body: deep_row(%{"state" => state_object("done")})}}
+  end
+
+  defp answer_write(404) do
+    body = %{"error" => %{"code" => "not_found", "message" => "no ticket with identifier \"SYM-7\""}}
+    {:ok, %{status: 404, body: body}}
+  end
+
+  defp answer_write(status) do
+    {:ok, %{status: status, body: %{"error" => %{"code" => "db", "message" => "the store answered #{status}"}}}}
+  end
+
+  defp state_object(name), do: %{"type" => "completed", "name" => name, "display_name" => name}
+
+  # The service that is down for writes only: the page's read still answers -- a page whose service
+  # cannot be read at all is a different test above -- and every write is the connection refusal a
+  # service on a port nothing is listening on produces. One client, both directions.
+  defp refusing_writes do
+    fn
+      nil, _url, nil -> {:ok, %{status: 200, body: deep_row()}}
+      _method, _url, _payload -> {:error, {:ticket_service_unreachable, %{reason: :econnrefused}}}
+    end
   end
 
   defp answering_html do
@@ -320,16 +521,23 @@ defmodule SymphonyElixirWeb.ControlTicketServiceTest do
     )
   end
 
-  # The deep read: the same row with the comments the list endpoint does not read.
-  defp deep_row do
-    service_row(%{
-      "blockers" => [live_blocker("SYM-8", "in-progress")],
-      "blocked_by" => ["SYM-8"],
-      "comments" => [
-        comment(1001, "octocat", "Please also cover the Windows path.", 1_760_000_010_000),
-        comment(1002, "local-agent", "Covered in the branch.", 1_760_000_020_000)
-      ]
-    })
+  # The deep read: the same row with the comments the list endpoint does not read. `overrides` is what a
+  # write's answer changes -- a successful PATCH answers the ticket in its new state, and the re-read
+  # after it has to say the same thing.
+  defp deep_row(overrides \\ %{}) do
+    service_row(
+      Map.merge(
+        %{
+          "blockers" => [live_blocker("SYM-8", "in-progress")],
+          "blocked_by" => ["SYM-8"],
+          "comments" => [
+            comment(1001, "octocat", "Please also cover the Windows path.", 1_760_000_010_000),
+            comment(1002, "local-agent", "Covered in the branch.", 1_760_000_020_000)
+          ]
+        },
+        overrides
+      )
+    )
   end
 
   defp comment(id, author, body, created_at) do

@@ -1,25 +1,33 @@
 defmodule SymphonyElixirWeb.TicketPresenter do
   @moduledoc """
-  Reads the queue's tickets for the control plane's ticket view.
+  Reads the queue's tickets for the control plane's ticket view, and answers the write seam the ticket
+  page submits through.
 
-  Read-only on purpose: state changes and comments are made by the agent and the host (the janitor),
-  not by this UI, so nothing here writes a ticket. It does answer the questions a page that offers a
-  write has to ask first -- which states the workflow declares (`declared_states/1`), where a write to
-  *this* queue has to land (`write_options/1`) and, for a ticket that has just been merged, which
-  state it belongs in (`terminal_state/1`) -- because all of those come from the same tracker settings
-  this module already resolves, and a second resolver would be a second place to disagree.
+  ## The read
 
-  ## Where each field comes from
-
-  One source, so there is one answer per question: `SymphonyElixirWeb.TicketReader`, which reads a
-  ticket from whichever tracker the workflow configures -- the file queue's own parse for a `file`
-  tracker (the same one the dispatcher uses, so the board and the scheduler cannot disagree about what
-  a ticket says), or the ticket service's deep read for a `ticket_service` tracker. That module's
+  Reads are one source, so there is one answer per question: `SymphonyElixirWeb.TicketReader`, which
+  reads a ticket from whichever tracker the workflow configures -- the file queue's own parse for a
+  `file` tracker (the same one the dispatcher uses, so the board and the scheduler cannot disagree about
+  what a ticket says), or the ticket service's deep read for a `ticket_service` tracker. That module's
   moduledoc says why the seam is there and what a tracker this console cannot read answers.
 
   This module keeps what is policy rather than reading: which fields a page shows, what a tracker's
-  own vocabulary is, where a write to *this* queue has to land, and how a read error is put into a
-  sentence a page can render.
+  own vocabulary is, where a write to *this* queue has to land, and how a read or write error is put
+  into a sentence a page can render.
+
+  ## The write seam
+
+  `writer/1` answers a function the ticket page submits its state change and its comment through, so the
+  page never has to know which tracker it is talking to. For a **file** tracker that function is the
+  host's own writer (`SymphonyElixir.Janitor`), because a ticket file's only safe writer is one that
+  hands its own bytes back unchanged; for a **ticket service** tracker it is the tracker boundary
+  (`SymphonyElixir.Tracker.write_state/3`, `write_comment/4`), because the service owns that row and
+  there is no queue on disk for a service deployment at all. A page that asked the janitor directly used
+  to work for the file kind and refuse loudly for the other; now a deployment writes through whichever
+  of the two its tracker is.
+
+  The write's answers are deliberately the shapes a page already renders: `{:ok, result}` from whatever
+  wrote, or `{:error, reason}` in the same vocabulary `describe/1` turns into a sentence.
 
   ## Whose queue is read
 
@@ -34,11 +42,13 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   board reads as "no work to do".
   """
 
-  alias SymphonyElixir.{Config, Projects}
+  alias SymphonyElixir.{Config, Janitor, Projects, Tracker}
   alias SymphonyElixirWeb.TicketReader
 
   @type ticket :: map()
   @type discussion_entry :: %{author: String.t(), at: String.t(), id: String.t(), text: String.t()}
+  @type write_result :: {:ok, term()} | {:error, term()}
+  @type writer :: (atom(), term(), keyword() -> write_result())
 
   @doc """
   Every ticket in the configured queue, sorted by identifier.
@@ -120,38 +130,95 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   end
 
   @doc """
-  Options a write to this page's queue must be handed, for `Janitor.set_ticket_state/3` and
-  `Janitor.comment_on_ticket/3`.
+  The function a write to this page's queue goes through, or the reason it cannot be written at all.
 
-  Empty for this instance's own queue, deliberately: the janitor's own configuration already names the
-  directory the host writes tickets in, and a page must not second-guess where the host keeps them.
+  The page submits through it without knowing the tracker kind:
 
-  A **named** project is the whole reason this exists. The janitor's default directory is *this*
-  instance's queue, so a write made while reading `?project=<name>` would land in the wrong project's
-  files -- editing whichever ticket happens to share an identifier, which is the one mistake this seam
-  has to make impossible. The named project's own workflow declares the directory it reads tickets
-  from, and that is where a write goes.
+      {:ok, write} = TicketPresenter.writer(project: project)
 
-  A named project whose workflow declares no file queue is `{:error, {:no_writable_queue, name}}`
-  rather than this instance's queue.
+      write.(:state, "in-progress", [])
+      write.(:comment, "Please also cover the Windows path.", author: "operator")
+
+  `:author` is a comment's signature and is ignored by a state write. `:client` replaces the ticket
+  service's transport for the write exactly as it does for the read (`:ticket_reader_client` at the
+  endpoint), which is how a page test writes to a service-backed deployment without a socket.
+
+  Which writer answers is the tracker's own kind -- the same settings `list/1` reads -- and never a
+  second configuration:
+
+    * `file` -- the host's own writer, `SymphonyElixir.Janitor.set_ticket_state/3` and
+      `comment_on_ticket/3`, handed the directory this queue's tickets live in. For this instance's own
+      queue that is the janitor's own configured directory, unchanged; a **named** project's workflow
+      names its own, so a write made while reading `?project=<name>` lands in that project's files --
+      editing whichever ticket happens to share an identifier, which is the one mistake this seam has to
+      make impossible. A named project whose workflow declares no file queue is
+      `{:error, {:no_writable_queue, name}}` rather than this instance's queue;
+    * `ticket_service` -- the tracker boundary, so the service's own HTTP API writes the row
+      (`SymphonyElixir.Tracker.write_state/3`, `write_comment/4`);
+    * anything else -- a tracker the console cannot write, `{:error, {:ticket_kind_not_writable, kind}}`.
+
+  A settings map naming no kind raises here as it does everywhere else in this process, where the
+  workflow is expected to have been validated.
   """
-  @spec write_options(keyword()) :: {:ok, keyword()} | {:error, term()}
-  def write_options(opts \\ []) do
-    case project_name(opts) do
-      nil -> {:ok, []}
-      name -> project_write_options(name, opts)
-    end
-  end
-
-  defp project_write_options(name, opts) do
+  @spec writer(keyword()) :: {:ok, writer()} | {:error, term()}
+  def writer(opts \\ []) do
     with {:ok, tracker} <- tracker_settings(opts) do
-      write_target(TicketReader.queue_path(tracker), name)
+      writer_for(tracker, opts)
+    end
+  rescue
+    error -> {:error, {:write_raised, Exception.message(error)}}
+  end
+
+  # The file kind: the host's own writer, because a ticket file's only safe writer is one that hands its
+  # own bytes back unchanged. `tickets:` is passed for every queue, this instance's own included, and its
+  # value is what the workflow already declares -- the janitor's built-in default is never reached from
+  # here, so a page cannot write to a directory the tracker it read from does not name.
+  defp writer_for(%{kind: "file"} = tracker, opts) do
+    case TicketReader.queue_path(tracker) do
+      nil ->
+        {:error, {:no_writable_queue, project_name(opts)}}
+
+      tickets ->
+        {:ok,
+         fn
+           :state, state, _write_opts ->
+             Janitor.set_ticket_state(ref(opts), state, tickets: tickets)
+
+           :comment, body, write_opts ->
+             Janitor.comment_on_ticket(ref(opts), body, tickets: tickets, author: author(write_opts))
+         end}
     end
   end
 
-  # A write has a target only when the project's workflow names the directory it reads tickets from.
-  defp write_target(nil, name), do: {:error, {:no_writable_queue, name}}
-  defp write_target(path, _name), do: {:ok, [tickets: path]}
+  # The service kind: the tracker boundary writes the row over the service's own HTTP API, which is the
+  # same pair of calls the adapter's agent tools are envelopes over.
+  defp writer_for(%{kind: "ticket_service"} = tracker, opts) do
+    write_opts = [tracker_settings: tracker] ++ client(opts)
+
+    {:ok,
+     fn
+       :state, state, _write_opts -> Tracker.write_state(ref(opts), state, write_opts)
+       :comment, body, call_opts -> Tracker.write_comment(ref(opts), body, author(call_opts), write_opts)
+     end}
+  end
+
+  # A tracker this console cannot write at all. The refusal is a value rather than a raise for the same
+  # reason the page's read refusals are: a page renders what happened.
+  defp writer_for(%{kind: kind}, _opts) do
+    {:ok, fn _operation, _value, _write_opts -> {:error, {:ticket_kind_not_writable, kind}} end}
+  end
+
+  defp ref(opts), do: Keyword.fetch!(opts, :ref)
+  defp author(write_opts), do: Keyword.get(write_opts, :author, "agent")
+
+  # `:client` is the ticket service's transport, and nil is "use the real one": a page always hands in
+  # whatever its endpoint config carries, and the environments that configure nothing must reach
+  # `TicketService.request/3` rather than a client that is not there.
+  defp client(opts) do
+    opts
+    |> Keyword.take([:client])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
 
   defp project_name(opts) do
     case Keyword.get(opts, :project) do
@@ -202,6 +269,20 @@ defmodule SymphonyElixirWeb.TicketPresenter do
     "the workflow file of project #{name} declares no ticket directory a write could go to (no_writable_queue)"
   end
 
+  # A tracker the console can read but not write, named as the workflow names it: `describe/1` already
+  # has a sentence for a kind it cannot read at all, and this is the write-side counterpart.
+  def describe({:ticket_kind_not_writable, kind}) do
+    "this console writes tickets to a file queue or to the ticket service, and this tracker is " <>
+      "configured as #{inspect(kind)}: it declares no way to write a ticket's state or a comment " <>
+      "(ticket_kind_not_writable)"
+  end
+
+  # The tracker boundary's own refusal, as a page. A kind that reaches the boundary without the write
+  # callbacks is the same fact as a kind the console cannot write, and it is said the same way.
+  def describe({:tracker_write_unsupported, kind, _callback}) do
+    describe({:ticket_kind_not_writable, kind})
+  end
+
   # The one read a landing needs that a read-only page never asked for: where a merged ticket goes.
   def describe(:no_terminal_state) do
     "the workflow declares no terminal state, so a landed ticket has nowhere to be moved (no_terminal_state)"
@@ -245,6 +326,14 @@ defmodule SymphonyElixirWeb.TicketPresenter do
   # empty ticket: a page that cannot read a ticket must say why, not show nothing.
   def describe({:ticket_service_unreachable, reason}) do
     "the ticket service did not answer: #{service_detail(reason)} (ticket_service_unreachable)"
+  end
+
+  # A write to a ticket the service does not hold. The read path turns its own 404 into `:not_found`, but
+  # a write names the value the service could not read, and that value is the ticket the page was showing
+  # -- so the sentence carries it rather than a bare `:not_found` that reads as "this ticket vanished".
+  def describe({:ticket_service_ticket_not_found, value}) do
+    "the ticket service has no ticket for #{inspect(value)}, so nothing was written " <>
+      "(ticket_service_ticket_not_found)"
   end
 
   def describe({:ticket_service_invalid_payload, body}) do

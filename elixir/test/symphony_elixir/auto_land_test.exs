@@ -333,6 +333,76 @@ defmodule SymphonyElixir.AutoLandTest do
     assert log =~ "no_ticket_service_states"
   end
 
+  # ---- a service-backed ticket: the recording goes through the tracker seam ---------------------
+
+  test "a service-backed ticket is recorded through the tracker seam, not through a file queue" do
+    # The deployment's tracker is the ticket service, and its writes are recorded by the injected
+    # transport: the state first (it is what the scheduler reads), then one comment signed `auto-land`.
+    # Nothing here writes a ticket file, because a service deployment has none.
+    write_service_workflow!()
+    {client, writes} = service_writes()
+    {land, calls} = land_fake({:ok, %{number: 7, url: pr_url(7)}})
+
+    report =
+      AutoLand.run_once(
+        settings: settings(),
+        tickets: fn _opts -> {:ok, [service_ticket()]} end,
+        client: client,
+        land: land
+      )
+
+    assert report.candidates == 1
+    assert report.merged == 1
+    assert report.reported["SYM-7"] == :merged
+
+    assert service_calls(writes) == [
+             %{method: :patch, url: "http://127.0.0.1:4997/tickets/SYM-7", payload: %{"state" => "done"}},
+             %{
+               method: :post,
+               url: "http://127.0.0.1:4997/tickets/SYM-7/comments",
+               payload: %{"author" => "auto-land", "body" => landing_note()}
+             }
+           ]
+
+    assert land_calls(calls) == [%{pr_url: pr_url(7), branch: "symphony/SYM-7"}]
+  end
+
+  test "a service that refuses the recording says so once, and the merge still counts" do
+    # The merge happened and the ticket does not say so: reported in that order, and reported once --
+    # the next pass must not try to land a pull request that is already gone.
+    write_service_workflow!()
+    client = fn _method, _url, _payload -> {:error, {:ticket_service_unreachable, %{reason: :econnrefused}}} end
+    {land, _calls} = land_fake({:ok, %{number: 7, url: pr_url(7)}})
+
+    log =
+      capture_log(fn ->
+        report =
+          AutoLand.run_once(
+            settings: settings(),
+            tickets: fn _opts -> {:ok, [service_ticket()]} end,
+            client: client,
+            land: land
+          )
+
+        assert report.merged == 1
+        assert match?({:unrecorded, _reason}, report.reported["SYM-7"])
+
+        second =
+          AutoLand.run_once(
+            settings: settings(),
+            tickets: fn _opts -> {:ok, [service_ticket()]} end,
+            client: client,
+            land: land,
+            reported: report.reported
+          )
+
+        assert second.merged == 1
+      end)
+
+    assert occurrences(log, "auto-land: pull request was merged for SYM-7") == 1
+    assert log =~ "the ticket service did not answer"
+  end
+
   # ---- fixtures -------------------------------------------------------------------------------
 
   defp settings(overrides \\ []) do
@@ -402,6 +472,79 @@ defmodule SymphonyElixir.AutoLandTest do
   defp link(id) do
     number = id |> String.replace(~r/\D/, "") |> String.to_integer()
     ~s(links: [{url: "#{pr_url(number)}", title: "PR ##{number}", kind: pr}])
+  end
+
+  # A ticket as the console's reader renders one for a service-backed deployment: the fields the sweep
+  # judges, with the pull request and the branch the reader would have found.
+  defp service_ticket do
+    %{
+      identifier: "SYM-7",
+      id: "7",
+      state: "in-review",
+      labels: ["auto-land"],
+      pr_url: pr_url(7),
+      branch_name: "symphony/SYM-7"
+    }
+  end
+
+  # The service deployment's write path, stubbed: one three-argument client, recording every call in an
+  # agent -- the writes happen inside the sweep's own process, so they are read back rather than
+  # received. No read is answered, because the sweep's read is injected as `:tickets` above.
+  #
+  # The answer is the two shapes the adapter reads out of a write: a PATCH answers the ticket with the
+  # state it holds (which is what `write_state/3` reports), and a comment answers with its id and author.
+  defp service_writes do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    client = fn method, url, payload ->
+      Agent.update(agent, &(&1 ++ [%{method: method, url: url, payload: payload}]))
+      {:ok, %{status: 200, body: write_answer(method)}}
+    end
+
+    {client, agent}
+  end
+
+  defp write_answer(:patch) do
+    %{"id" => "7", "identifier" => "SYM-7", "state" => %{"name" => "done", "display_name" => "done"}}
+  end
+
+  defp write_answer(_post) do
+    %{"id" => 11, "ticket_id" => 7, "author" => "auto-land", "body" => "landed"}
+  end
+
+  defp service_calls(agent), do: Agent.get(agent, & &1)
+
+  # The service deployment's workflow: the tracker is the service, so the sweep's read and the writes
+  # both belong to that kind. `provider.url` is a port nothing is listening on, and nothing here opens a
+  # socket -- every request is answered by the injected client.
+  defp write_service_workflow! do
+    root = Path.join(System.tmp_dir!(), "auto-land-service-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    workflow = Path.join(root, "WORKFLOW.md")
+
+    File.write!(workflow, """
+    ---
+    tracker:
+      kind: ticket_service
+      provider:
+        url: "http://127.0.0.1:4997"
+      active_states: [ready, in-progress]
+      terminal_states: [done, cancelled]
+    ---
+
+    Test prompt.
+    """)
+
+    Workflow.set_workflow_file_path(workflow)
+    :ok
+  end
+
+  # The landing the sweep writes on the ticket, in the page's own words.
+  defp landing_note do
+    "auto-land landed pull request 7 (#{pr_url(7)}). Land verdict: ok (exit 0). " <>
+      "Result: squash-merged with the branch deleted. This ticket was moved to done."
   end
 
   defp pr_url(number), do: "https://github.com/me/repo/pull/#{number}"

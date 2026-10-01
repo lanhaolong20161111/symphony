@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Tracker do
   """
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Janitor.GateTool
+  alias SymphonyElixir.GateTool
   alias SymphonyElixir.Tracker.Issue
 
   @adapters %{
@@ -42,9 +42,20 @@ defmodule SymphonyElixir.Tracker do
   @callback secret_environment_names(map()) :: [String.t()]
   @callback validate_config(map()) :: :ok | {:error, term()}
 
+  # The page's write pair, beside the agent's own two. An adapter that can write implements them and
+  # answers the same error vocabulary its reads use; one that cannot simply does not, and this boundary
+  # answers the honest refusal (`write_state/3`, `write_comment/4`). The file tracker is the kind that
+  # does not: a ticket file's only safe writer is the host's own (`SymphonyElixir.Janitor`), which is
+  # why the console's write seam sends a `file` deployment there rather than through here.
+  @callback write_state(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  @callback write_comment(String.t(), String.t(), String.t(), keyword()) ::
+              {:ok, term()} | {:error, term()}
+
   @optional_callbacks agent_tool_specs: 0,
                       execute_agent_tool: 3,
-                      validate_config: 1
+                      validate_config: 1,
+                      write_state: 3,
+                      write_comment: 4
 
   # The host's own agent-facing tools, advertised beside whatever the adapter offers. Each answers
   # `tool_specs/0` (its spec, or `[]` when the project declares nothing to run), `handles?/1`
@@ -61,6 +72,78 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @doc """
+  Moves a ticket to `state` through the configured adapter: the console's state picker on one side, the
+  agent's own `ticket_state` tool on the other, both over the adapter's one write path.
+
+  `opts` is handed to the adapter unchanged. Two keys are the ones this boundary and its callers agree
+  on: `:tracker_settings` names the tracker block to write to (absent: the running workflow's own), and
+  `:client` replaces the adapter's transport, which is what keeps a page test off a socket.
+
+  An adapter that does not implement the callback -- the file tracker, and every kind that reads only
+  -- answers `{:error, {:tracker_write_unsupported, kind, :write_state}}`: a reason a page can render,
+  naming the kind and the call, rather than an `UndefinedFunctionError` taken out of a LiveView.
+  """
+  @spec write_state(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def write_state(ref, state, opts \\ []) do
+    dispatch_write(:write_state, [ref, state, opts], opts)
+  end
+
+  @doc """
+  Appends `body` to the ticket, signed `author`, through the configured adapter -- the comment box's
+  call and the landing's own trace, for the same reason `write_state/3` exists.
+
+  The answer is whatever the adapter's write answered, and a kind that cannot write answers
+  `{:error, {:tracker_write_unsupported, kind, :write_comment}}`.
+  """
+  @spec write_comment(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def write_comment(ref, body, author, opts \\ []) do
+    dispatch_write(:write_comment, [ref, body, author, opts], opts)
+  end
+
+  @doc """
+  The adapter a set of tracker settings names, or the running workflow's own when none is given.
+
+  Public because the console's write seam has to ask the same question its read path does: *which*
+  tracker is this write for -- this instance's, or the named project's `?project=` selected. One
+  resolver, so a write cannot land in a different tracker than the ticket was read from. Settings that
+  name no kind at all are `{:error, :invalid_tracker_settings}`, which is the same answer the reader
+  gives them.
+  """
+  # The clauses are spelled with their spec on the first of them rather than behind a bodyless function
+  # head: `specs.check` reads a spec only when it is adjacent to a clause, and `adapter/1` and the
+  # configured `adapter/0` below cannot be one function -- a default on the one-argument form is what
+  # Elixir refuses as a conflict.
+  @spec adapter(map() | nil) :: {:ok, module()} | {:error, term()}
+  def adapter(nil), do: {:ok, adapter()}
+  def adapter(%{kind: kind}), do: adapter_for_kind(kind)
+  def adapter(_tracker_settings), do: {:error, :invalid_tracker_settings}
+
+  defp dispatch_write(callback, args, opts) do
+    with {:ok, adapter} <- adapter(Keyword.get(opts, :tracker_settings)),
+         :ok <- writes?(adapter, callback) do
+      apply(adapter, callback, args)
+    end
+  end
+
+  # The kind travels in the reason rather than only the module, because "the file tracker cannot write
+  # this" is what a page has to say and `SymphonyElixir.Tracker.File` is not a word a workflow uses.
+  defp writes?(adapter, callback) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, callback, callback_arity(callback)) do
+      :ok
+    else
+      {:error, {:tracker_write_unsupported, tracker_kind(adapter), callback}}
+    end
+  end
+
+  defp callback_arity(:write_state), do: 3
+  defp callback_arity(:write_comment), do: 4
+
+  defp tracker_kind(adapter) do
+    Enum.find_value(@adapters, adapter, fn {kind, module} -> if module == adapter, do: kind end)
   end
 
   @doc """

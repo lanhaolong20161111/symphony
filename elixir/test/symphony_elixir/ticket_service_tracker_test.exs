@@ -602,6 +602,95 @@ defmodule SymphonyElixir.TicketServiceTrackerTest do
     end
   end
 
+  # ── the write seam the console's page comes in through ──────────────────────
+
+  # `write_state/3` and `write_comment/4` are the adapter's half of the tracker boundary's optional
+  # write pair. They are the same functions the two tools are envelopes over, so what these tests pin is
+  # that the page's path is the tool's path: one method, one URL, one body, one error vocabulary.
+  describe "write_state and write_comment: the seam the page and the tool share" do
+    test "write_state PATCHes the ticket, at the tool's own URL and with the tool's own body" do
+      client = service_writes(200, ticket(%{"state" => state_object("in-review")}))
+
+      assert {:ok, answered} =
+               TicketService.write_state("SYM-7", "in-review", client: client, tracker_settings: settings())
+
+      assert_received {:requested, :patch, url, body}
+      assert url == @base_url <> "/tickets/SYM-7"
+      assert body == %{"state" => "in-review"}
+      assert answered == %{"ticket" => "SYM-7", "state" => "in-review"}
+
+      # The same request the agent's tool makes, to the byte: the body is built in one place.
+      tool = run("ticket_state", %{"ticket" => "SYM-7", "state" => "in-review"}, client)
+
+      assert_received {:requested, :patch, ^url, ^body}
+      assert Jason.decode!(tool["output"]) == answered
+    end
+
+    test "write_comment POSTs the author and the body, signed with the caller's author" do
+      client = service_writes(201, comment(%{"author" => "operator", "body" => "hello"}))
+
+      assert {:ok, answered} =
+               TicketService.write_comment("SYM-7", "hello", "operator",
+                 client: client,
+                 tracker_settings: settings()
+               )
+
+      assert_received {:requested, :post, url, sent}
+      assert url == @base_url <> "/tickets/SYM-7/comments"
+      assert sent == %{"author" => "operator", "body" => "hello"}
+      assert answered == %{"ticket" => "SYM-7", "comment" => %{"id" => "3", "author" => "operator"}}
+    end
+
+    test "the ref is the ticket's identifier, one encoded path segment, as the tools send it" do
+      client = service_writes(200, ticket(%{"state" => state_object("done")}))
+
+      assert {:ok, _answered} =
+               TicketService.write_state("SYM 7/x", "done", client: client, tracker_settings: settings())
+
+      assert_received {:requested, :patch, url, _body}
+      assert url == @base_url <> "/tickets/SYM%207%2Fx"
+    end
+
+    test "the failures are the tools' failures, because there is one write path" do
+      missing = %{"error" => %{"code" => "not_found", "message" => "no ticket with identifier \"SYM-9\""}}
+
+      assert {:error, {:ticket_service_ticket_not_found, "SYM-9"}} =
+               TicketService.write_state("SYM-9", "done",
+                 client: service_writes(404, missing),
+                 tracker_settings: settings()
+               )
+
+      assert {:error, {:ticket_service_http, 500, %{"error" => %{"code" => "db"}}}} =
+               TicketService.write_comment("SYM-9", "x", "operator",
+                 client: service_writes(500, %{"error" => %{"code" => "db"}}),
+                 tracker_settings: settings()
+               )
+
+      assert {:error, {:ticket_service_unreachable, :econnrefused}} =
+               TicketService.write_state("SYM-9", "done",
+                 client: fn _method, _url, _body -> {:error, {:ticket_service_unreachable, :econnrefused}} end,
+                 tracker_settings: settings()
+               )
+
+      # A URL the workflow did not declare refuses before any client is asked.
+      assert {:error, :missing_ticket_service_url} =
+               TicketService.write_state("SYM-9", "done",
+                 client: refusing_client(),
+                 tracker_settings: %{provider: %{}}
+               )
+    end
+
+    test "an answer that names no state is a failure, and the wire call happened exactly once" do
+      client = service_writes(200, %{"identifier" => "SYM-7"})
+
+      assert {:error, {:ticket_service_invalid_payload, %{"identifier" => "SYM-7"}}} =
+               TicketService.write_state("SYM-7", "done", client: client, tracker_settings: settings())
+
+      assert_received {:requested, :patch, _, _}
+      refute_received {:requested, :patch, _, _}
+    end
+  end
+
   describe "the failures the two tools report" do
     test "a 404 is a readable failure that names the ticket, for both tools" do
       # Verbatim what this service answers for a value it cannot read (`store_error.ex:45-48`): the same

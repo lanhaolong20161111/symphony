@@ -1,6 +1,10 @@
-defmodule SymphonyElixir.Janitor.GateTool do
+defmodule SymphonyElixir.GateTool do
   @moduledoc """
-  The janitor's second agent-facing tool: "run this project's declared gate".
+  The host's second agent-facing tool: "run this project's declared gate".
+
+  It is a **host** tool, not a tracker capability and not the janitor's: it lives at the top of
+  `SymphonyElixir` because it is advertised for every tracker kind, whether the project's tickets are
+  files or rows in the ticket service.
 
   An agent's turn is sandboxed, and on this host `mix` cannot even reach compilation there:
   `Mix.Sync.PubSub` calls `Mix.Utils.detect_user_id!/0`, which stats the user profile directory, and
